@@ -22,8 +22,13 @@ if (Test-Path (Join-Path $localLibclang 'libclang.dll')) {
 $npmArgs = @('run', 'tauri', 'dev')
 
 if ($Cuda) {
-  if (-not $env:CUDA_PATH -or -not (Test-Path $env:CUDA_PATH)) {
-    Write-Warning "CUDA_PATH is not set or does not exist; the cuda feature build will fail without the CUDA Toolkit installed. See docs/transcription.md."
+  # A terminal opened before the toolkit was installed does not see CUDA_PATH yet.
+  if (-not $env:CUDA_PATH) {
+    $env:CUDA_PATH = [Environment]::GetEnvironmentVariable('CUDA_PATH', 'Machine')
+  }
+  if (-not $env:CUDA_PATH -or -not (Test-Path (Join-Path $env:CUDA_PATH 'bin\nvcc.exe'))) {
+    Write-Error "CUDA Toolkit not found (CUDA_PATH unset or nvcc.exe missing). Install it (e.g. 'winget install Nvidia.CUDA'), or run without -Cuda for the CPU build. See docs/transcription.md." -ErrorAction Continue
+    exit 1
   } else {
     # Put the CUDA Toolkit's bin (nvcc, and at runtime cudart/cublas DLLs) on
     # PATH for both the CMake build and the running app.
