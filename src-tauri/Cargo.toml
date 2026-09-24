@@ -53,3 +53,8 @@ windows = { version = "0.61.3", features = [
 
 [target.'cfg(not(windows))'.dependencies]
 sherpa-onnx = "=1.13.8"
+
+# Dependency debug info dominates target/ size (whisper.cpp, sherpa-onnx, tauri).
+# Keep full debug info for this crate only.
+[profile.dev.package."*"]
+debug = false
