@@ -22,9 +22,13 @@ if (Test-Path (Join-Path $localLibclang 'libclang.dll')) {
 $npmArgs = @('run', 'tauri', 'dev')
 
 if ($Cuda) {
-  # A terminal opened before the toolkit was installed does not see CUDA_PATH yet.
-  if (-not $env:CUDA_PATH) {
-    $env:CUDA_PATH = [Environment]::GetEnvironmentVariable('CUDA_PATH', 'Machine')
+  # A terminal opened before the toolkit was installed does not see the CUDA
+  # variables yet. MSBuild's CUDA targets resolve the toolkit through the
+  # versioned CUDA_PATH_Vxx_y, not CUDA_PATH, so import all of them.
+  foreach ($entry in [Environment]::GetEnvironmentVariables('Machine').GetEnumerator()) {
+    if ($entry.Key -like 'CUDA_PATH*' -and -not (Test-Path "env:$($entry.Key)")) {
+      Set-Item "env:$($entry.Key)" $entry.Value
+    }
   }
   if (-not $env:CUDA_PATH -or -not (Test-Path (Join-Path $env:CUDA_PATH 'bin\nvcc.exe'))) {
     Write-Error "CUDA Toolkit not found (CUDA_PATH unset or nvcc.exe missing). Install it (e.g. 'winget install Nvidia.CUDA'), or run without -Cuda for the CPU build. See docs/transcription.md." -ErrorAction Continue
@@ -32,6 +36,9 @@ if ($Cuda) {
   } else {
     # Put the CUDA Toolkit's bin (nvcc, and at runtime cudart/cublas DLLs) on
     # PATH for both the CMake build and the running app.
+    # MSBuild reads environment variables as properties; pin the toolkit so the
+    # Visual Studio generator never falls back to an empty CudaToolkitDir.
+    $env:CudaToolkitDir = $env:CUDA_PATH.TrimEnd('\') + '\'
     $cudaBin = Join-Path $env:CUDA_PATH 'bin'
     if (Test-Path $cudaBin) {
       $env:PATH = "$cudaBin;$env:PATH"
