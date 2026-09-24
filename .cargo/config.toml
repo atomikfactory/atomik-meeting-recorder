@@ -1,0 +1,8 @@
+# Keep packaged builds on a conservative CPU baseline. Distributors may opt in
+# to host-specific acceleration outside this repository.
+[env]
+GGML_NATIVE = "OFF"
+GGML_AVX = "OFF"
+GGML_AVX2 = "OFF"
+GGML_FMA = "OFF"
+GGML_F16C = "OFF"

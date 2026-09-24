@@ -1,0 +1,51 @@
+[package]
+name = "meeting-recorder"
+version = "0.1.0"
+description = "A local-first meeting recorder"
+edition = "2021"
+
+[lib]
+name = "meeting_recorder_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+cpal = "0.18.2"
+chrono = "0.4.45"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hound = "3.5"
+rubato = "5.0"
+whisper-rs = "0.16.0"
+tauri-plugin-dialog = "2"
+
+[target.'cfg(windows)'.dependencies]
+# The upstream 1.13.8 static Windows archive is built with /MT, while
+# whisper-rs builds its C++ backend with /MD.  Use Sherpa's supported shared
+# Windows artifact so both native backends can coexist; its build script puts
+# the required DLLs beside the executable. Other platforms retain static.
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+# Kept on the version already present transitively in Cargo.lock.
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+sherpa-onnx = "=1.13.8"

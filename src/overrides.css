@@ -1,0 +1,64 @@
+/* Compact laptop view and accessible keyboard/motion defaults. */
+main {
+  padding: 22px 56px 36px;
+}
+.hero {
+  margin: 28px 0 20px;
+}
+.hero-art {
+  width: 150px;
+  height: 128px;
+}
+.hero-art svg {
+  width: 72px;
+}
+.rings {
+  width: 122px;
+  height: 122px;
+}
+.action-row {
+  margin: 18px 0 36px;
+}
+.capabilities {
+  margin: -18px 0 28px;
+}
+.empty {
+  padding: 30px 20px;
+}
+.detection-panel {
+  margin: 16px 0 28px;
+  padding: 20px 24px;
+  border: 1px solid #dbe6df;
+  border-radius: 16px;
+  background: #f0f5ef;
+  overflow-wrap: anywhere;
+}
+.detection-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.detection-panel h3 { margin: 0; font-size: 17px; }
+.detection-panel .kicker { margin: 0 0 6px; font-size: 10px; }
+.detection-panel p:not(.kicker) { font-size: 13px; line-height: 1.5; margin: 8px 0 0; }
+.detection-panel p:empty { display: none; }
+#detection-countdown { font-size: 24px; font-variant-numeric: tabular-nums; color: #0d746e; }
+.detection-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.detection-panel[data-phase="awaiting_approval"] { border-color: #0d746e; box-shadow: 0 0 0 1px #0d746e; }
+.detection-panel[data-phase="error"], .detection-panel[data-phase="suppressed"] { background: #fbf4e9; border-color: #e9ddc9; }
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid #76b8ac;
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}
