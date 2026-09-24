@@ -12,7 +12,7 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
     thread,
@@ -173,6 +173,11 @@ struct CaptureSink {
     meter: Arc<CaptureMeter>,
     source_name: String,
     started: Instant,
+    /// Flips to true once the frame timeline has observed a packet that
+    /// needed no correction, i.e. capture has caught up with real time.
+    /// `route_stream_error` uses it to treat driver-reported discontinuities
+    /// from the start-up window the same way the timeline itself does.
+    settled: Arc<AtomicBool>,
 }
 struct Active {
     rec: Recording,
@@ -413,6 +418,7 @@ impl Engine {
                 let timestamp_adjustments = Arc::new(AtomicU64::new(0));
                 let last_buffer_ms = Arc::new(AtomicU64::new(0));
                 let meter = Arc::new(CaptureMeter::default());
+                let settled = Arc::new(AtomicBool::new(false));
                 let sink = CaptureSink {
                     sender: writer.sender.clone(),
                     errors: errors.clone(),
@@ -423,6 +429,7 @@ impl Engine {
                     meter: meter.clone(),
                     source_name: track.name.clone(),
                     started,
+                    settled,
                 };
                 active.writers.push(writer);
                 active.drops.push(dropped);
@@ -703,8 +710,9 @@ impl CaptureDevice for NativeDevice {
         let errors = sink.errors.clone();
         let gaps = sink.gaps.clone();
         let source_name = sink.source_name.clone();
+        let error_settled = sink.settled.clone();
         let error = move |error: cpal::Error| {
-            route_stream_error(error, &source_name, &errors, &gaps);
+            route_stream_error(error, &source_name, &errors, &gaps, &error_settled);
         };
         macro_rules! build {
             ($ty:ty,$convert:expr) => {{
@@ -747,6 +755,9 @@ impl CaptureDevice for NativeDevice {
                                 return;
                             }
                         };
+                        if clock.is_settled() {
+                            sink.settled.store(true, Ordering::Relaxed);
+                        }
                         let samples: Vec<f32> = data.iter().map($convert).collect();
                         sink.meter
                             .observe(&samples, sink.started.elapsed().as_millis() as u64);
@@ -783,11 +794,20 @@ fn route_stream_error(
     source_name: &str,
     errors: &mpsc::SyncSender<String>,
     gaps: &AtomicU64,
+    settled: &AtomicBool,
 ) {
     // CPAL's WASAPI backend continues delivering packets after a discontinuity.
     // Keep recording but never label the resulting audio gap-free.
     if error.kind() == cpal::ErrorKind::Xrun {
-        gaps.fetch_add(1, Ordering::Relaxed);
+        // CPAL already ignores AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY on the
+        // very first WASAPI buffer (its device_position is still 0 then), but
+        // real devices routinely flag the buffer right after that one too --
+        // the boundary between device pre-roll and steady delivery, not lost
+        // audio. Until the frame timeline has seen a packet land on schedule
+        // (`settled`), treat a reported discontinuity as start-up noise.
+        if settled.load(Ordering::Relaxed) {
+            gaps.fetch_add(1, Ordering::Relaxed);
+        }
     } else {
         let _ = errors.try_send(format!("{source_name}: audio stream error: {error}"));
     }
@@ -799,6 +819,9 @@ struct PacketClock {
     timeline: FrameTimeline,
 }
 impl PacketClock {
+    fn is_settled(&self) -> bool {
+        self.timeline.is_settled()
+    }
     fn offset(
         &mut self,
         info: &cpal::InputCallbackInfo,
@@ -811,13 +834,16 @@ impl PacketClock {
         let first = match self.first {
             Some(first) => first,
             None => {
-                let latency = match stamp.callback.checked_duration_since(stamp.capture) {
-                    Some(latency) => latency,
-                    None => {
-                        timestamp_adjustments.fetch_add(1, Ordering::Relaxed);
-                        Duration::ZERO
-                    }
-                };
+                // This is necessarily the very first callback (`self.first`
+                // is only ever `None` here). There is no prior anchor to be
+                // consistent with yet, so a callback/capture ordering that
+                // cannot be subtracted is a units quirk of this one packet,
+                // not a lost interval: fall back silently instead of
+                // recording a spurious start-up adjustment.
+                let latency = stamp
+                    .callback
+                    .checked_duration_since(stamp.capture)
+                    .unwrap_or(Duration::ZERO);
                 self.first_frame = (started.elapsed().saturating_sub(latency).as_secs_f64()
                     * f64::from(rate))
                 .round() as u64;
@@ -833,8 +859,13 @@ impl PacketClock {
             None => {
                 // A driver timestamp can reset before the initial anchor. Do
                 // not leave this stream permanently timestamp-less: anchor the
-                // new epoch to the already-emitted frame cursor.
-                timestamp_adjustments.fetch_add(1, Ordering::Relaxed);
+                // new epoch to the already-emitted frame cursor. Only counted
+                // once the timeline has already caught up with real time --
+                // during start-up this is the same buffering artifact as the
+                // very first packet, just observed one callback later.
+                if self.timeline.is_settled() {
+                    timestamp_adjustments.fetch_add(1, Ordering::Relaxed);
+                }
                 self.first = Some(stamp.capture);
                 self.first_frame = self.timeline.next;
                 self.timeline.reanchor_measurement_epoch();
@@ -852,6 +883,12 @@ impl PacketClock {
     }
 }
 
+/// Bounds the start-up grace below: if capture never lands on schedule within
+/// this many callbacks, corrections stop being treated as free start-up noise
+/// even though the timeline has technically never "settled". This keeps a
+/// persistently broken stream from silently going unreported forever.
+const SETTLE_GRACE_PACKETS: u32 = 5;
+
 /// The emitted packet order is the durable clock. CPAL timestamps are used to
 /// retain substantive forward gaps, but callback wake-up jitter or a device
 /// timestamp reset must never create a WAV overlap or discard captured audio.
@@ -860,8 +897,19 @@ struct FrameTimeline {
     next: u64,
     last_measured: Option<u64>,
     rebase_frames: u64,
+    /// True once a packet has landed inside the jitter budget on its own,
+    /// i.e. capture has caught up with real time. Before that, every stream
+    /// starts behind frame 0 by its own device buffering/start-up latency;
+    /// that gap has nothing prior to be discontinuous with, so it is not
+    /// counted until the timeline demonstrates it has stabilized.
+    settled: bool,
+    packets: u32,
 }
 impl FrameTimeline {
+    fn is_settled(&self) -> bool {
+        self.settled
+    }
+
     fn reanchor_measurement_epoch(&mut self) {
         self.last_measured = None;
         self.rebase_frames = 0;
@@ -879,6 +927,12 @@ impl FrameTimeline {
             return Err("Capture callback had an invalid frame count.".into());
         }
         let tolerance = u64::from(rate / 100).max(2); // 10 ms: timestamp jitter, not audio loss.
+        self.packets = self.packets.saturating_add(1);
+        // While unsettled, a correction is presumed to be device/driver
+        // buffering catching up, not a genuine loss; report it once capture
+        // has proven it can land on schedule, or once the grace window has
+        // run out without that ever happening.
+        let counts = self.settled || self.packets > SETTLE_GRACE_PACKETS;
         let mut offset = self.next;
         if let Some(measured) = measured {
             let reset = self
@@ -887,7 +941,9 @@ impl FrameTimeline {
             if reset {
                 // Preserve buffered audio on a device/QPC reset. Re-anchor the
                 // measurement, retaining the monotonically emitted frame clock.
-                discontinuities.fetch_add(1, Ordering::Relaxed);
+                if counts {
+                    discontinuities.fetch_add(1, Ordering::Relaxed);
+                }
                 self.rebase_frames = self.next.saturating_sub(measured);
             }
             let rebased = measured.saturating_add(self.rebase_frames);
@@ -902,10 +958,14 @@ impl FrameTimeline {
                     );
                 }
                 offset = rebased;
-                discontinuities.fetch_add(1, Ordering::Relaxed);
+                if counts {
+                    discontinuities.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                self.settled = true;
             }
             self.last_measured = Some(measured);
-        } else {
+        } else if counts {
             discontinuities.fetch_add(1, Ordering::Relaxed);
         }
         self.next = offset

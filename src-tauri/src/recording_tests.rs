@@ -46,11 +46,14 @@ fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
     };
     engine.start(vec![source("a")]).unwrap();
     let (faults, fault_rx) = mpsc::sync_channel(1);
+    // Settled: this Xrun is standing in for one that happens well after the
+    // stream has caught up with real time, so it must still be counted.
     route_stream_error(
         cpal::ErrorKind::Xrun.into(),
         "a",
         &faults,
         &engine.active.as_ref().unwrap().gaps[0],
+        &AtomicBool::new(true),
     );
     assert!(fault_rx.try_recv().is_err());
     engine.monitor();
@@ -70,12 +73,36 @@ fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
         "a",
         &faults,
         &AtomicU64::new(0),
+        &AtomicBool::new(true),
     );
     let error = fault_rx.try_recv().unwrap();
     assert!(error.contains("a") && error.contains("audio stream error"));
     drop(snapshot);
     drop(engine);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn route_stream_error_ignores_unsettled_first_xrun() {
+    // CPAL already ignores AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY on WASAPI's
+    // very first buffer (device_position == 0), but real hardware routinely
+    // flags the buffer right after that -- the boundary between device
+    // pre-roll and steady delivery. Until the capture timeline has settled,
+    // that reported discontinuity must not be counted.
+    let (faults, _fault_rx) = mpsc::sync_channel(1);
+    let gaps = AtomicU64::new(0);
+    let settled = AtomicBool::new(false);
+    route_stream_error(cpal::ErrorKind::Xrun.into(), "a", &faults, &gaps, &settled);
+    assert_eq!(gaps.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn route_stream_error_counts_xrun_once_settled() {
+    let (faults, _fault_rx) = mpsc::sync_channel(1);
+    let gaps = AtomicU64::new(0);
+    let settled = AtomicBool::new(true);
+    route_stream_error(cpal::ErrorKind::Xrun.into(), "a", &faults, &gaps, &settled);
+    assert_eq!(gaps.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -190,6 +217,70 @@ fn frame_timeline_accepts_first_late_loopback_callback() {
 }
 
 #[test]
+fn frame_timeline_first_packet_offset_is_not_a_discontinuity() {
+    // Every real capture starts with `next == 0` while the device's own
+    // start-up latency/buffer prefill already places its first measured
+    // timestamp well ahead of frame 0 (tens of ms is typical; this uses 20ms
+    // @ 48kHz). There is nothing before the first packet to be discontinuous
+    // with, so establishing the anchor must not itself count as a gap.
+    let mut clock = FrameTimeline::default();
+    let adjustments = AtomicU64::new(0);
+    let offset = clock.offset(Some(960), 48_000, 480, 960, &adjustments).unwrap();
+    assert_eq!(offset, 960);
+    assert_eq!(adjustments.load(Ordering::Relaxed), 0);
+    // This first packet did not land within budget, so the timeline is not
+    // yet "settled" -- a second packet that also needs a small correction is
+    // still start-up buffering, not a new discontinuity.
+    assert!(!clock.is_settled());
+}
+
+#[test]
+fn frame_timeline_settles_then_counts_a_genuine_gap() {
+    // A packet that lands within the jitter budget marks the timeline
+    // settled; only after that does a forward jump count as a real gap
+    // rather than continued start-up catch-up.
+    let mut clock = FrameTimeline::default();
+    let adjustments = AtomicU64::new(0);
+    assert_eq!(
+        clock.offset(Some(0), 48_000, 480, 0, &adjustments).unwrap(),
+        0
+    );
+    assert!(clock.is_settled());
+    assert_eq!(
+        clock
+            .offset(Some(48_000), 48_000, 480, 48_000, &adjustments)
+            .unwrap(),
+        48_000
+    );
+    assert_eq!(adjustments.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn frame_timeline_forces_settlement_after_grace_window() {
+    // If capture never once lands on schedule, the start-up grace must not
+    // suppress discontinuities forever: after SETTLE_GRACE_PACKETS callbacks
+    // corrections are counted even though the timeline never "settled"
+    // naturally.
+    let mut clock = FrameTimeline::default();
+    let adjustments = AtomicU64::new(0);
+    let mut next = 0u64;
+    for _ in 0..SETTLE_GRACE_PACKETS {
+        let measured = next + 960; // Always 20ms further ahead than expected.
+        next = clock
+            .offset(Some(measured), 48_000, 480, measured, &adjustments)
+            .unwrap()
+            + 480;
+    }
+    assert_eq!(adjustments.load(Ordering::Relaxed), 0);
+    assert!(!clock.is_settled());
+    let measured = next + 960;
+    clock
+        .offset(Some(measured), 48_000, 480, measured, &adjustments)
+        .unwrap();
+    assert_eq!(adjustments.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn frame_timeline_long_clock_drift_stays_monotonic() {
     let mut clock = FrameTimeline::default();
     let adjustments = AtomicU64::new(0);
@@ -231,6 +322,8 @@ fn frame_timeline_rejects_unbounded_silence_and_overflow() {
         next: u64::MAX - 4,
         last_measured: None,
         rebase_frames: 0,
+        settled: true,
+        packets: 10,
     };
     assert!(overflowing
         .offset(None, 48_000, 8, 0, &adjustments)
