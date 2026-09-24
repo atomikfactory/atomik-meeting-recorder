@@ -13,12 +13,28 @@ use std::{
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
 };
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+/// Whether this build was compiled with GPU (CUDA) support. Runtime GPU use
+/// still depends on a working NVIDIA driver/runtime and falls back to CPU if
+/// context creation fails.
+const GPU_BUILD: bool = cfg!(feature = "cuda");
+
+const BACKEND_CPU: u8 = 1;
+const BACKEND_CUDA: u8 = 2;
+
+fn backend_label_for(code: u8) -> &'static str {
+    if code == BACKEND_CUDA {
+        "cuda"
+    } else {
+        "cpu (AVX2)"
+    }
+}
 
 const TARGET_RATE: u32 = 16_000;
 const MAX_CHUNK_SECONDS: u32 = 60;
@@ -33,16 +49,33 @@ pub trait TranscriptionEngine: Send + Sync {
         cancelled: &AtomicBool,
         progress: &mut dyn FnMut(u8),
     ) -> Result<Transcript, String>;
+
+    /// The backend actually used by the most recent (or, if none has run yet,
+    /// the backend a new request would attempt first). Human-readable, shown
+    /// next to the model status in the UI; not a stable identifier.
+    fn backend_label(&self) -> String {
+        backend_label_for(BACKEND_CPU).to_string()
+    }
 }
 
-/// Stateless CPU implementation. The Whisper model context is created once per
-/// request (not once per audio chunk) and remains local to the calling worker.
-#[derive(Default)]
-pub struct LocalWhisperEngine;
+/// The Whisper model context is created once per request (not once per audio
+/// chunk) and remains local to the calling worker. `backend` records which
+/// device the most recent request actually used so the UI can show it.
+pub struct LocalWhisperEngine {
+    backend: AtomicU8,
+}
+
+impl Default for LocalWhisperEngine {
+    fn default() -> Self {
+        Self {
+            backend: AtomicU8::new(BACKEND_CPU),
+        }
+    }
+}
 
 impl LocalWhisperEngine {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -65,10 +98,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
         // Redirect library diagnostics away from stdout/stderr when no application
         // logging backend is configured. This is process-global but idempotent.
         whisper_rs::install_logging_hooks();
-        let mut context_params = WhisperContextParameters::default();
-        context_params.use_gpu(false);
-        let context = WhisperContext::new_with_params(&request.model_path, context_params)
-            .map_err(|error| format!("Could not load local Whisper model: {error}"))?;
+        let context = self.create_context(&request.model_path)?;
         let mut segments = Vec::new();
         let mut warnings = Vec::new();
         let total = tracks.len().max(1) as u32;
@@ -114,6 +144,41 @@ impl TranscriptionEngine for LocalWhisperEngine {
             segments,
             warnings,
         })
+    }
+
+    fn backend_label(&self) -> String {
+        backend_label_for(self.backend.load(Ordering::Acquire)).to_string()
+    }
+}
+
+impl LocalWhisperEngine {
+    /// Creates the Whisper context, preferring GPU when this build was
+    /// compiled with the `cuda` feature. If GPU context creation fails at
+    /// runtime (missing driver/runtime, unsupported device, etc.) this falls
+    /// back to CPU instead of failing the whole transcription job.
+    fn create_context(&self, model_path: &Path) -> Result<WhisperContext, String> {
+        if GPU_BUILD {
+            let mut gpu_params = WhisperContextParameters::default();
+            gpu_params.use_gpu(true);
+            gpu_params.flash_attn(true);
+            match WhisperContext::new_with_params(model_path, gpu_params) {
+                Ok(context) => {
+                    self.backend.store(BACKEND_CUDA, Ordering::Release);
+                    return Ok(context);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "GPU (CUDA) Whisper context unavailable, falling back to CPU: {error}"
+                    );
+                }
+            }
+        }
+        let mut cpu_params = WhisperContextParameters::default();
+        cpu_params.use_gpu(false);
+        let context = WhisperContext::new_with_params(model_path, cpu_params)
+            .map_err(|error| format!("Could not load local Whisper model: {error}"))?;
+        self.backend.store(BACKEND_CPU, Ordering::Release);
+        Ok(context)
     }
 }
 
@@ -232,10 +297,15 @@ fn transcribe_track(
     Ok(chunks)
 }
 
+/// Whisper's decode work parallelizes well up to roughly a physical-core
+/// count; beyond that, hyperthreads/SMT siblings add diminishing (sometimes
+/// negative) returns. `available_parallelism` reports logical cores, so this
+/// is capped well above the old hardcoded 4 but still bounded to avoid
+/// oversubscribing very large machines.
 fn cpu_threads() -> i32 {
     std::thread::available_parallelism()
-        .map(|value| value.get().min(4) as i32)
-        .unwrap_or(1)
+        .map(|value| value.get().clamp(1, 16) as i32)
+        .unwrap_or(4)
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {

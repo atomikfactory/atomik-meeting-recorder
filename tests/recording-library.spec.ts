@@ -10,7 +10,7 @@ test.beforeEach(async ({ page }) => {
       if (command === "get_settings") return { auto_record: true, start_debounce_seconds: 10, end_grace_seconds: 30, whisper_model: "base", audio_sources: [] };
       if (command === "get_app_state") return { status: "idle", recording_supported: true, detection_supported: false, appflowy_connected: false, recordings_folder: "", tray_available: true, tray_error: null };
       if (command === "get_recording_state") return { status: "idle", active: null, recent: [fixture.record], error: null };
-      if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: fixture.jobs, error: null };
+      if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: fixture.jobs, error: null, backend: "cpu (AVX2)" };
       if (command === "get_detection_state") return { supported: false, enabled: false, phase: "unsupported", detail: "", error: null, seconds_remaining: null, automation_inhibited: false };
       if (command === "get_diarization_state") return { enabled: true, inhibited: false, models: [], jobs: [], error: null };
       if (command === "get_audio_devices") return { backend: "", devices: [], errors: [] };

@@ -10,6 +10,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+# Opt-in GPU transcription. Requires the CUDA Toolkit (nvcc, headers, libs) to
+# be installed and on PATH at build time; NOT enabled by default so CI and
+# non-NVIDIA machines keep building without it. See docs/transcription.md.
+cuda = ["whisper-rs/cuda"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

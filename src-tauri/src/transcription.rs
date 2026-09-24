@@ -59,6 +59,8 @@ pub struct TranscriptionState {
     pub jobs: Vec<JobSummary>,
     pub imported_models: Vec<String>,
     pub error: Option<String>,
+    /// Human-readable transcription backend, e.g. "cpu (AVX2)" or "cuda".
+    pub backend: String,
 }
 pub struct TranscriptionService {
     root: PathBuf,
@@ -68,6 +70,7 @@ pub struct TranscriptionService {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     error: Arc<Mutex<Option<String>>>,
     inhibited: bool,
+    engine: Arc<dyn TranscriptionEngine>,
 }
 impl TranscriptionService {
     pub fn new(
@@ -102,14 +105,15 @@ impl TranscriptionService {
         let mut worker = None;
         if !inhibited {
             if let Some(store) = store.clone() {
-                let (r, s, c, e) = (
+                let (r, s, c, e, worker_engine) = (
                     root.clone(),
                     settings.clone(),
                     cancel.clone(),
                     error.clone(),
+                    engine.clone(),
                 );
                 match thread::Builder::new().name("local-transcription".into()).spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_worker(r, store, s, engine, c, e.clone())));
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_worker(r, store, s, worker_engine, c, e.clone())));
                     if result.is_err() { set_error(&e, Some("Transcription worker stopped unexpectedly. Restart to recover its job.".into())); }
                 }) {
                     Ok(handle) => worker = Some(handle),
@@ -125,6 +129,7 @@ impl TranscriptionService {
             worker: Mutex::new(worker),
             error,
             inhibited,
+            engine,
         }
     }
     fn store(&self) -> Result<&TranscriptionStore, String> {
@@ -201,6 +206,7 @@ impl TranscriptionService {
             jobs,
             imported_models,
             error,
+            backend: self.engine.backend_label(),
         }
     }
     pub fn import_model(&self, source: PathBuf) -> Result<ModelInfo, String> {

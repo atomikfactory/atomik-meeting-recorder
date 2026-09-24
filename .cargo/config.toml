@@ -1,8 +1,16 @@
-# Keep packaged builds on a conservative CPU baseline. Distributors may opt in
-# to host-specific acceleration outside this repository.
+# Baseline is x86-64-v3 (AVX, AVX2, FMA, F16C): supported by essentially every
+# x86_64 CPU sold since ~2013 (Haswell/Excavator onward), which is a safe,
+# portable floor for a desktop app while still giving Whisper's CPU path a
+# large speedup over the pre-Haswell baseline. GGML_NATIVE stays OFF so a
+# built binary is not pinned to the exact CPU it was compiled on. Distributors
+# targeting older hardware may override these outside this repository.
 [env]
 GGML_NATIVE = "OFF"
-GGML_AVX = "OFF"
-GGML_AVX2 = "OFF"
-GGML_FMA = "OFF"
-GGML_F16C = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+# Harmless when CUDA is not enabled (GGML_CUDA=OFF ignores it); cuts CUDA
+# compile time by building only for this dev machine's RTX 3060 Ti (sm_86)
+# instead of every architecture nvcc knows about. Override for other GPUs.
+CMAKE_CUDA_ARCHITECTURES = "86"

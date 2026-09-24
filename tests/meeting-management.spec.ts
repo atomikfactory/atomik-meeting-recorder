@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
       if(command === "get_audio_devices") return {backend:"test",errors:[],devices:[]};
       if(command === "get_recording_state") return {status:"idle",active:null,recent:fixture.recent,error:null,levels:[]};
       if(command === "get_detection_state") return {supported:false,enabled:false,phase:"unsupported",provider:null,detail:"",error:null,seconds_remaining:null,automation_inhibited:false};
-      if(command === "get_transcription_state") return {inhibited:false,model:{key:"base",available:true},jobs:fixture.jobs,error:null};
+      if(command === "get_transcription_state") return {inhibited:false,model:{key:"base",available:true},jobs:fixture.jobs,error:null,backend:"cpu (AVX2)"};
       if(command === "get_diarization_state") return {enabled:false,inhibited:false,models:[],jobs:[],error:null};
       if(command === "rename_recording") { fixture.recent.find((r:any)=>r.recording_id===args.recordingId).meeting_title=args.title; return null; }
       if(command === "delete_recording") { fixture.recent=fixture.recent.filter((r:any)=>r.recording_id!==args.recordingId); return null; }

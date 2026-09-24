@@ -20,7 +20,7 @@ test.beforeEach(async ({ page }) => {
           if (command === "get_app_state") return { status: "detecting", recording_supported: true, detection_supported: true, appflowy_connected: false, recordings_folder: "test", tray_available: true, tray_error: null };
           if (command === "get_audio_devices") return { backend: "Test", errors: [], devices: [{ ...source, is_default: true, default_format: "48000 Hz", selectable: true, unavailable_reason: null }] };
           if (command === "get_recording_state") return { status: "idle", active: null, recent: [], error: null };
-          if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: [], error: null };
+          if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: [], error: null, backend: "cpu (AVX2)" };
           if (command === "get_detection_state") {
             if (fixture.fail) throw new Error("Detector connection unavailable");
             return structuredClone(fixture.detection);

@@ -57,7 +57,7 @@ type RecordingState = {
   levels?: {source_id:string;peak_dbfs:number;rms_dbfs:number;signal_detected:boolean;clipping:boolean;last_buffer_age_ms:number|null}[];
 };
 type TranscriptionJob = { recording_id:string; status:"queued"|"waiting_model"|"transcribing"|"completed"|"failed"; progress:number; error:string|null; markdown_path:string|null; model_key?:string|null };
-type TranscriptionState = { inhibited:boolean; model:{key:string;available:boolean;path?:string|null;error?:string|null};jobs:TranscriptionJob[];imported_models?:string[];error:string|null };
+type TranscriptionState = { inhibited:boolean; model:{key:string;available:boolean;path?:string|null;error?:string|null};jobs:TranscriptionJob[];imported_models?:string[];error:string|null;backend:string };
 type DiarizationState = { enabled:boolean; inhibited:boolean; models:{kind:"segmentation"|"embedding";available:boolean;error:string|null}[];jobs:{recording_id:string;status:string;progress:number;error:string|null;speaker_count:number|null}[];error:string|null };
 type DetectionState = {
   supported: boolean;
@@ -92,7 +92,7 @@ let recordingActionInFlight = false;
 let recordingPollPromise: Promise<void> | null = null;
 let recordingEpoch = 0;
 let lastIdleRecordingPoll = 0;
-let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base",available:false}, jobs:[], imported_models:[], error:null };
+let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base",available:false}, jobs:[], imported_models:[], error:null, backend:"cpu (AVX2)" };
 let diarizationState:DiarizationState={enabled:true,inhibited:false,models:[],jobs:[],error:null}; let diarizationPoll=false;
 let transcriptionPollInFlight = false;
 let renderedRecentRecordings: string | null = null;
@@ -284,6 +284,7 @@ function updateDiarizationUI(){const node=document.querySelector<HTMLElement>("#
 function updateTranscriptionUI() {
   setTextIfChanged(document.querySelector("#model-status"), transcriptionState.model.available
     ? `Ready: ${transcriptionState.model.key}` : (transcriptionState.model.error ?? `Import the ${transcriptionState.model.key || "selected"} model to begin`));
+  setTextIfChanged(document.querySelector("#backend-status"), `Backend: ${transcriptionState.backend}`);
   const imported = transcriptionState.imported_models ?? [];
   document.querySelectorAll<HTMLOptionElement>('select[name="whisper_model"] option').forEach((option) => {
     const size = option.value as Model;
@@ -613,7 +614,7 @@ function render() {
               ><small id="model-select-warning" role="alert">${(transcriptionState.imported_models ?? []).includes(settings.whisper_model) ? "" : `${settings.whisper_model} is not imported yet; jobs will wait until you import it or pick an imported size.`}</small
               ></label
             >
-            <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
+            <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Labels uncertain turns as unknown. Speaker labels are kept within each audio source and never infer people’s names.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
             <section class="audio-settings" aria-labelledby="audio-sources-heading">
               <div class="audio-head"><div><b id="audio-sources-heading">Audio sources</b><small>Select one or more inputs for local capture.</small></div><button type="button" id="refresh-devices" class="secondary" ${disabled()}>Refresh</button></div>

@@ -48,7 +48,23 @@ Whisper requires a C++ toolchain, CMake, and libclang at build time; no Python i
 
 On this development host, [libclang 18.1.1](https://pypi.org/project/libclang/18.1.1/) was installed only into `.tools/libclang` using `python -m pip install --target .tools/libclang --no-deps --only-binary=:all: libclang==18.1.1`. The convenience `scripts/dev.ps1` discovers its DLL without changing system configuration. Other developers can use their normal LLVM installation.
 
-`.cargo/config.toml` disables host-native and AVX-family build flags for a conservative baseline. This favors portability over speed; native performance must be measured before promising real-time throughput. Native macOS/Linux builds and permissions remain unverified on this Windows host. CI includes all three targets but a configured matrix is not evidence of a completed run.
+`.cargo/config.toml` disables host-native compilation (`GGML_NATIVE=OFF`) but enables the AVX/AVX2/FMA/F16C build flags, i.e. an x86-64-v3 baseline. Essentially every x86_64 CPU sold since ~2013 (Haswell/Excavator onward) supports this, so it is still a portable baseline, just a less conservative one than "no SIMD at all" — measured at roughly 2.7x faster than the pre-AVX2 baseline on this development host (see Benchmarking below) even before accounting for the higher thread count. Distributors targeting older hardware can override these flags outside this repository. Native macOS/Linux builds and permissions remain unverified on this Windows host. CI includes all three targets but a configured matrix is not evidence of a completed run.
+
+Whisper thread count (`transcription_engine::cpu_threads`) uses `std::thread::available_parallelism()`, clamped to `[1, 16]`, instead of a hardcoded 4; this scales decoding across the logical cores actually available up to a point where hyperthread/SMT siblings stop helping.
+
+### Optional GPU (CUDA) transcription
+
+CUDA support is an opt-in Cargo feature (`cuda`, wired to `whisper-rs/cuda`) and is **not** part of default builds, so CI and non-NVIDIA machines are unaffected. To build with it:
+
+- Install the CUDA Toolkit (12.x or 13.x) so `nvcc` and the CUDA headers/libs are on `PATH`/`CUDA_PATH`. This is a separate, larger install than the driver alone.
+- `CMAKE_CUDA_ARCHITECTURES` is set to `86` (Ampere, e.g. RTX 30-series) in `.cargo/config.toml` to keep compile times down; it is a harmless, unused CMake define when the `cuda` feature is off. Override it (or set the `CUDA_ARCHITECTURES` env var equivalent for your GPU) if you have different hardware — see [CMake's CUDA_ARCHITECTURES docs](https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html) for the code for your GPU generation.
+- Run `npm run tauri:cuda` (dev) or `npm run tauri:build:cuda` (release build), or `scripts/dev.ps1 -Cuda`, which also puts `%CUDA_PATH%\bin` on `PATH` when `CUDA_PATH` is set.
+- A CUDA build's runtime needs the CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`, etc.) reachable — either the CUDA Toolkit's `bin` on `PATH`, or those DLLs copied beside the built executable for distribution to machines without the Toolkit installed.
+- At runtime, the engine tries to create a GPU Whisper context first; if that fails (no compatible GPU, driver mismatch, etc.) it logs a warning and transparently falls back to the CPU path rather than failing the transcription job. The active backend (`"cpu (AVX2)"` or `"cuda"`) is reported by `get_transcription_state` and shown in Settings next to the model status.
+
+### Benchmarking
+
+There is no benchmark harness checked into the repo (a prior throughput number came from an ad hoc, temporary `#[ignore]`d test against a real recording, which was removed after use — never commit a test that reads real user recordings). To reproduce: copy a completed recording's folder and an imported model's `.bin` out of `%APPDATA%\com.local.meetingrecorder\recordings\...` into a scratch directory, write a temporary `#[ignore]`d test in `transcription_engine.rs` that builds a `TranscriptionRequest` against those copies and times `LocalWhisperEngine::transcribe`, run it with `cargo test --release -- --ignored --nocapture`, then delete the test.
 
 Synthetic tests use a fake engine and isolated files, never existing microphone recordings. The ignored `transcribes_explicit_public_fixture` test requires explicitly supplied `WHISPER_TEST_MODEL` and `WHISPER_TEST_AUDIO`; it makes no downloads. Do not point it at private recordings without separate consent.
 
