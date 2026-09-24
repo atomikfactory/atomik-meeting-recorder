@@ -39,9 +39,11 @@ if ($Cuda) {
     # MSBuild reads environment variables as properties; pin the toolkit so the
     # Visual Studio generator never falls back to an empty CudaToolkitDir.
     $env:CudaToolkitDir = $env:CUDA_PATH.TrimEnd('\') + '\'
-    $cudaBin = Join-Path $env:CUDA_PATH 'bin'
-    if (Test-Path $cudaBin) {
-      $env:PATH = "$cudaBin;$env:PATH"
+    # CUDA 13 ships its runtime DLLs in bin\x64; older toolkits use bin.
+    foreach ($cudaBin in @((Join-Path $env:CUDA_PATH 'bin'), (Join-Path $env:CUDA_PATH 'bin\x64'))) {
+      if (Test-Path $cudaBin) {
+        $env:PATH = "$cudaBin;$env:PATH"
+      }
     }
   }
   $npmArgs += @('--', '--features', 'cuda')
