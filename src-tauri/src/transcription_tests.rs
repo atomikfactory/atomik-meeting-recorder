@@ -74,7 +74,7 @@ impl Fixture {
     }
     fn tick_with_key(&self, engine: &FakeEngine, key: &str) {
         let key = key.to_string();
-        let settings: SettingsReader = Arc::new(move || Ok(key.clone()));
+        let settings: SettingsReader = Arc::new(move || Ok(TranscriptionSettings::for_model(key.clone())));
         tick(
             &self.root,
             &self.store,
@@ -114,6 +114,7 @@ impl TranscriptionEngine for FakeEngine {
             model_key: r.model_key.clone(),
             model_hash: r.model_hash.clone(),
             warnings: vec![],
+            languages_used: vec![],
             segments: vec![TranscriptSegment {
                 start_ms: 0,
                 end_ms: 900,
@@ -192,6 +193,7 @@ fn restart_finishes_json_checkpoint_without_reinference() {
         model_hash: hash,
         segments: vec![],
         warnings: vec![],
+        languages_used: vec![],
     };
     fs::write(
         f.root.join(id).join("transcript.json"),
@@ -265,7 +267,7 @@ fn inhibited_service_and_failed_storage_do_not_run_engine() {
     let engine = Arc::new(FakeEngine::default());
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("tiny".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("tiny"))),
         engine.clone(),
         true,
     );
@@ -277,7 +279,7 @@ fn inhibited_service_and_failed_storage_do_not_run_engine() {
     fs::write(&broken, b"x").unwrap();
     let service = TranscriptionService::with_inhibition(
         broken,
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine.clone(),
         false,
     );
@@ -309,6 +311,7 @@ fn bad_checkpoint_identity_and_model_paths_are_rejected() {
         model_hash: hash,
         segments: vec![],
         warnings: vec![],
+        languages_used: vec![],
     };
     assert!(validate_transcript(&transcript, &f.job(), &f.recording).is_err());
 }
@@ -321,7 +324,7 @@ fn open_checks_integrity_and_missing_completed_output_never_requeues() {
     f.tick(&engine);
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine.clone(),
         true,
     );
@@ -354,7 +357,7 @@ fn managed_import_validates_hash_and_wakes_only_matching_jobs() {
     let f = Fixture::new();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         Arc::new(FakeEngine::default()),
         true,
     );
@@ -416,7 +419,8 @@ fn importing_the_only_available_model_wakes_a_job_once_the_setting_is_switched()
     assert_eq!(f.job().status, "waiting_model");
     let selected = Arc::new(std::sync::Mutex::new("small".to_string()));
     let reader = selected.clone();
-    let settings: SettingsReader = Arc::new(move || Ok(reader.lock().unwrap().clone()));
+    let settings: SettingsReader =
+        Arc::new(move || Ok(TranscriptionSettings::for_model(reader.lock().unwrap().clone())));
     let service =
         TranscriptionService::with_inhibition(f.root.clone(), settings, Arc::new(FakeEngine::default()), true);
     let mut header = [0u8; 48];
@@ -464,7 +468,7 @@ fn worker_shutdown_cancels_owned_job_and_restart_can_reclaim_it() {
     let engine = Arc::new(BlockingEngine(AtomicBool::new(false)));
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine.clone(),
         false,
     );
@@ -504,7 +508,7 @@ fn manual_request_opts_only_the_selected_legacy_recording_into_the_queue() {
     f.recordings.save(&other).unwrap();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         Arc::new(FakeEngine::default()),
         false,
     );
@@ -536,7 +540,7 @@ fn manual_double_click_deduplicates_and_completed_job_is_a_noop() {
     let engine = Arc::new(FakeEngine::default());
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine.clone(),
         false,
     );
@@ -553,7 +557,7 @@ fn manual_double_click_deduplicates_and_completed_job_is_a_noop() {
     let calls = engine.calls.load(Ordering::SeqCst);
     let completed = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine.clone(),
         false,
     );
@@ -568,7 +572,7 @@ fn manual_request_is_inhibited_without_mutating_metadata_or_jobs() {
     let f = legacy_fixture();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         Arc::new(FakeEngine::default()),
         true,
     );
@@ -591,7 +595,7 @@ fn manual_request_rejects_active_empty_failed_and_unknown_recordings() {
     let f = legacy_fixture();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         Arc::new(FakeEngine::default()),
         false,
     );
@@ -621,7 +625,7 @@ fn retained_failed_capture_requires_explicit_manual_queue_and_never_auto_opts_in
     f.recordings.save(&f.recording).unwrap();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         Arc::new(FakeEngine::default()),
         false,
     );
@@ -646,7 +650,7 @@ fn manual_waiting_model_request_is_idempotent_until_import() {
     let engine = Arc::new(FakeEngine::default());
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("tiny".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("tiny"))),
         engine,
         false,
     );
@@ -676,7 +680,7 @@ fn manual_failed_job_retry_opts_in_legacy_row_without_replacing_its_model_pin() 
     engine.fail.store(true, Ordering::SeqCst);
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("base".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
         engine,
         false,
     );
@@ -734,6 +738,7 @@ fn new_storage_checkpoint_recovers_without_reinference_after_restart() {
         model_hash: hash,
         segments: vec![],
         warnings: vec![],
+        languages_used: vec![],
     };
     fs::write(
         directory.join("transcript.json"),
@@ -758,7 +763,7 @@ fn explicit_restart_archives_completed_outputs_and_refuses_a_duplicate_request()
     let guard = processing_guard().lock().unwrap();
     let service = TranscriptionService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok("tiny".into())),
+        Arc::new(|| Ok(TranscriptionSettings::for_model("tiny"))),
         engine,
         false,
     );

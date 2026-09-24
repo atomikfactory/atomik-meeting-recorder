@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import "./style.css";
 import "./overrides.css";
 
-type Model = "tiny" | "base" | "small" | "medium" | "large";
+type Model = "tiny" | "base" | "small" | "medium" | "large" | "turbo";
+type Language = "auto" | "en" | "fr" | "es" | "de" | "it" | "pt" | "nl";
 type Settings = {
   auto_record: boolean;
   start_debounce_seconds: number;
@@ -11,6 +12,7 @@ type Settings = {
   whisper_model: Model;
   audio_sources: AudioSourceSelection[];
   diarization_enabled?: boolean;
+  transcription_language?: Language;
 };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
@@ -78,6 +80,7 @@ let settings: Settings = {
   end_grace_seconds: 30,
   whisper_model: "base",
   audio_sources: [],
+  transcription_language: "auto",
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -608,10 +611,27 @@ function render() {
                 ${disabled()} /></label
             ><label
               >Whisper model<select name="whisper_model" ${disabled()}>
-                ${(["tiny", "base", "small", "medium", "large"] as Model[]).map((x) => `<option value="${x}" ${settings.whisper_model === x ? "selected" : ""}>${x}${(transcriptionState.imported_models ?? []).includes(x) ? "" : " (not imported)"}</option>`).join("")}</select
+                ${(["tiny", "base", "small", "medium", "large", "turbo"] as Model[]).map((x) => `<option value="${x}" ${settings.whisper_model === x ? "selected" : ""}>${x}${x === "turbo" ? " (recommended)" : ""}${(transcriptionState.imported_models ?? []).includes(x) ? "" : " (not imported)"}</option>`).join("")}</select
               ><small
                 >Used for local transcription after you choose an installed model.</small
               ><small id="model-select-warning" role="alert">${(transcriptionState.imported_models ?? []).includes(settings.whisper_model) ? "" : `${settings.whisper_model} is not imported yet; jobs will wait until you import it or pick an imported size.`}</small
+              ><small
+                >Recommended: <code>turbo</code> (large-v3-turbo), quantized — e.g. <code>ggml-large-v3-turbo-q5_0.bin</code> (~550 MB) from the whisper.cpp Hugging Face repo. It is far more accurate than <code>base</code> for a similar CPU cost.</small
+              ></label
+            ><label
+              >Transcription language<select name="transcription_language" ${disabled()}>
+                ${([
+                  ["auto", "Detect automatically"],
+                  ["en", "English"],
+                  ["fr", "French"],
+                  ["es", "Spanish"],
+                  ["de", "German"],
+                  ["it", "Italian"],
+                  ["pt", "Portuguese"],
+                  ["nl", "Dutch"],
+                ] as [Language, string][]).map(([value, label]) => `<option value="${value}" ${(settings.transcription_language ?? "auto") === value ? "selected" : ""}>${label}</option>`).join("")}</select
+              ><small
+                >"Detect automatically" identifies each audio source's language once, from its first speech, and keeps using it for the rest of the meeting.</small
               ></label
             >
             <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
@@ -766,6 +786,7 @@ function render() {
       end_grace_seconds: Number(form.get("end_grace_seconds")),
       whisper_model: String(form.get("whisper_model")) as Model,
       diarization_enabled: form.get("diarization_enabled") === "on",
+      transcription_language: String(form.get("transcription_language") ?? "auto") as Language,
       audio_sources: settings.audio_sources,
     };
     try {

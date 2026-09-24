@@ -15,9 +15,16 @@ pub struct Settings {
     pub diarization_enabled: bool,
     #[serde(default)]
     pub audio_sources: Vec<AudioSourceSelection>,
+    /// "auto" (per-track detection, once per track) or a lowercase ISO 639-1 code
+    /// such as "en". Missing/legacy payloads default to "auto".
+    #[serde(default = "default_language")]
+    pub transcription_language: String,
 }
 fn enabled_by_default() -> bool {
     true
+}
+fn default_language() -> String {
+    "auto".into()
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AudioSourceSelection {
@@ -39,6 +46,9 @@ pub enum WhisperModel {
     Small,
     Medium,
     Large,
+    /// large-v3-turbo: a pruned 4-decoder-layer variant of large-v3. Recommended
+    /// (quantized, e.g. ggml-large-v3-turbo-q5_0.bin) over `base` for accuracy.
+    Turbo,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -46,9 +56,13 @@ impl Default for Settings {
             auto_record: true,
             start_debounce_seconds: 10,
             end_grace_seconds: 30,
+            // New installs default to `base`, not the recommended `turbo`: `base` is
+            // small and fast to import, and we do not want a first run to silently
+            // block on a ~550 MB model the user has not chosen to import yet.
             whisper_model: WhisperModel::Base,
             diarization_enabled: true,
             audio_sources: vec![],
+            transcription_language: default_language(),
         }
     }
 }
@@ -64,8 +78,20 @@ impl Settings {
                 "End grace must be between 5 and 300 seconds.".into(),
             ));
         }
+        if !is_valid_language(&self.transcription_language) {
+            return Err(StoreError::Validation(
+                "Transcription language must be \"auto\" or a lowercase ISO 639-1 code.".into(),
+            ));
+        }
         Ok(())
     }
+}
+/// "auto", or 2-3 lowercase ASCII letters (a superset of the languages the UI
+/// currently offers, so a future addition does not need a store-level change).
+fn is_valid_language(value: &str) -> bool {
+    value == "auto"
+        || ((2..=3).contains(&value.len())
+            && value.bytes().all(|b| b.is_ascii_lowercase()))
 }
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -164,6 +190,7 @@ mod tests {
             whisper_model: WhisperModel::Small,
             diarization_enabled: false,
             audio_sources: vec![],
+            transcription_language: "fr".into(),
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -231,5 +258,31 @@ mod tests {
         let parsed: Settings = serde_json::from_str(r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#).unwrap();
         assert!(parsed.audio_sources.is_empty());
         assert!(parsed.diarization_enabled);
+        assert_eq!(parsed.transcription_language, "auto");
+    }
+    #[test]
+    fn turbo_model_key_round_trips() {
+        let parsed: Settings = serde_json::from_str(r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"turbo","transcription_language":"fr"}"#).unwrap();
+        assert_eq!(parsed.whisper_model, WhisperModel::Turbo);
+        assert_eq!(parsed.transcription_language, "fr");
+    }
+    #[test]
+    fn invalid_language_does_not_replace_saved_value() {
+        let p = path("language.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                transcription_language: "English".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert!(store
+            .save(Settings {
+                transcription_language: "".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
     }
 }

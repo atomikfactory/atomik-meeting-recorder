@@ -95,6 +95,7 @@ mod tests {
             model_key: "m".into(),
             model_hash: "h".into(),
             warnings: vec![],
+            languages_used: vec![],
             segments: vec![seg(0, 100, "a"), seg(100, 200, "a"), seg(200, 300, "a")],
         }
     }

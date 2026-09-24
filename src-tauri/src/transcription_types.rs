@@ -11,6 +11,9 @@ pub struct TranscriptionRequest {
     pub model_path: PathBuf,
     pub model_key: String,
     pub model_hash: String,
+    /// `None` requests automatic per-track language detection; `Some(code)` pins
+    /// every chunk of every track to that lowercase ISO 639-1 code.
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,6 +23,12 @@ pub struct Transcript {
     pub model_hash: String,
     pub segments: Vec<TranscriptSegment>,
     pub warnings: Vec<String>,
+    /// The language(s) actually used to decode this transcript: the requested
+    /// code, or codes auto-detected per track. Absent in transcripts written
+    /// before this field existed; `validate_transcript`/checkpoint recovery do
+    /// not depend on it.
+    #[serde(default)]
+    pub languages_used: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

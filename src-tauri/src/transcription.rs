@@ -22,7 +22,25 @@ use std::{
     time::Duration,
 };
 
-type SettingsReader = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
+/// The subset of app settings the transcription worker needs on each tick.
+/// Read fresh at the start of every job (never pinned into a job row, unlike
+/// the model itself) so a language change takes effect on the next run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscriptionSettings {
+    pub model_key: String,
+    /// "auto" or a lowercase ISO 639-1 code; see `store::Settings::transcription_language`.
+    pub language: String,
+}
+impl TranscriptionSettings {
+    /// Convenience for tests and fixtures that only care about the model size.
+    pub fn for_model(model_key: impl Into<String>) -> Self {
+        Self {
+            model_key: model_key.into(),
+            language: "auto".into(),
+        }
+    }
+}
+type SettingsReader = Arc<dyn Fn() -> Result<TranscriptionSettings, String> + Send + Sync>;
 static PROCESSING_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Serializes mutable processing artifacts across the transcription and speaker workers.
@@ -140,7 +158,7 @@ impl TranscriptionService {
     pub fn state(&self) -> TranscriptionState {
         let mut error = self.error.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let key = match (self.settings)() {
-            Ok(key) => key,
+            Ok(settings) => settings.model_key,
             Err(e) => {
                 error = Some(e);
                 String::new()
@@ -278,7 +296,7 @@ impl TranscriptionService {
     /// enqueued under one size follows the setting until it is actually claimed.
     pub(crate) fn repin_to_current_model(&self) -> Result<(), String> {
         let store = self.store()?;
-        let key = (self.settings)()?;
+        let key = (self.settings)()?.model_key;
         if let Some((_, hash, _)) = store.model(&key)? {
             store.repin_unclaimed(&key, &hash)?;
         }
@@ -298,7 +316,7 @@ impl TranscriptionService {
             return Err("Transcription is disabled in this session.".into());
         }
         safe_id(id)?;
-        let key = (self.settings)()?;
+        let key = (self.settings)()?.model_key;
         let recordings = RecordingStore::open(&self.root)?;
         let mut recording = recordings
             .get_by_id(id)?
@@ -380,7 +398,7 @@ impl TranscriptionService {
         ) {
             return Err("Transcription is already queued or running; it was not restarted.".into());
         }
-        let key = (self.settings)()?;
+        let key = (self.settings)()?.model_key;
         let hash = store
             .model(&key)?
             .map(|(_, hash, _)| hash)
@@ -645,7 +663,8 @@ fn tick(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     recover_restart_intents(root, store, recordings)?;
-    let key = settings()?;
+    let current_settings = settings()?;
+    let key = current_settings.model_key;
     for recording in recordings.finalized_eligible()? {
         if recording.auto_transcribe {
             store.enqueue(&recording.recording_id, &key, "")?;
@@ -732,6 +751,10 @@ fn tick(
                 model_path: path,
                 model_key: job.model_key.clone(),
                 model_hash: hash,
+                // "auto" means per-track detection inside the engine, not a literal
+                // language tag, so it is not forwarded to Whisper as one.
+                language: (current_settings.language != "auto")
+                    .then(|| current_settings.language.clone()),
             };
             let mut progress_error = None;
             let mut progress = |value: u8| {

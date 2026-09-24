@@ -8,7 +8,11 @@ New recordings have an explicit `auto_transcribe` metadata flag. Missing flags d
 
 ## Models
 
-Use Settings → Choose local Whisper model to import a trusted GGML `.bin` file, then select its size and save preferences. `base` is the multilingual default; tiny/base/small/medium/large are recognized from model dimensions. Large-v3-turbo and other nonstandard layer layouts are not supported by this initial importer. English-only variants occupy the same size slot. No model is bundled.
+Use Settings → Choose local Whisper model to import a trusted GGML `.bin` file, then select its size and save preferences. `base` is the default for a fresh install (small, fast to import, and does not force a first run to block on a large download); tiny/base/small/medium/large/**turbo** are recognized from model dimensions. English-only variants occupy the same size slot. No model is bundled.
+
+**`turbo` (large-v3-turbo) is the recommended model** for real meeting audio: it is large-v3's encoder with a pruned 4-decoder-layer head, so it is dramatically more accurate than `base` at a similar CPU cost, especially quantized (e.g. `ggml-large-v3-turbo-q5_0.bin`, ~550 MB, from the [whisper.cpp Hugging Face repo](https://huggingface.co/ggerganov/whisper.cpp)). Settings shows it marked "(recommended)" with this same hint; there is no download button, so getting the file remains a manual, user-initiated download outside the app. Quantized files (q5_0, q8_0, ...) are recognized identically to f16/f32 ones: the GGML header's model-size dimensions (`n_audio_state`/`n_audio_layer`/`n_text_layer`) are independent of the `ftype` byte that records the quantization scheme, and `n_mels` (80 vs. 128) does not affect the size key either.
+
+`distil-large-v3` (a 2-decoder-layer distillation, distinct from turbo's 4 layers) is explicitly rejected at import with a message pointing at `turbo`/`large` instead, rather than silently mis-classified as one of them — it has different accuracy/robustness tradeoffs (notably no built-in translation) that this importer does not want to paper over.
 
 The official [whisper.cpp model instructions](https://github.com/ggml-org/whisper.cpp/blob/master/models/README.md) link available files. Prefer that upstream distribution over unknown model files. A manual download is network access made by the user, not the application. The upstream multilingual base file was verified through repository metadata as 147,951,465 bytes with SHA-256 `60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe`.
 
@@ -19,6 +23,20 @@ Changing the selected size affects newly queued jobs, and also re-points any job
 ## Processing and output
 
 The engine uses [whisper-rs 0.16](https://docs.rs/whisper-rs/0.16.0/whisper_rs/) and its bundled whisper.cpp, [Rubato 5](https://docs.rs/rubato/5.0.0/rubato/) for anti-aliased 16 kHz resampling, and Hound for PCM16 WAV decoding. Each source is downmixed independently and processed in bounded 60-second chunks. The model loads once per recording. Progress is chunk-based, not an estimated time remaining. Quit requests cancellation and waits off the UI thread for the worker.
+
+### Language
+
+Settings → Transcription language offers "Detect automatically" (default) plus English, French, Spanish, German, Italian, Portuguese, and Dutch. A pinned language is passed to Whisper for every decoded window of every track. "Detect automatically" instead detects once, from the first decoded speech window **per track**, and reuses that language for every later window of that same track — it does not re-detect every 60-second chunk, so a quiet or ambiguous chunk cannot flip the meeting's language mid-recording. The setting is read fresh at the start of each transcription job (unlike the model, it is not pinned into the job row), so changing it takes effect on the next job, not mid-run.
+
+Transcripts record the language(s) actually used in `languages_used` (JSON only; sorted, deduplicated). Transcripts written before this field existed simply deserialize with an empty list — `validate_transcript` and checkpoint recovery do not depend on it.
+
+### Silence skipping and anti-hallucination
+
+Within each 60-second chunk (after resampling to 16 kHz mono), a lightweight energy-based pre-pass (`detect_speech_regions` in `transcription_engine.rs`) finds likely-speech regions before anything is decoded: 20 ms frames, RMS compared in dBFS against an adaptive noise floor (the quietest 20% of this chunk's own frames) plus a 12 dB margin, never below an absolute -60 dBFS floor. Raw speech runs under ~250 ms are dropped as noise spikes (checked *before* padding, so hangover padding cannot rescue a spike into looking like real speech); surviving runs are padded ~300 ms on each side, and gaps under ~1 s between padded regions are merged. Whisper.cpp's own VAD needs a separate Silero GGML model file we do not bundle or offer to import, so this is a purpose-built substitute, not that VAD.
+
+A chunk with no detected speech region is never decoded at all — this is where the biggest win is on real recordings with long one-sided silence (e.g. one participant's microphone track while only the other speaks), both for wall time and because Whisper is prone to hallucinating repeated filler ("Thank you.", music-video credits, etc.) on near-silent input. Surviving regions are decoded in windows capped at 30 seconds (a region longer than that is split into equal-sized ≤30 s windows); segment timestamps are mapped back onto the window's exact sample offset and then the chunk's offset, so they land on the original recording's timeline exactly regardless of how many silence gaps were skipped. A track that is entirely silent produces zero segments and no error.
+
+Each decoded window also sets `suppress_blank`, `suppress_non_speech_tokens`, a temperature-fallback schedule (0.0 with a 0.2 increment), and `no_speech_thold`; segments whose reported no-speech probability is ≥0.85 are dropped rather than surfaced as text. None of this is a substitute for a real VAD model or a language model rescoring pass — it reduces, but does not eliminate, hallucinated text on genuinely ambiguous audio.
 
 For each recording:
 
@@ -32,7 +50,7 @@ recordings/<recording-id>/
 
 Markdown includes the recording's UTC start date/time, duration, stable ID, model size, audio sources, timestamps, and capture/processing warnings. Passage text is escaped as literal Markdown so recognized text cannot silently embed external images or executable HTML. No summary is generated.
 
-Device labels are **not speaker labels**. Multiple sources can contain overlapping or duplicate speech. There is no acoustic echo cancellation, cross-device drift correction, speaker recognition, or cross-track speech deduplication. Chunk boundaries can split/repeat words. Whisper may misrecognize speech or hallucinate on nonspeech; exact digital silence is skipped but this is not a complete voice-activity detector. Captures with retained gaps can be transcribed and remain labelled incomplete.
+Device labels are **not speaker labels**. Multiple sources can contain overlapping or duplicate speech. There is no acoustic echo cancellation, cross-device drift correction, speaker recognition, or cross-track speech deduplication. Chunk boundaries can split/repeat words. Whisper may still misrecognize speech or hallucinate on ambiguous nonspeech even with the silence pre-pass and anti-hallucination decode settings described above; exact digital silence and detected-silent regions are skipped, but this remains a coarse energy-based gate, not a full voice-activity-detection model. Captures with retained gaps can be transcribed and remain labelled incomplete.
 
 ## Durable states
 
@@ -65,6 +83,15 @@ CUDA support is an opt-in Cargo feature (`cuda`, wired to `whisper-rs/cuda`) and
 ### Benchmarking
 
 There is no benchmark harness checked into the repo (a prior throughput number came from an ad hoc, temporary `#[ignore]`d test against a real recording, which was removed after use — never commit a test that reads real user recordings). To reproduce: copy a completed recording's folder and an imported model's `.bin` out of `%APPDATA%\com.local.meetingrecorder\recordings\...` into a scratch directory, write a temporary `#[ignore]`d test in `transcription_engine.rs` that builds a `TranscriptionRequest` against those copies and times `LocalWhisperEngine::transcribe`, run it with `cargo test --release -- --ignored --nocapture`, then delete the test.
+
+The most recent such run compared a real ~41 s two-track meeting recording (the same one behind the "I completely co-emerge in migration to" complaint) on the `base` model, release build, same AVX2 baseline (commit `d55f060`) before vs. after the turbo/language/silence-skip change in this document, on the same development host:
+
+| | wall time | segments | first lines |
+|---|---|---|---|
+| before | 32.1 s | 25 | `I completely co-emerge in migration to` / `the virtual machine and script first information` |
+| after | 34.3 s | 16 | `completely co-emerge in migrating to the virtual machine.` |
+
+Wall time is essentially unchanged (slightly slower) on this recording specifically because it is two people talking almost continuously — there is little silence for the pre-pass to skip, so its only effect here is windowing/anti-hallucination decode settings, not skipped decode work. The quality difference is the real result: fewer, better-formed segments and no more visible mid-word garbling in the sampled lines. The silence-skipping win is expected to dominate on recordings with long one-sided silence (e.g. one participant's track sitting quiet while the other talks), which this particular short fixture does not exercise; it was not re-measured against a long-silence fixture because none was available in the scratchpad. Reproducing the pre-AVX2 baseline (commit `050c614`, one commit before `d55f060`) would need a second full whisper.cpp CMake build in an isolated worktree; given the wall-time result above is not the interesting comparison for this change, it was not run.
 
 Synthetic tests use a fake engine and isolated files, never existing microphone recordings. The ignored `transcribes_explicit_public_fixture` test requires explicitly supplied `WHISPER_TEST_MODEL` and `WHISPER_TEST_AUDIO`; it makes no downloads. Do not point it at private recordings without separate consent.
 

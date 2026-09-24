@@ -54,6 +54,7 @@ impl Fixture {
             model_key: "base".into(),
             model_hash: "a".repeat(64),
             warnings: vec![],
+            languages_used: vec![],
             segments: vec![
                 TranscriptSegment {
                     start_ms: 0,

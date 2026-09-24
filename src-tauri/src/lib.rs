@@ -47,7 +47,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_single_instance::init as single_instance;
-use transcription::{try_processing_guard, TranscriptionService};
+use transcription::{try_processing_guard, TranscriptionService, TranscriptionSettings};
 use transcription_store::TranscriptionStore;
 
 pub fn run_diarization_worker(
@@ -124,6 +124,7 @@ fn whisper_model_key(model: &store::WhisperModel) -> &'static str {
         store::WhisperModel::Small => "small",
         store::WhisperModel::Medium => "medium",
         store::WhisperModel::Large => "large",
+        store::WhisperModel::Turbo => "turbo",
     }
 }
 fn whisper_model_from_key(key: &str) -> Option<store::WhisperModel> {
@@ -133,6 +134,7 @@ fn whisper_model_from_key(key: &str) -> Option<store::WhisperModel> {
         "small" => store::WhisperModel::Small,
         "medium" => store::WhisperModel::Medium,
         "large" => store::WhisperModel::Large,
+        "turbo" => store::WhisperModel::Turbo,
         _ => return None,
     })
 }
@@ -832,11 +834,10 @@ pub fn run() {
     let transcription_app = app.handle().clone();
     app.manage(TranscriptionService::new(recording_dir.clone(), Arc::new(move || {
         let settings = transcription_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
-        Ok(match settings.whisper_model {
-            store::WhisperModel::Tiny => "tiny", store::WhisperModel::Base => "base",
-            store::WhisperModel::Small => "small", store::WhisperModel::Medium => "medium",
-            store::WhisperModel::Large => "large",
-        }.into())
+        Ok(TranscriptionSettings {
+            model_key: whisper_model_key(&settings.whisper_model).into(),
+            language: settings.transcription_language.clone(),
+        })
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();
     app.manage(DiarizationService::new(recording_dir.clone(), Arc::new(move || {
@@ -946,7 +947,7 @@ mod tests {
         }
         let service = TranscriptionService::with_inhibition(
             root.clone(),
-            Arc::new(|| Ok("small".into())),
+            Arc::new(|| Ok(TranscriptionSettings::for_model("small"))),
             Arc::new(transcription_engine::LocalWhisperEngine::new()),
             true,
         );
@@ -966,7 +967,7 @@ mod tests {
         let settings = Mutex::new(SettingsStorage::new(root.join("settings.sqlite3")));
         let service = TranscriptionService::with_inhibition(
             root.clone(),
-            Arc::new(|| Ok("base".into())),
+            Arc::new(|| Ok(TranscriptionSettings::for_model("base"))),
             Arc::new(transcription_engine::LocalWhisperEngine::new()),
             true,
         );
