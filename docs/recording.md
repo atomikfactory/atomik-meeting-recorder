@@ -18,12 +18,14 @@ Recovery verifies that each tracked WAV belongs directly to its recording direct
 
 The coordinator resolves all selected devices, persists a UUID recording intent, creates writers, builds all streams, and only then starts them. Stop and Quit drop the streams, drain writer queues, finalize headers, and commit metadata before completing. A failed metadata commit remains retryable and prevents a new session from silently hiding it.
 
-Files live under the OS application-data directory:
+Databases and imported models always live under the OS application-data directory (never affected by the configurable recordings folder below):
 
 ```text
 recordings/
   recordings.sqlite3
-  meetings/
+  transcription.sqlite3 · diarization.sqlite3 · summary.sqlite3 · compression.sqlite3 · search.sqlite3
+  models/                 # imported Whisper/diarization models
+  meetings/                # the default location for meeting folders -- see below
     YYYY-MM-DD_HH-mm-ss_meeting_title--<recording-uuid>/
       track-00.wav          # or track-00.flac once compressed (see below)
       track-01.wav
@@ -82,6 +84,19 @@ This is intentionally conservative about safety, since it deletes audio:
 A crash at any point leaves either the WAV still referenced (with, at worst, an orphaned, harmless temp file) or the FLAC already referenced (with, at worst, a redundant WAV still on disk); startup recovery removes orphan temp files and finishes whichever half of the swap did not complete, and never deletes a WAV unless a verified FLAC is the one the metadata already names. A track shorter than FLAC's own minimum block size (32 samples -- far below any real meeting audio) is left as WAV rather than worked around. Existing recordings are picked up the same way new ones are, on the same eligibility scan.
 
 Every audio reader -- transcription decode, speaker identification, restart, and this stage's own verification -- goes through a small shared `audio_file` abstraction that accepts either format transparently, so compression is invisible to the rest of the pipeline. The dashboard/settings page shows a running "Audio on disk" total, and each library card shows its format and size once compressed (e.g. "FLAC · 12.3 MB (saved 51%)").
+
+## Storage: a configurable recordings folder
+
+**Settings → Recordings folder** lets the user choose where meeting folders (audio tracks, `transcript.json`/`.md`, `summary.json`/`.md`) are stored -- typically a bigger data drive or a synced folder. Databases and imported models are deliberately *not* affected by this setting and always stay under the app data directory: SQLite on a possibly-removable or synced folder risks corruption from partial syncs or surprise unmounts, while the databases are small and not something a user needs on another drive.
+
+`Settings.recordings_folder: Option<String>` is `None` by default (meaning the location above, unchanged from before this feature). Setting it is a two-step, explicit action, never implicit:
+
+1. **Change…** opens the OS folder picker (`tauri-plugin-dialog`) and validates the choice before saving: an absolute path, real or creatable, actually writable (a probe file is written and removed), not a symlink/junction, not inside the application's own install directory, and not the root of a drive/filesystem. **New recordings go to the chosen folder immediately** -- this alone does not touch any existing recording. **Reset to default** clears the setting back to `None`, immediately, the same way. Both remember the folder they replaced (`legacy_library_roots`, capped and de-duplicated) purely so recordings under it remain resolvable.
+2. **Move existing recordings here** is a separate, explicit action (`move_recordings_to_configured_folder`) that copies each finalized (`recorded`/`interrupted`, never active) meeting folder to the new root one at a time, crash-safely (`library_move.rs`): copy the whole folder → verify every file byte-for-byte (size + SHA-256) against the source → update that one recording's metadata in a single database write → only then delete the source folder. Nothing is ever deleted before its copy is verified. A small on-disk journal (one JSON file per in-flight recording under `library_move_journal/`) makes an interrupted move resumable: a crash mid-copy simply redoes the copy from scratch (the source was never touched yet), while a crash after verification redoes only the now-idempotent metadata update and delete. The whole action takes the same processing guard used by transcription/diarization/compression, so it refuses to run during an active recording or while another job is running, and does not compete with them for I/O. A recording made before this feature (no `storage_path`, i.e. the flat legacy `<uuid>/` layout) cannot be moved automatically and is reported as such.
+
+Every place that resolves a recording's folder -- transcription, diarization, summarization, compression, the search indexer, "Open folder", and crash recovery -- validates a recording's saved library root against the *known* roots (the default location, the currently configured folder, and any folder it replaced) rather than trusting an arbitrary path from the database; the existing symlink/parent/basename checks in `recording_paths::resolved_recording_directory` still apply on top of that. If the configured folder becomes unreachable (its drive unplugged, a network share dropped), starting a new recording fails with a clear error rather than silently falling back to the default, and existing recordings that live under it simply show that folder's operations (open, transcribe, ...) as unavailable -- their database rows, and the folder's own files, are never touched or forgotten.
+
+One scoping limitation of this first version: the search index's *summary* rows and its per-segment speaker-name enrichment (`read_completed_summary`/`read_completed_speaker_labels`, both best-effort by design) still resolve only against the default location. A recording under a configured custom folder is fully transcribed, diarized, summarized, and compressed either way, and its transcript text is fully searchable (`search.rs`'s own transcript lookup does use the configured/legacy roots) -- only the summary text in search results and remote-speaker numbering in transcript search snippets may be stale for such a recording until it is moved into the default location.
 
 ## Meeting management and status meaning
 

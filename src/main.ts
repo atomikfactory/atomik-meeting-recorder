@@ -20,7 +20,10 @@ type Settings = {
   summary_model?: string;
   compress_audio?: boolean;
   local_speaker_name?: string;
+  recordings_folder?: string | null;
 };
+type MoveResult = { recording_id: string; moved: boolean; error: string | null };
+type MoveSummary = { results: MoveResult[] };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
 type AudioInventory = { backend: string; devices: AudioDevice[]; errors: string[] };
@@ -400,6 +403,23 @@ function updateTranscriptionUI() {
     (transcriptionState.jobs.slice(0, 25).map(job => `<div><b>${escapeHtml(job.status.replaceAll("_", " "))}</b> <small>Recording ${escapeHtml(job.recording_id.slice(0, 8))}</small>${job.status === "transcribing" ? ` <span>${Math.round(job.progress)}%</span>` : ""}${job.error ? `<small>${escapeHtml(job.error)}</small>` : ""}</div>`).join("") || "<small>No recordings are queued.</small>");
   if (jobs && jobs.innerHTML !== content) jobs.innerHTML = content;
   updateRecordingUI();
+}
+function refreshRecordingsFolderSection() {
+  setTextIfChanged(document.querySelector("#recordings-folder-path"), state.recordings_folder);
+  const reset = document.querySelector<HTMLButtonElement>("#reset-recordings-folder");
+  if (reset) {
+    const shouldDisable = preview || !backendReady || !settings.recordings_folder;
+    reset.disabled = shouldDisable;
+    if (shouldDisable) reset.setAttribute("aria-disabled", "true");
+    else reset.removeAttribute("aria-disabled");
+  }
+}
+async function refreshAppState() {
+  try {
+    state = await invoke<AppState>("get_app_state");
+  } catch (error) {
+    notice(String(error), "error");
+  }
 }
 async function loadDesktop() {
   try {
@@ -873,6 +893,21 @@ function render() {
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="compress_audio" ${settings.compress_audio !== false ? "checked" : ""} ${disabled()}/><span><b>Compress finished recordings to FLAC</b><small>Once transcription (and speaker identification, if enabled) has finished with a recording's audio, losslessly compresses each WAV track to FLAC and verifies it decodes back to the exact original samples before removing the WAV. Never runs on an active recording.</small></span></label>
               <p id="audio-storage-total">${escapeHtml(audioStorageSummaryText())}</p>
             </section>
+            <section class="model-settings" aria-labelledby="recordings-folder-heading">
+              <b id="recordings-folder-heading">Recordings folder</b>
+              <small>Where meeting audio, transcripts, and summaries are stored. Databases and imported models always stay in the app's own data folder.</small>
+              <p id="recordings-folder-path">${escapeHtml(state.recordings_folder)}</p>
+              <div>
+                <button type="button" class="secondary" id="choose-recordings-folder" ${disabled()}>Change…</button>
+                <button type="button" class="secondary" id="reset-recordings-folder" ${preview || !backendReady || !settings.recordings_folder ? 'disabled aria-disabled="true"' : ""}>Reset to default</button>
+                <button type="button" class="secondary" id="open-recordings-folder-btn">Open folder</button>
+              </div>
+              <div>
+                <button type="button" class="secondary" id="move-recordings" ${disabled()}>Move existing recordings here</button>
+                <small>Not automatic: copies each recording, verifies it byte-for-byte, then removes it from its old folder. Safe to retry if interrupted.</small>
+              </div>
+              <p id="recordings-folder-status" role="status"></p>
+            </section>
             <section class="audio-settings" aria-labelledby="audio-sources-heading">
               <div class="audio-head"><div><b id="audio-sources-heading">Audio sources</b><small>Select one or more inputs for local capture.</small></div><button type="button" id="refresh-devices" class="secondary" ${disabled()}>Refresh</button></div>
               <p id="capture-next" class="capture-next">Select one or more sources for your next local recording.</p>
@@ -1059,6 +1094,58 @@ function render() {
       notice("Connected to Ollama.");
     } catch (error) {
       notice(`Could not connect to Ollama: ${String(error)}`, "error");
+    } finally {
+      button.disabled = preview || !backendReady;
+    }
+  });
+  document.querySelector("#choose-recordings-folder")?.addEventListener("click", async () => {
+    const status = document.querySelector<HTMLElement>("#recordings-folder-status");
+    try {
+      const saved = await invoke<Settings | null>("choose_recordings_folder");
+      if (!saved) return; // user cancelled the folder picker
+      settings = { ...settings, ...saved };
+      if (status) status.textContent = "Recordings folder updated. New recordings will use it immediately.";
+      await refreshAppState();
+      refreshRecordingsFolderSection();
+    } catch (error) {
+      if (status) status.textContent = String(error);
+      notice(String(error), "error");
+    }
+  });
+  document.querySelector("#reset-recordings-folder")?.addEventListener("click", async () => {
+    const status = document.querySelector<HTMLElement>("#recordings-folder-status");
+    try {
+      const saved = await invoke<Settings>("reset_recordings_folder");
+      settings = { ...settings, ...saved };
+      if (status) status.textContent = "Recordings folder reset to the default location.";
+      await refreshAppState();
+      refreshRecordingsFolderSection();
+    } catch (error) {
+      if (status) status.textContent = String(error);
+      notice(String(error), "error");
+    }
+  });
+  document.querySelector("#open-recordings-folder-btn")?.addEventListener("click", () =>
+    invoke("open_recordings_folder").catch((error) => notice(String(error), "error")),
+  );
+  document.querySelector("#move-recordings")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const status = document.querySelector<HTMLElement>("#recordings-folder-status");
+    button.disabled = true;
+    if (status) status.textContent = "Moving recordings…";
+    try {
+      const summary = await invoke<MoveSummary>("move_recordings_to_configured_folder");
+      const failed = summary.results.filter((r) => !r.moved);
+      const moved = summary.results.filter((r) => r.moved);
+      if (status) {
+        status.textContent = summary.results.length === 0
+          ? "Nothing to move; every recording is already in this folder."
+          : `Moved ${moved.length} recording(s).${failed.length ? ` ${failed.length} failed: ${failed.map((r) => r.error).join("; ")}` : ""}`;
+      }
+      await refreshRecordingState(true);
+    } catch (error) {
+      if (status) status.textContent = String(error);
+      notice(String(error), "error");
     } finally {
       button.disabled = preview || !backendReady;
     }
