@@ -115,6 +115,7 @@ impl TranscriptionEngine for FakeEngine {
             model_hash: r.model_hash.clone(),
             warnings: vec![],
             languages_used: vec![],
+            local_speaker_name: Some("You".into()),
             segments: vec![TranscriptSegment {
                 start_ms: 0,
                 end_ms: 900,
@@ -194,6 +195,7 @@ fn restart_finishes_json_checkpoint_without_reinference() {
         segments: vec![],
         warnings: vec![],
         languages_used: vec![],
+        local_speaker_name: Some("You".into()),
     };
     fs::write(
         f.root.join(id).join("transcript.json"),
@@ -312,6 +314,7 @@ fn bad_checkpoint_identity_and_model_paths_are_rejected() {
         segments: vec![],
         warnings: vec![],
         languages_used: vec![],
+        local_speaker_name: Some("You".into()),
     };
     assert!(validate_transcript(&transcript, &f.job(), &f.recording).is_err());
 }
@@ -739,6 +742,7 @@ fn new_storage_checkpoint_recovers_without_reinference_after_restart() {
         segments: vec![],
         warnings: vec![],
         languages_used: vec![],
+        local_speaker_name: Some("You".into()),
     };
     fs::write(
         directory.join("transcript.json"),
@@ -824,4 +828,140 @@ fn pending_restart_replays_a_partial_archive_before_any_new_inference() {
     assert!(f.store.restart_intents().unwrap().is_empty());
     assert!(engine.calls.load(Ordering::SeqCst) >= 2);
     let _ = path;
+}
+
+fn labeled_recording() -> Recording {
+    Recording {
+        recording_id: "r".into(),
+        started_at: 0,
+        ended_at: Some(2000),
+        duration_ms: 2000,
+        status: "recorded".into(),
+        meeting_title: None,
+        storage_path: None,
+        auto_transcribe: true,
+        error: None,
+        transcription_status: "completed".into(),
+        appflowy_status: "idle".into(),
+        tracks: vec![
+            Track {
+                source_id: "mic".into(),
+                name: "Desk microphone".into(),
+                direction: "input".into(),
+                sample_rate: 16000,
+                channels: 1,
+                file_path: "mic.wav".into(),
+                frames_written: 16000,
+                dropped_samples: 0,
+                error: None,
+            },
+            Track {
+                source_id: "loopback".into(),
+                name: "Speakers".into(),
+                direction: "output".into(),
+                sample_rate: 16000,
+                channels: 1,
+                file_path: "loopback.wav".into(),
+                frames_written: 16000,
+                dropped_samples: 0,
+                error: None,
+            },
+        ],
+    }
+}
+fn labeled_segment(source_id: &str) -> TranscriptSegment {
+    TranscriptSegment {
+        start_ms: 0,
+        end_ms: 1000,
+        text: "hello".into(),
+        source_id: source_id.into(),
+        source_name: "Raw device name".into(),
+    }
+}
+
+#[test]
+fn presentation_label_uses_local_name_for_input_track_regardless_of_remote_label() {
+    let recording = labeled_recording();
+    let segment = labeled_segment("mic");
+    assert_eq!(
+        presentation_label(&recording, &segment, "Ben", None),
+        "Ben"
+    );
+    assert_eq!(
+        presentation_label(&recording, &segment, "Ben", Some(3)),
+        "Ben"
+    );
+}
+#[test]
+fn presentation_label_numbers_remote_speakers_and_falls_back_to_remote() {
+    let recording = labeled_recording();
+    let segment = labeled_segment("loopback");
+    assert_eq!(
+        presentation_label(&recording, &segment, "Ben", Some(2)),
+        "Speaker 2"
+    );
+    assert_eq!(
+        presentation_label(&recording, &segment, "Ben", None),
+        DEFAULT_REMOTE_LABEL
+    );
+}
+#[test]
+fn presentation_label_falls_back_to_source_name_for_an_unresolvable_track() {
+    let recording = labeled_recording();
+    let segment = labeled_segment("deleted-track");
+    assert_eq!(
+        presentation_label(&recording, &segment, "Ben", Some(1)),
+        "Raw device name"
+    );
+}
+#[test]
+fn markdown_labels_input_as_local_name_and_output_as_remote() {
+    let recording = labeled_recording();
+    let transcript = Transcript {
+        recording_id: "r".into(),
+        model_key: "base".into(),
+        model_hash: "a".repeat(64),
+        warnings: vec![],
+        languages_used: vec![],
+        local_speaker_name: Some("Ada".into()),
+        segments: vec![labeled_segment("mic"), labeled_segment("loopback")],
+    };
+    let md = markdown_document(&recording, &transcript);
+    assert!(md.contains("**[00:00:00–00:00:01] Ada:**"));
+    assert!(md.contains("**[00:00:00–00:00:01] Remote:**"));
+    assert!(!md.contains("Source labels describe audio devices"));
+    // Both tracks resolve to a role label, so the raw per-segment device name
+    // is never printed -- only the header's source list shows device names.
+    assert!(!md.contains("Raw device name"));
+}
+#[test]
+fn markdown_labeled_overlays_remote_speaker_numbers_from_a_diarization_checkpoint() {
+    let recording = labeled_recording();
+    let transcript = Transcript {
+        recording_id: "r".into(),
+        model_key: "base".into(),
+        model_hash: "a".repeat(64),
+        warnings: vec![],
+        languages_used: vec![],
+        local_speaker_name: Some("Ada".into()),
+        segments: vec![labeled_segment("mic"), labeled_segment("loopback")],
+    };
+    let md = markdown_document_labeled(&recording, &transcript, Some(&[None, Some(1)]));
+    assert!(md.contains("**[00:00:00–00:00:01] Ada:**"));
+    assert!(md.contains("**[00:00:00–00:00:01] Speaker 1:**"));
+}
+#[test]
+fn missing_local_speaker_name_defaults_to_you_for_legacy_transcripts() {
+    let recording = labeled_recording();
+    let transcript = Transcript {
+        recording_id: "r".into(),
+        model_key: "base".into(),
+        model_hash: "a".repeat(64),
+        warnings: vec![],
+        languages_used: vec![],
+        local_speaker_name: None,
+        segments: vec![labeled_segment("mic")],
+    };
+    let md = markdown_document(&recording, &transcript);
+    assert!(md.contains("**[00:00:00–00:00:01] You:**"));
 }

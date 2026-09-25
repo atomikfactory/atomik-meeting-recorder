@@ -57,6 +57,14 @@ pub struct Settings {
     /// a verified bit-exact round trip, so it is safe to default on.
     #[serde(default = "enabled_by_default")]
     pub compress_audio: bool,
+    /// Presentation label for the local user's own (microphone/input-track)
+    /// speech in transcript Markdown and the summary prompt. Never affects
+    /// `transcript.json`'s `source_name`/`source_id` fields, which remain the
+    /// raw device labels for backward compatibility -- this is applied only
+    /// where transcripts and summaries are rendered for a human. Missing/legacy
+    /// payloads default to "You". Trimmed and length-limited on save.
+    #[serde(default = "default_local_speaker_name")]
+    pub local_speaker_name: String,
 }
 fn enabled_by_default() -> bool {
     true
@@ -64,6 +72,12 @@ fn enabled_by_default() -> bool {
 fn default_language() -> String {
     "auto".into()
 }
+fn default_local_speaker_name() -> String {
+    "You".into()
+}
+/// Longest accepted `local_speaker_name`, generous for a person's display name
+/// while keeping Markdown/JSON output and the summary prompt bounded.
+pub const MAX_LOCAL_SPEAKER_NAME_LEN: usize = 64;
 fn default_ollama_url() -> String {
     "http://127.0.0.1:11434".into()
 }
@@ -113,10 +127,18 @@ impl Default for Settings {
             ollama_url: default_ollama_url(),
             summary_model: default_summary_model(),
             compress_audio: enabled_by_default(),
+            local_speaker_name: default_local_speaker_name(),
         }
     }
 }
 impl Settings {
+    /// Trims the local speaker name and enforces its length limit. Called by
+    /// callers that accept user-edited settings before `validate`/`save`, so a
+    /// stray leading/trailing space from a text field does not stick around.
+    pub fn normalize(mut self) -> Self {
+        self.local_speaker_name = self.local_speaker_name.trim().to_string();
+        self
+    }
     pub fn validate(&self) -> Result<(), StoreError> {
         if self.start_debounce_seconds > 60 {
             return Err(StoreError::Validation(
@@ -139,6 +161,14 @@ impl Settings {
             return Err(StoreError::Validation(
                 "Summary model must not be empty.".into(),
             ));
+        }
+        if self.local_speaker_name.trim().is_empty()
+            || self.local_speaker_name.len() > MAX_LOCAL_SPEAKER_NAME_LEN
+            || self.local_speaker_name.chars().any(|c| c.is_control())
+        {
+            return Err(StoreError::Validation(format!(
+                "Your name must be 1-{MAX_LOCAL_SPEAKER_NAME_LEN} plain-text characters."
+            )));
         }
         Ok(())
     }
@@ -254,6 +284,7 @@ mod tests {
             ollama_url: "http://localhost:11434".into(),
             summary_model: "qwen2.5:7b-instruct".into(),
             compress_audio: false,
+            local_speaker_name: "Ben".into(),
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -392,5 +423,47 @@ mod tests {
             })
             .is_err());
         assert_eq!(store.get().unwrap(), good);
+    }
+    #[test]
+    fn legacy_payload_without_local_speaker_name_defaults_to_you() {
+        // Simulates a settings row saved before this field existed.
+        let p = path("legacy-speaker-name.db");
+        let store = SettingsStore::open(&p).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE settings SET payload = '{\"auto_record\":true,\"start_debounce_seconds\":10,\"end_grace_seconds\":30,\"whisper_model\":\"base\",\"diarization_enabled\":true,\"audio_sources\":[],\"transcription_language\":\"auto\",\"echo_cancellation\":true,\"dedupe_echo_segments\":true,\"summary_enabled\":true,\"ollama_url\":\"http://127.0.0.1:11434\",\"summary_model\":\"qwen3:8b\",\"compress_audio\":true}' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.get().unwrap().local_speaker_name, "You");
+    }
+    #[test]
+    fn blank_or_oversized_local_speaker_name_does_not_replace_saved_value() {
+        let p = path("speaker-name.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                local_speaker_name: "   ".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert!(store
+            .save(Settings {
+                local_speaker_name: "x".repeat(MAX_LOCAL_SPEAKER_NAME_LEN + 1),
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
+    }
+    #[test]
+    fn normalize_trims_local_speaker_name() {
+        let settings = Settings {
+            local_speaker_name: "  Ben  ".into(),
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(settings.local_speaker_name, "Ben");
     }
 }

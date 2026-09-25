@@ -64,11 +64,11 @@ pub struct SummaryState {
     pub error: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct SummaryCheckpoint {
-    recording_id: String,
-    parent_checksum: String,
-    model: String,
-    output: SummaryOutput,
+pub(crate) struct SummaryCheckpoint {
+    pub(crate) recording_id: String,
+    pub(crate) parent_checksum: String,
+    pub(crate) model: String,
+    pub(crate) output: SummaryOutput,
 }
 
 pub struct SummaryService {
@@ -311,14 +311,55 @@ fn validate_checkpoint(
 fn literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('*', "\\*").replace('_', "\\_")
 }
-fn summary_markdown(recording: &Recording, checkpoint: &SummaryCheckpoint) -> String {
+/// Localized section headings for `summary.md`. Keyed off the model's own
+/// reported `output.language` (best-effort free text, e.g. "en", "French"),
+/// falling back to English for anything not recognized -- covering at least
+/// English and French per the local-summary feature's language support.
+struct Headings {
+    summary: &'static str,
+    key_points: &'static str,
+    decisions: &'static str,
+    action_items: &'static str,
+    due: &'static str,
+    open_questions: &'static str,
+    generated_note: &'static str,
+}
+const HEADINGS_EN: Headings = Headings {
+    summary: "Summary",
+    key_points: "Key points",
+    decisions: "Decisions",
+    action_items: "Action items",
+    due: "due",
+    open_questions: "Open questions",
+    generated_note: "Generated locally by an Ollama model from this recording's transcript. Names, owners, and dates are only as reliable as the transcript; verify anything important.",
+};
+const HEADINGS_FR: Headings = Headings {
+    summary: "Résumé",
+    key_points: "Points clés",
+    decisions: "Décisions",
+    action_items: "Actions à mener",
+    due: "échéance",
+    open_questions: "Questions ouvertes",
+    generated_note: "Généré localement par un modèle Ollama à partir de la transcription de cet enregistrement. Les noms, responsables et dates ne sont fiables qu'à la mesure de la transcription ; vérifiez tout élément important.",
+};
+fn headings_for(language: &str) -> &'static Headings {
+    let lower = language.trim().to_lowercase();
+    if lower.starts_with("fr") {
+        &HEADINGS_FR
+    } else {
+        &HEADINGS_EN
+    }
+}
+pub(crate) fn summary_markdown(recording: &Recording, checkpoint: &SummaryCheckpoint) -> String {
     let output = &checkpoint.output;
+    let headings = headings_for(&output.language);
     let mut markdown = format!(
-        "# {}\n\n- Recording ID: `{}`\n- Model: {}\n- Language: {}\n\n## Summary\n\n{}\n\n",
+        "# {}\n\n- Recording ID: `{}`\n- Model: {}\n- Language: {}\n\n## {}\n\n{}\n\n",
         literal(&output.title),
         recording.recording_id,
         literal(&checkpoint.model),
         literal(&output.language),
+        headings.summary,
         output.summary,
     );
     let section = |title: &str, items: &[String]| -> String {
@@ -332,22 +373,22 @@ fn summary_markdown(recording: &Recording, checkpoint: &SummaryCheckpoint) -> St
         s.push('\n');
         s
     };
-    markdown.push_str(&section("Key points", &output.key_points));
-    markdown.push_str(&section("Decisions", &output.decisions));
+    markdown.push_str(&section(headings.key_points, &output.key_points));
+    markdown.push_str(&section(headings.decisions, &output.decisions));
     if !output.action_items.is_empty() {
-        markdown.push_str("## Action items\n\n");
+        markdown.push_str(&format!("## {}\n\n", headings.action_items));
         for item in &output.action_items {
             markdown.push_str(&format!(
                 "- {}{}{}\n",
                 literal(&item.task),
                 item.owner.as_deref().map(|o| format!(" — {}", literal(o))).unwrap_or_default(),
-                item.due.as_deref().map(|d| format!(" (due {})", literal(d))).unwrap_or_default(),
+                item.due.as_deref().map(|d| format!(" ({} {})", headings.due, literal(d))).unwrap_or_default(),
             ));
         }
         markdown.push('\n');
     }
-    markdown.push_str(&section("Open questions", &output.open_questions));
-    markdown.push_str("---\n\nGenerated locally by an Ollama model from this recording's transcript. Names, owners, and dates are only as reliable as the transcript; verify anything important.\n");
+    markdown.push_str(&section(headings.open_questions, &output.open_questions));
+    markdown.push_str(&format!("---\n\n{}\n", headings.generated_note));
     markdown
 }
 fn tick(
@@ -414,6 +455,15 @@ fn tick(
             }
             let request = SummaryRequest {
                 recording: recording.clone(),
+                local_speaker_name: transcript
+                    .local_speaker_name
+                    .clone()
+                    .unwrap_or_else(|| "You".into()),
+                remote_speaker_labels: crate::diarization::read_completed_speaker_labels(
+                    root,
+                    &recording,
+                    &transcript,
+                ),
                 transcript: transcript.clone(),
                 ollama_url: settings.ollama_url.clone(),
                 model: settings.model.clone(),

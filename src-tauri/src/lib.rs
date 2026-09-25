@@ -18,6 +18,10 @@ mod flac_transcription_parity_tests;
 mod meeting_management_tests;
 #[cfg(test)]
 mod summary_real_ollama_tests;
+#[cfg(test)]
+mod diarization_real_tests;
+#[cfg(test)]
+mod speakers_end_to_end_tests;
 mod meeting_signals;
 mod meeting_title;
 mod ollama_client;
@@ -265,7 +269,7 @@ fn save_settings(
     let saved = storage.save(Settings {
         audio_sources: existing.audio_sources,
         ..settings
-    }).map_err(app_error)?;
+    }.normalize()).map_err(app_error)?;
     // A user who just enabled summaries, or fixed the URL/model, expects a
     // waiting job to resume immediately rather than sit out its backoff.
     let _ = summary.wake_waiting();
@@ -1006,6 +1010,7 @@ pub fn run() {
             language: settings.transcription_language.clone(),
             echo_cancellation: settings.echo_cancellation,
             dedupe_echo_segments: settings.dedupe_echo_segments,
+            local_speaker_name: settings.local_speaker_name,
         })
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();

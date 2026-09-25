@@ -304,7 +304,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
             .windows(2)
             .any(|pair| pair[0].end_ms > pair[1].start_ms)
         {
-            warnings.push("Tracks may overlap or duplicate speech. Source labels identify recorded inputs, not speakers; diarization is not available yet.".into());
+            warnings.push("Tracks may overlap or duplicate speech. Labels reflect local/remote roles, not individual speakers within a track, unless speaker identification has run.".into());
         }
         languages_used.sort();
         Ok(Transcript {
@@ -314,6 +314,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
             segments,
             languages_used,
             warnings,
+            local_speaker_name: Some(request.local_speaker_name.clone()),
         })
     }
 
@@ -1479,6 +1480,7 @@ mod tests {
             language: None,
             echo_cancellation: false,
             dedupe_echo_segments: false,
+            local_speaker_name: "You".into(),
         };
         assert!(validated_tracks(&request).is_err());
         let _ = fs::remove_dir_all(root);
@@ -1599,6 +1601,7 @@ mod tests {
             language: None,
             echo_cancellation: false,
             dedupe_echo_segments: false,
+            local_speaker_name: "You".into(),
         };
         let cancelled = AtomicBool::new(false);
         let started = std::time::Instant::now();
@@ -1614,6 +1617,7 @@ mod tests {
             .segments
             .iter()
             .all(|segment| segment.source_id == "public_fixture"));
+        assert_eq!(transcript.local_speaker_name.as_deref(), Some("You"));
         println!(
             "Public fixture: {} segments in {:?}; text: {}",
             transcript.segments.len(),

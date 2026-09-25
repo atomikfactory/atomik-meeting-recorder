@@ -65,6 +65,7 @@ fn request(
         language: None,
         echo_cancellation: false,
         dedupe_echo_segments: false,
+        local_speaker_name: "You".into(),
     }
 }
 

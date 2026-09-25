@@ -3,6 +3,8 @@
 //! what keeps this feature inside the app's "no cloud requests" guarantee --
 //! `summary_enabled` merely queues local work; this module is the only place
 //! that ever opens a socket for it.
+use crate::recording::Recording;
+use crate::transcription::presentation_label;
 use crate::transcription_types::TranscriptSegment;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -89,7 +91,7 @@ fn system_prompt(language_hint: Option<&str>) -> String {
         .unwrap_or_else(|| "Detect the meeting's dominant language from the transcript and write your entire response in that language.".into());
     format!(
         "You are summarizing a local meeting transcript for the person who recorded it. {language}\n\n\
-        The transcript's source labels (e.g. \"Microphone\") name the *audio device* that captured that line, not a person's identity: a \"Microphone\" line is the local user speaking, and a \"Speakers\"/\"System audio\" line is remote participants captured via loopback. Some of these transcripts predate an echo-cancellation feature and may contain near-duplicate lines across sources -- one side's speech leaking faintly into the other -- treat closely matching overlapping lines from different sources as likely echo of the same speech, not two people saying the same thing.\n\n\
+        Each line is labeled with who said it: \"You\" (or the local user's chosen name) is the person who recorded the meeting, speaking on their own microphone; \"Speaker 1\", \"Speaker 2\", and so on are distinct remote participants identified by voice; \"Remote\" is a remote participant's line that could not be confidently assigned to a specific speaker number. These are not necessarily this person's real name -- only use a real name as `owner` in an action item when that name (or an exact label like \"You\"/\"Speaker 2\") is actually spoken or written in the transcript; otherwise leave `owner` null. Some of these transcripts predate an echo-cancellation feature and may contain near-duplicate lines across the local and remote labels -- one side's speech leaking faintly into the other -- treat closely matching overlapping lines as likely echo of the same speech, not two people saying the same thing.\n\n\
         Do not invent names, owners, or due dates that are not stated or clearly implied in the transcript; leave `owner`/`due` null rather than guessing. Only report action items, decisions, and open questions that are actually present. Keep the summary factual and concise; it will be read by someone who was in the meeting."
     )
 }
@@ -101,17 +103,36 @@ fn merge_prompt(language_hint: Option<&str>) -> String {
     )
 }
 
+/// Identifies one transcript segment independent of its position in whatever
+/// (possibly reordered, possibly overlapping) slice is being rendered --
+/// map-reduce chunking in `plan_chunks` copies subsets of the original
+/// segment list, so a plain index into `remote_speaker_by_segment` would not
+/// line up with the original checkpoint's labels.
+pub type SegmentKey = (String, u64, u64);
+pub fn segment_key(segment: &TranscriptSegment) -> SegmentKey {
+    (segment.source_id.clone(), segment.start_ms, segment.end_ms)
+}
+
 /// Renders transcript segments as plain lines the model can read, using
-/// wall-clock-style timestamps and the same source labels a human transcript
-/// would show, so the model receives exactly the ambiguity a human reader would.
-pub fn format_segments(segments: &[TranscriptSegment]) -> String {
+/// wall-clock-style timestamps and the same You/Speaker N/Remote labels a
+/// human transcript would show (see `transcription::presentation_label`), so
+/// the model receives exactly the ambiguity -- and the same identity
+/// resolution -- a human reader would.
+pub fn format_segments(
+    segments: &[TranscriptSegment],
+    recording: &Recording,
+    local_speaker_name: &str,
+    remote_speaker_by_segment: Option<&std::collections::HashMap<SegmentKey, u32>>,
+) -> String {
     segments
         .iter()
         .map(|segment| {
+            let remote_speaker = remote_speaker_by_segment.and_then(|m| m.get(&segment_key(segment)).copied());
+            let label = presentation_label(recording, segment, local_speaker_name, remote_speaker);
             format!(
                 "[{}] {}: {}",
                 timestamp(segment.start_ms),
-                segment.source_name,
+                label,
                 segment.text.trim()
             )
         })
@@ -128,6 +149,16 @@ fn timestamp(ms: u64) -> String {
 /// context window, this just avoids sending something certain to be truncated.
 const CHARS_PER_TOKEN: usize = 4;
 
+/// A rough per-line length estimate for chunk-size budgeting only (see
+/// `plan_chunks`): the exact rendered label ("You"/"Speaker N"/"Remote") is
+/// not yet known at this stage (it depends on the recording and any
+/// diarization result), but its length is close enough to the raw source
+/// name for this to stay a safe, conservative estimate either way.
+fn rendered_line_len_estimate(segment: &TranscriptSegment) -> usize {
+    // "[HH:MM:SS] " + label + ": " + text + newline
+    11 + segment.source_name.len() + 2 + segment.text.trim().len() + 1
+}
+
 /// Splits segments into chunks whose rendered text fits within `num_ctx` tokens
 /// (leaving room for the prompt and the response), each overlapping the
 /// previous chunk by a few segments so a point spanning a boundary is not lost
@@ -138,7 +169,7 @@ pub fn plan_chunks(segments: &[TranscriptSegment], num_ctx: usize) -> Vec<Vec<Tr
     if segments.is_empty() {
         return vec![Vec::new()];
     }
-    if format_segments(segments).len() <= budget_chars {
+    if segments.iter().map(rendered_line_len_estimate).sum::<usize>() <= budget_chars {
         return vec![segments.to_vec()];
     }
     let mut chunks = Vec::new();
@@ -147,7 +178,7 @@ pub fn plan_chunks(segments: &[TranscriptSegment], num_ctx: usize) -> Vec<Vec<Tr
         let mut end = start;
         let mut len = 0usize;
         while end < segments.len() {
-            let line_len = format_segments(std::slice::from_ref(&segments[end])).len() + 1;
+            let line_len = rendered_line_len_estimate(&segments[end]);
             if end > start && len + line_len > budget_chars {
                 break;
             }
@@ -394,9 +425,10 @@ mod tests {
         assert!(value2.get("think").is_none());
     }
     #[test]
-    fn prompt_mentions_device_labels_and_forbids_invention() {
+    fn prompt_mentions_speaker_labels_and_forbids_invention() {
         let text = system_prompt(Some("en"));
-        assert!(text.contains("Microphone"));
+        assert!(text.contains("\"You\""));
+        assert!(text.contains("Speaker 1"));
         assert!(text.contains("not invent"));
         assert!(text.contains("(en)"));
     }

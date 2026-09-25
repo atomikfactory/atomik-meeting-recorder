@@ -24,6 +24,12 @@ pub struct TranscriptionRequest {
     /// `echo_cancellation`: a safety net for whatever signal-level AEC
     /// leaves behind, or does not get to run at all.
     pub dedupe_echo_segments: bool,
+    /// The local user's display name at the time of transcription (see
+    /// `store::Settings::local_speaker_name`), baked into the resulting
+    /// `Transcript` so its Markdown rendering stays a pure, checkpoint-safe
+    /// function of `(Recording, Transcript)` even if the setting later
+    /// changes -- see `Transcript::local_speaker_name`.
+    pub local_speaker_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +45,16 @@ pub struct Transcript {
     /// not depend on it.
     #[serde(default)]
     pub languages_used: Vec<String>,
+    /// The local user's display name in effect when this transcript was
+    /// produced (see `store::Settings::local_speaker_name`), used to render
+    /// input-track (microphone) segments in Markdown and the summary prompt.
+    /// `None` for transcripts written before this field existed, or if
+    /// somehow unset; renders fall back to "You". Renaming yourself in
+    /// Settings only affects transcripts produced after the change --
+    /// rewriting an already-checkpointed Markdown file retroactively would
+    /// defeat its own tamper-evidence check.
+    #[serde(default)]
+    pub local_speaker_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

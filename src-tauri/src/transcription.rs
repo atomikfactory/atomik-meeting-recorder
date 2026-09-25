@@ -7,7 +7,7 @@ use crate::{
     summary_store::SummaryStore,
     transcription_engine::{hash_model, inspect_model, TranscriptionEngine},
     transcription_store::{StoredJob, TranscriptionStore},
-    transcription_types::{ModelInfo, Transcript, TranscriptionRequest},
+    transcription_types::{ModelInfo, Transcript, TranscriptSegment, TranscriptionRequest},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,8 @@ pub struct TranscriptionSettings {
     pub echo_cancellation: bool,
     /// See `store::Settings::dedupe_echo_segments`.
     pub dedupe_echo_segments: bool,
+    /// See `store::Settings::local_speaker_name`.
+    pub local_speaker_name: String,
 }
 impl TranscriptionSettings {
     /// Convenience for tests and fixtures that only care about the model size.
@@ -45,6 +47,7 @@ impl TranscriptionSettings {
             language: "auto".into(),
             echo_cancellation: true,
             dedupe_echo_segments: true,
+            local_speaker_name: "You".into(),
         }
     }
 }
@@ -769,6 +772,7 @@ fn tick(
                     .then(|| current_settings.language.clone()),
                 echo_cancellation: current_settings.echo_cancellation,
                 dedupe_echo_segments: current_settings.dedupe_echo_segments,
+                local_speaker_name: current_settings.local_speaker_name.clone(),
             };
             let mut progress_error = None;
             let mut progress = |value: u8| {
@@ -929,17 +933,78 @@ fn utc_date(milliseconds: u64) -> String {
         seconds % 60
     )
 }
+/// Default label for output-track (remote/loopback) speech in Markdown and the
+/// summary prompt, used whenever speaker identification has not resolved a
+/// specific, stable speaker number for a turn (or has not run at all).
+pub(crate) const DEFAULT_REMOTE_LABEL: &str = "Remote";
+
+/// Presentation label for one transcript segment: the local user's own name
+/// for an input (microphone) track, "Speaker N" (or the default remote
+/// label) for an output (loopback) track, or the segment's recorded source
+/// name as a fallback when its track cannot be resolved (e.g. a track later
+/// removed from `recording.tracks`). Purely a display concern --
+/// `segment.source_id`/`source_name` are never mutated, keeping
+/// `transcript.json` a stable historical record independent of presentation.
+pub(crate) fn presentation_label(
+    recording: &Recording,
+    segment: &TranscriptSegment,
+    local_speaker_name: &str,
+    remote_speaker: Option<u32>,
+) -> String {
+    match recording
+        .tracks
+        .iter()
+        .find(|track| track.source_id == segment.source_id)
+        .map(|track| track.direction.as_str())
+    {
+        Some("input") => local_speaker_name.to_string(),
+        Some("output") => remote_speaker
+            .map(|n| format!("Speaker {n}"))
+            .unwrap_or_else(|| DEFAULT_REMOTE_LABEL.to_string()),
+        _ => segment.source_name.clone(),
+    }
+}
+
 pub(crate) fn markdown_document(recording: &Recording, t: &Transcript) -> String {
-    let mut output = format!("# Meeting — {}\n\n- Recording ID: `{}`\n- Duration: {}\n- Model: {}\n- Audio sources: {}\n\nSource labels describe audio devices, not speaker identities. No summarization or diarization has been applied.\n\n", utc_date(recording.started_at), recording.recording_id, timestamp(recording.duration_ms), literal(&t.model_key), recording.tracks.iter().map(|track| literal(&track.name)).collect::<Vec<_>>().join(", "));
+    markdown_document_labeled(recording, t, None)
+}
+
+/// As `markdown_document`, optionally overlaying per-segment remote speaker
+/// numbers (parallel to `t.segments`; `None` entries mean undecided) from a
+/// completed local speaker-identification checkpoint (see `diarization.rs`).
+/// A pure function of `(recording, t, remote_labels)`, so the diarization
+/// companion Markdown stays checkpoint-safe just like the base transcript.
+pub(crate) fn markdown_document_labeled(
+    recording: &Recording,
+    t: &Transcript,
+    remote_labels: Option<&[Option<u32>]>,
+) -> String {
+    let local_speaker_name = t.local_speaker_name.as_deref().unwrap_or("You");
+    let note = if remote_labels.is_some() {
+        format!(
+            "Labels are approximate. \"{}\" is your own microphone track. Remote turns are grouped into Speaker 1, Speaker 2, and so on by voice similarity within each recorded source, or \"{}\" when uncertain; these are not named identities and are not comparable across recordings. No summary was regenerated for this file.",
+            literal(local_speaker_name),
+            DEFAULT_REMOTE_LABEL
+        )
+    } else {
+        format!(
+            "\"{}\" is your own microphone track; other tracks are labeled \"{}\". These reflect local/remote roles, not per person identities, unless speaker identification has run.",
+            literal(local_speaker_name),
+            DEFAULT_REMOTE_LABEL
+        )
+    };
+    let mut output = format!("# Meeting — {}\n\n- Recording ID: `{}`\n- Duration: {}\n- Model: {}\n- Audio sources: {}\n\n{}\n\n", utc_date(recording.started_at), recording.recording_id, timestamp(recording.duration_ms), literal(&t.model_key), recording.tracks.iter().map(|track| literal(&track.name)).collect::<Vec<_>>().join(", "), note);
     if t.segments.is_empty() {
         output.push_str("No speech segments were returned by the local engine.\n");
     }
-    for segment in &t.segments {
+    for (i, segment) in t.segments.iter().enumerate() {
+        let remote_speaker = remote_labels.and_then(|labels| labels.get(i).copied().flatten());
+        let label = presentation_label(recording, segment, local_speaker_name, remote_speaker);
         output.push_str(&format!(
             "**[{}–{}] {}:** {}\n\n",
             timestamp(segment.start_ms),
             timestamp(segment.end_ms),
-            literal(&segment.source_name),
+            literal(&label),
             literal(&segment.text)
         ));
     }

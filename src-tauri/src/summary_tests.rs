@@ -52,6 +52,7 @@ impl Fixture {
             model_hash: "a".repeat(64),
             warnings: vec![],
             languages_used: vec!["en".into()],
+            local_speaker_name: Some("You".into()),
             segments: vec![
                 TranscriptSegment {
                     start_ms: 0,
@@ -277,6 +278,7 @@ fn restart_invalidation_removes_idle_job_and_requires_new_checksum() {
         model_hash: new_hash.clone(),
         warnings: vec![],
         languages_used: vec!["en".into()],
+        local_speaker_name: Some("You".into()),
         segments: vec![TranscriptSegment {
             start_ms: 0,
             end_ms: 500,

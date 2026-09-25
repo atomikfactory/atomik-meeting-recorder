@@ -103,6 +103,11 @@ fn real_ollama_summarizes_copied_transcripts() {
         let recording = synthetic_recording(&transcript);
         let request = SummaryRequest {
             recording: recording.clone(),
+            local_speaker_name: transcript
+                .local_speaker_name
+                .clone()
+                .unwrap_or_else(|| "You".into()),
+            remote_speaker_labels: None,
             transcript: transcript.clone(),
             ollama_url: ollama_url.clone(),
             model: model.clone(),

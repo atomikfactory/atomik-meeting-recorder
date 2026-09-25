@@ -15,6 +15,15 @@ pub struct SummaryRequest {
     pub transcript: Transcript,
     pub ollama_url: String,
     pub model: String,
+    /// The local user's display name (see `store::Settings::local_speaker_name`),
+    /// used to label their own microphone-track lines in the prompt. Falls back
+    /// to "You" at the call site when `transcript.local_speaker_name` is unset.
+    pub local_speaker_name: String,
+    /// Completed local speaker-identification labels (see
+    /// `diarization::read_completed_speaker_labels`), parallel to
+    /// `transcript.segments`. `None` when diarization has not completed for
+    /// this recording -- remote lines then render as "Remote".
+    pub remote_speaker_labels: Option<Vec<Option<u32>>>,
 }
 
 pub trait SummaryEngine: Send + Sync {
@@ -95,7 +104,31 @@ impl SummaryEngine for OllamaSummaryEngine {
         let client = OllamaClient::new(&request.ollama_url)?;
         let language = language_hint(&request.transcript);
         let header = meeting_header(&request.recording);
-        let full_text = format!("{header}{}", ollama_client::format_segments(&request.transcript.segments));
+        // Keyed by segment identity, not position: `plan_chunks` below copies
+        // (possibly overlapping) subsets of `request.transcript.segments`, so a
+        // positional index into the labels would not line up once chunked.
+        let remote_map: Option<std::collections::HashMap<ollama_client::SegmentKey, u32>> =
+            request.remote_speaker_labels.as_ref().map(|labels| {
+                request
+                    .transcript
+                    .segments
+                    .iter()
+                    .zip(labels.iter())
+                    .filter_map(|(segment, label)| {
+                        label.map(|n| (ollama_client::segment_key(segment), n))
+                    })
+                    .collect()
+            });
+        let remote_map = remote_map.as_ref();
+        let full_text = format!(
+            "{header}{}",
+            ollama_client::format_segments(
+                &request.transcript.segments,
+                &request.recording,
+                &request.local_speaker_name,
+                remote_map,
+            )
+        );
         let num_ctx = choose_num_ctx(full_text.len());
         let chunks = ollama_client::plan_chunks(&request.transcript.segments, num_ctx);
         progress(0);
@@ -111,7 +144,15 @@ impl SummaryEngine for OllamaSummaryEngine {
         let chunk_system = ollama_client::prompts(language.as_deref(), false);
         for (index, chunk) in chunks.iter().enumerate() {
             check_cancelled(cancelled)?;
-            let text = format!("{header}{}", ollama_client::format_segments(chunk));
+            let text = format!(
+                "{header}{}",
+                ollama_client::format_segments(
+                    chunk,
+                    &request.recording,
+                    &request.local_speaker_name,
+                    remote_map,
+                )
+            );
             let raw = client.chat(&request.model, &chunk_system, &text, chunk_schema(), num_ctx)?;
             let parsed: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| format!("Ollama returned malformed chunk notes: {e}"))?;
@@ -157,6 +198,7 @@ mod tests {
             segments: vec![],
             warnings: vec![],
             languages_used: vec!["en".into()],
+            local_speaker_name: Some("You".into()),
         };
         assert_eq!(language_hint(&t), Some("en".into()));
         t.languages_used = vec!["en".into(), "fr".into()];

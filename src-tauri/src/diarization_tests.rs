@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    diarization_types::SpeakerTurn, recording::Track, transcription_types::TranscriptSegment,
+    diarization_types::SpeakerTurn, recording::Track, transcription::markdown_document,
+    transcription_types::TranscriptSegment,
 };
 use std::sync::atomic::AtomicUsize;
 
@@ -36,9 +37,9 @@ impl Fixture {
             transcription_status: "pending".into(),
             appflowy_status: "pending".into(),
             tracks: vec![Track {
-                source_id: "mic".into(),
-                name: "Desk microphone".into(),
-                direction: "input".into(),
+                source_id: "loopback".into(),
+                name: "Meeting audio (loopback)".into(),
+                direction: "output".into(),
                 sample_rate: 16000,
                 channels: 1,
                 file_path: dir.join("track-00.wav").display().to_string(),
@@ -54,20 +55,21 @@ impl Fixture {
             model_hash: "a".repeat(64),
             warnings: vec![],
             languages_used: vec![],
+            local_speaker_name: Some("You".into()),
             segments: vec![
                 TranscriptSegment {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "Literal *words* <img src=x>.".into(),
-                    source_id: "mic".into(),
-                    source_name: "Desk microphone".into(),
+                    source_id: "loopback".into(),
+                    source_name: "Meeting audio (loopback)".into(),
                 },
                 TranscriptSegment {
                     start_ms: 1000,
                     end_ms: 2000,
                     text: "An uncertain passage.".into(),
-                    source_id: "mic".into(),
-                    source_name: "Desk microphone".into(),
+                    source_id: "loopback".into(),
+                    source_name: "Meeting audio (loopback)".into(),
                 },
             ],
         };
@@ -175,14 +177,14 @@ impl DiarizationEngine for FakeEngine {
             warnings: vec![],
             turns: vec![
                 SpeakerTurn {
-                    source_id: "mic".into(),
+                    source_id: "loopback".into(),
                     start_ms: 0,
                     end_ms: 1000,
                     speaker: 7,
                     confidence: Some(0.95),
                 },
                 SpeakerTurn {
-                    source_id: "mic".into(),
+                    source_id: "loopback".into(),
                     start_ms: 1000,
                     end_ms: 2000,
                     speaker: 8,
@@ -211,7 +213,7 @@ fn completes_once_preserves_whisper_and_escapes_literal_text() {
     assert_eq!(fs::read(f.path("transcript.md")).unwrap(), baseline);
     let md = fs::read_to_string(f.path("transcript-speakers.md")).unwrap();
     assert!(md.contains("Speaker 1"));
-    assert!(md.contains("Speaker unknown"));
+    assert!(md.contains("Remote"));
     assert!(md.contains("Literal \\*words\\* &lt;img src=x&gt;\\."));
     assert!(!md.contains("No summarization or diarization has been applied"));
     assert_eq!(

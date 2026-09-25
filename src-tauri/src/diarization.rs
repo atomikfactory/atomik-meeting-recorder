@@ -7,8 +7,8 @@ use crate::{
     recording_store::RecordingStore,
     speaker_alignment::align_speakers,
     transcription::{
-        atomic_new, checksum, markdown_document, output_path, processing_guard, read_checkpoint,
-        recording_directory, reject_symlink, validate_transcript,
+        atomic_new, checksum, markdown_document_labeled, output_path, processing_guard,
+        read_checkpoint, recording_directory, reject_symlink, validate_transcript,
     },
     transcription_engine::hash_model,
     transcription_store::TranscriptionStore,
@@ -450,22 +450,41 @@ fn speaker_markdown(
     checkpoint: &SpeakerCheckpoint,
 ) -> String {
     let mut labelled = transcript.clone();
-    for (segment, label) in labelled.segments.iter_mut().zip(&checkpoint.labels) {
-        segment.source_name = format!(
-            "{} · {}",
-            label
-                .map(|n| format!("Speaker {n}"))
-                .unwrap_or_else(|| "Speaker unknown".into()),
-            segment.source_name
-        );
-    }
     labelled
         .warnings
         .extend(checkpoint.output.warnings.iter().cloned());
-    markdown_document(recording,&labelled).replacen(
-        "Source labels describe audio devices, not speaker identities. No summarization or diarization has been applied.",
-        "Local speaker attribution is approximate. Numbers distinguish voices within each audio source, not named people; the same person on different devices may receive different numbers. Ambiguous passages remain unknown. No summary was generated.",1)
+    markdown_document_labeled(recording, &labelled, Some(&checkpoint.labels))
 }
+/// Best-effort lookup of a recording's completed local speaker-identification
+/// labels (see `SpeakerCheckpoint`), for embedding remote speaker numbers into
+/// the summary prompt (see `summary.rs`). Returns `None` on anything short of
+/// a fully validated, completed checkpoint matching this exact transcript --
+/// diarization is optional and must never block or corrupt a summary. If
+/// diarization finishes only *after* a summary was already generated, this
+/// simply means that summary predates the labels; the user can regenerate it
+/// (see `regenerate_summary`) to pick them up. We do not auto-regenerate: a
+/// summary rerun is an expensive Ollama call better left to explicit intent.
+pub(crate) fn read_completed_speaker_labels(
+    root: &Path,
+    recording: &Recording,
+    transcript: &Transcript,
+) -> Option<Vec<Option<u32>>> {
+    let store = DiarizationStore::open(&root.join("diarization.sqlite3")).ok()?;
+    let job = store.get(&recording.recording_id).ok().flatten()?;
+    if job.status != "completed" {
+        return None;
+    }
+    let directory = recording_directory(root, &recording.recording_id).ok()?;
+    let json = output_path(&directory, "speakers.json").ok()?;
+    let bytes = read_checkpoint(&json).ok()?;
+    if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {
+        return None;
+    }
+    validate_checkpoint(&bytes, &job, recording, transcript)
+        .ok()
+        .map(|checkpoint| checkpoint.labels)
+}
+
 fn tick(
     root: &Path,
     store: &DiarizationStore,
