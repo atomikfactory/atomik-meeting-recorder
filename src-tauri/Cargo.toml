@@ -76,3 +76,10 @@ libpulse-simple-binding = "2"
 # Keep full debug info for this crate only.
 [profile.dev.package."*"]
 debug = false
+# The bundled SQLite C library (FTS5 included) is compiled by libsqlite3-sys's
+# build script, which counts as a build-script/host artifact for Cargo's
+# optimization settings -- `profile.dev.package.*` above does not reach it.
+# Left at -O0 it makes the search index's own test suite (and any real
+# startup reconcile of a large library) needlessly slow.
+[profile.dev.build-override]
+opt-level = 3
