@@ -28,6 +28,14 @@ pub struct Settings {
     /// toggle. Missing/legacy payloads default to enabled.
     #[serde(default = "enabled_by_default")]
     pub echo_cancellation: bool,
+    /// Text-level duplicate cleanup (see `echo_dedup.rs`): after
+    /// transcription, drops a microphone-track segment that closely matches
+    /// an overlapping loopback-track segment. A safety net independent of
+    /// `echo_cancellation` -- it also helps when AEC is off, or was skipped
+    /// for a track -- so it is its own setting rather than folded into that
+    /// one. Missing/legacy payloads default to enabled.
+    #[serde(default = "enabled_by_default")]
+    pub dedupe_echo_segments: bool,
 }
 fn enabled_by_default() -> bool {
     true
@@ -73,6 +81,7 @@ impl Default for Settings {
             audio_sources: vec![],
             transcription_language: default_language(),
             echo_cancellation: enabled_by_default(),
+            dedupe_echo_segments: enabled_by_default(),
         }
     }
 }
@@ -202,6 +211,7 @@ mod tests {
             audio_sources: vec![],
             transcription_language: "fr".into(),
             echo_cancellation: false,
+            dedupe_echo_segments: false,
         };
         store.save(expected.clone()).unwrap();
         drop(store);

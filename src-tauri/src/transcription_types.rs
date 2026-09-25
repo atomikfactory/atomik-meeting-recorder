@@ -19,6 +19,11 @@ pub struct TranscriptionRequest {
     /// before transcription, when the recording has both. A no-op when the
     /// recording lacks either track direction, regardless of this flag.
     pub echo_cancellation: bool,
+    /// Whether to run the text-level echo-duplicate cleanup (see
+    /// `echo_dedup.rs`) after transcription. Independent of
+    /// `echo_cancellation`: a safety net for whatever signal-level AEC
+    /// leaves behind, or does not get to run at all.
+    pub dedupe_echo_segments: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

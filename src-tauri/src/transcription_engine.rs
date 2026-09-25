@@ -1,7 +1,7 @@
 //! Local CPU transcription. Audio never leaves this process.
 
 use crate::{
-    echo_cancel,
+    echo_cancel, echo_dedup,
     recording::Track,
     recording_paths::resolved_recording_directory,
     transcription_types::{ModelInfo, Transcript, TranscriptSegment, TranscriptionRequest},
@@ -140,7 +140,12 @@ impl TranscriptionEngine for LocalWhisperEngine {
         // logging backend is configured. This is process-global but idempotent.
         whisper_rs::install_logging_hooks();
         let context = self.create_context(&request.model_path)?;
+        // Paired 1:1 with `segments` (see the sort below, which keeps both in
+        // lockstep) so text-level dedup can tell a microphone segment from a
+        // loopback one without adding a `direction` field to the serialized
+        // `TranscriptSegment` shape.
         let mut segments = Vec::new();
+        let mut directions: Vec<&'static str> = Vec::new();
         let mut languages_used = Vec::new();
         let total = tracks.len().max(1) as u32;
         progress(0);
@@ -148,6 +153,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
             check_cancelled(cancelled)?;
             let start_progress = ((track_index as u32 * 100) / total) as u8;
             let end_progress = (((track_index + 1) as u32 * 100) / total) as u8;
+            let before = segments.len();
             let (chunk_count, detected_language) = transcribe_track(
                 &context,
                 track,
@@ -163,6 +169,8 @@ impl TranscriptionEngine for LocalWhisperEngine {
                     );
                 },
             )?;
+            let direction: &'static str = if track.direction == "output" { "output" } else { "input" };
+            directions.extend(std::iter::repeat(direction).take(segments.len() - before));
             if chunk_count > 1 {
                 warnings.push(format!(
                     "{} was processed in {chunk_count} local chunks; words near a chunk boundary may be split or repeated.",
@@ -176,8 +184,25 @@ impl TranscriptionEngine for LocalWhisperEngine {
             }
             progress(end_progress);
         }
-        segments
-            .sort_by_key(|segment| (segment.start_ms, segment.end_ms, segment.source_id.clone()));
+        // Sort `segments` and `directions` together (as one indirect key) so
+        // they stay paired index-for-index.
+        let mut order: Vec<usize> = (0..segments.len()).collect();
+        order.sort_by_key(|&i| (segments[i].start_ms, segments[i].end_ms, segments[i].source_id.clone()));
+        let sorted_segments: Vec<TranscriptSegment> =
+            order.iter().map(|&i| segments[i].clone()).collect();
+        let sorted_directions: Vec<&'static str> = order.iter().map(|&i| directions[i]).collect();
+        let mut segments = sorted_segments;
+        if request.dedupe_echo_segments {
+            let (deduped, removed) =
+                echo_dedup::dedupe_echo_segments(segments, &sorted_directions);
+            segments = deduped;
+            if removed > 0 {
+                warnings.push(format!(
+                    "Removed {removed} duplicate segment{} likely caused by audio appearing on both the microphone and loopback tracks.",
+                    if removed == 1 { "" } else { "s" }
+                ));
+            }
+        }
         if segments
             .windows(2)
             .any(|pair| pair[0].end_ms > pair[1].start_ms)
@@ -1321,6 +1346,7 @@ mod tests {
             model_hash: "hash".into(),
             language: None,
             echo_cancellation: false,
+            dedupe_echo_segments: false,
         };
         assert!(validated_tracks(&request).is_err());
         let _ = fs::remove_dir_all(root);
@@ -1440,6 +1466,7 @@ mod tests {
             model_hash: info.sha256.clone(),
             language: None,
             echo_cancellation: false,
+            dedupe_echo_segments: false,
         };
         let cancelled = AtomicBool::new(false);
         let started = std::time::Instant::now();
@@ -1468,5 +1495,4 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
-
 }

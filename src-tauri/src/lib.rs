@@ -3,6 +3,7 @@ mod capture_meter;
 mod detection;
 mod diarization;
 mod echo_cancel;
+mod echo_dedup;
 mod diarization_engine;
 mod diarization_store;
 mod diarization_types;
@@ -839,6 +840,7 @@ pub fn run() {
             model_key: whisper_model_key(&settings.whisper_model).into(),
             language: settings.transcription_language.clone(),
             echo_cancellation: settings.echo_cancellation,
+            dedupe_echo_segments: settings.dedupe_echo_segments,
         })
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();

@@ -14,6 +14,7 @@ type Settings = {
   diarization_enabled?: boolean;
   transcription_language?: Language;
   echo_cancellation?: boolean;
+  dedupe_echo_segments?: boolean;
 };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
@@ -83,6 +84,7 @@ let settings: Settings = {
   audio_sources: [],
   transcription_language: "auto",
   echo_cancellation: true,
+  dedupe_echo_segments: true,
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -641,6 +643,12 @@ function render() {
                   >When a recording has both a microphone and a system-audio (loopback) source, removes remote participants' audio picked up a second time by the microphone before transcribing, so it does not appear twice. Has no effect on recordings with only one of those.</small
                 ></span
               ></label
+            ><label class="toggle"
+              ><input type="checkbox" name="dedupe_echo_segments" ${settings.dedupe_echo_segments !== false ? "checked" : ""} ${disabled()}/><span
+                ><b>Remove duplicate echoed lines</b><small
+                  >After transcribing, drops a microphone line that closely matches an overlapping loopback line -- a text-level safety net that also helps when echo cancellation is off or does not fully catch it.</small
+                ></span
+              ></label
             >
             <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Labels uncertain turns as unknown. Speaker labels are kept within each audio source and never infer people’s names.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
@@ -796,6 +804,7 @@ function render() {
       diarization_enabled: form.get("diarization_enabled") === "on",
       transcription_language: String(form.get("transcription_language") ?? "auto") as Language,
       echo_cancellation: form.get("echo_cancellation") === "on",
+      dedupe_echo_segments: form.get("dedupe_echo_segments") === "on",
       audio_sources: settings.audio_sources,
     };
     try {

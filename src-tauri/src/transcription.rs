@@ -32,6 +32,8 @@ pub struct TranscriptionSettings {
     pub language: String,
     /// See `store::Settings::echo_cancellation`.
     pub echo_cancellation: bool,
+    /// See `store::Settings::dedupe_echo_segments`.
+    pub dedupe_echo_segments: bool,
 }
 impl TranscriptionSettings {
     /// Convenience for tests and fixtures that only care about the model size.
@@ -40,6 +42,7 @@ impl TranscriptionSettings {
             model_key: model_key.into(),
             language: "auto".into(),
             echo_cancellation: true,
+            dedupe_echo_segments: true,
         }
     }
 }
@@ -759,6 +762,7 @@ fn tick(
                 language: (current_settings.language != "auto")
                     .then(|| current_settings.language.clone()),
                 echo_cancellation: current_settings.echo_cancellation,
+                dedupe_echo_segments: current_settings.dedupe_echo_segments,
             };
             let mut progress_error = None;
             let mut progress = |value: u8| {
