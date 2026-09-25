@@ -56,6 +56,16 @@ windows = { version = "0.61.3", features = [
 [target.'cfg(not(windows))'.dependencies]
 sherpa-onnx = "=1.13.8"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# System-output ("what the speakers play") capture on Linux. PulseAudio's
+# client protocol is also served by PipeWire's pipewire-pulse compatibility
+# layer on modern distros (Ubuntu 22.04+, Fedora, Debian 12, Arch), so one
+# client implementation covers both sound servers without a PipeWire-native
+# dependency. Build needs libpulse-dev + pkg-config; runtime needs
+# libpulse.so.0, which both sound servers ship. See docs/audio-devices.md.
+libpulse-binding = "2"
+libpulse-simple-binding = "2"
+
 # Dependency debug info dominates target/ size (whisper.cpp, sherpa-onnx, tauri).
 # Keep full debug info for this crate only.
 [profile.dev.package."*"]

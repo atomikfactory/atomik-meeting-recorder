@@ -7,6 +7,8 @@ mod echo_dedup;
 mod diarization_engine;
 mod diarization_store;
 mod diarization_types;
+#[cfg(target_os = "linux")]
+mod linux_pulse;
 #[cfg(test)]
 mod meeting_management_tests;
 mod meeting_signals;
@@ -17,6 +19,7 @@ mod recording_store;
 mod recording_wav;
 mod speaker_alignment;
 mod store;
+mod system_output;
 mod transcription;
 mod transcription_engine;
 mod transcription_store;
