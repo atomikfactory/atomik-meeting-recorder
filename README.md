@@ -23,12 +23,16 @@ npm run build
 - Native tray, dashboard, settings, and single-instance lifecycle
 - Microphone/interface discovery, input/output direction, default formats, and device errors
 - Multiple saved audio sources, refresh, and retention of disconnected selections
-- Windows WASAPI loopback capture; other platform limits are explicit
+- Windows WASAPI loopback capture, and Linux PulseAudio/PipeWire monitor-source capture of system output; other platform limits are explicit
 - Local SQLite preferences; no runtime cloud requests
 - Manual start/stop from the window or tray, recording timer and active tray indicator
 - Separate PCM16 WAV tracks, UUID recording IDs, SQLite metadata, and restart recovery
 - Local Windows meeting hints, configurable confirmation/end grace, and approval before each detected recording
-- Local Whisper model import, serial background transcription, retry/progress UI, timestamped Markdown, and crash-safe transcript checkpoints
+- Local Whisper model import (tiny/base/small/medium/large/**turbo**), serial background transcription, retry/progress UI, timestamped Markdown, and crash-safe transcript checkpoints. **large-v3-turbo is recommended**, especially quantized (e.g. `ggml-large-v3-turbo-q5_0.bin`, ~574 MB from the [whisper.cpp Hugging Face repo](https://huggingface.co/ggerganov/whisper.cpp)); import it in Settings, no in-app downloads. Waiting (not-yet-claimed) jobs follow the currently selected model size
+- Transcription language setting: detect automatically, or pin one of several supported languages
+- Silence skipping and anti-hallucination decode settings, reducing wasted decode time and repeated/hallucinated Whisper text on near-silent audio
+- Optional offline acoustic echo cancellation of the microphone against loopback (an independent Rust implementation modeled on WebRTC AEC3's design, not a binding to it -- see `src-tauri/src/echo_cancel/LICENSE-WEBRTC` for the BSD-3 attribution this required), plus a separate text-level duplicate-line cleanup pass after transcription; both toggle independently in Settings
+- x86-64-v3 (AVX2) CPU baseline for local transcription, and an optional CUDA build for GPU transcription (see Build and verify below)
 - Optional local speaker-identification stage with separately imported segmentation and voice models; it never blocks transcription
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
@@ -41,8 +45,8 @@ See [audio device management](docs/audio-devices.md) for platform differences an
 - Chrome/Firefox background-tab detection needs a later local-only browser extension
 - Speaker identification is optional and labels uncertain turns as unknown; it does not infer names or merge identities across audio sources
 - Whisper and diarization models must be imported explicitly; native diarization inference has not yet been verified
-- Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added
-- Independent device clocks are not drift-corrected or mixed; each source retains its own track
+- Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added. The Linux path is compile-checked and unit-tested in CI but not yet verified against a real PulseAudio/PipeWire session
+- Independent device clocks are not mixed; each source retains its own track. Acoustic echo cancellation now estimates and corrects for delay/drift between the microphone and loopback clocks when cancelling echo, but this does not merge or align the tracks themselves
 - No AppFlowy connection or export
 - No cloud requests, analytics, telemetry, or downloaded fonts
 
@@ -59,10 +63,17 @@ With Cargo on PATH:
 ```text
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
 npm run tauri -- build --debug --no-bundle
 ```
 
-On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required; a CI matrix is provided for those platforms.
+`cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required; a CI matrix is provided for those platforms.
+
+This repo also supports a project-local Rust toolchain under `.tools` (Cargo, rustup, and libclang), set up so contributors don't need a system-wide install; `scripts/dev.ps1` discovers it automatically and falls back to your normal `PATH` otherwise.
+
+### Optional GPU (CUDA) build
+
+`npm run tauri:cuda` (dev) or `npm run tauri:build:cuda` (release), or `scripts/dev.ps1 -Cuda`, build with GPU (CUDA) Whisper transcription instead of CPU-only. This needs the CUDA Toolkit (12.x or 13.x, with Visual Studio integration on Windows) installed separately from the driver; it is not part of default builds, so CI and non-NVIDIA machines are unaffected. At runtime, a CUDA build needs the CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`, ...) reachable, either via the Toolkit's `bin` on `PATH` or copied beside the built executable. See [local transcription](docs/transcription.md) for the CPU-vs-GPU wall-time comparison and fallback behavior when no compatible GPU is found.
 
 `npm test` runs browser UI smoke tests (installed Microsoft Edge on Windows; Chromium elsewhere). For another browser, set `PW_CHANNEL`; install Chromium with `npx playwright install chromium` before selecting it. Browser preview via `npm run dev` is explicitly marked and disables desktop actions. It cannot record, persist settings, or open folders.
 
