@@ -11,6 +11,8 @@ mod diarization_types;
 mod linux_pulse;
 #[cfg(test)]
 mod meeting_management_tests;
+#[cfg(test)]
+mod summary_real_ollama_tests;
 mod meeting_signals;
 mod meeting_title;
 mod ollama_client;
