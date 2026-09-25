@@ -230,6 +230,31 @@ fn cancels_echo_across_drift_a_delay_jump_and_double_talk() {
     );
 }
 
+/// Regression test for `far_end_active_mask` (see `mod.rs`): near-end-only
+/// audio (far end genuinely silent, not just quiet) must come through at
+/// essentially its original level, not the wider +/-3dB tolerance
+/// `cancels_echo_across_drift_a_delay_jump_and_double_talk` uses for its
+/// broader double-talk/drift/jump scenario. This is the signal-level
+/// guarantee the project's near-end-preservation requirement (see
+/// docs/transcription.md) is built on: a stretch with no far-end energy has
+/// nothing legitimate for the linear filter or residual suppressor to
+/// attribute to echo, so whatever either of them would otherwise compute for
+/// it must be overridden, not merely bounded.
+#[test]
+fn near_end_only_audio_is_preserved_within_one_and_a_half_db() {
+    let (mic, reference, near_end) = build_fixture();
+    let (output, stats) = cancel_echo(&mic, &reference, SAMPLE_RATE);
+    assert!(stats.applied);
+
+    let near_only = slice_seconds(&near_end, 16.5, 18.5);
+    let out_only = slice_seconds(&output, 16.5, 18.5);
+    let diff_db = db(energy(out_only), energy(near_only));
+    assert!(
+        diff_db.abs() <= 1.5,
+        "near-end-only energy shifted {diff_db} dB (expected <= 1.5 dB)"
+    );
+}
+
 /// Isolated ERLE check for a continuous (non-bursty) far-end signal through a
 /// synthetic RIR and a 200 ppm drift, without the double-talk/gap complexity
 /// of `cancels_echo_across_drift_a_delay_jump_and_double_talk`. Mainly
