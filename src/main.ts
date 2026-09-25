@@ -19,6 +19,7 @@ type Settings = {
   ollama_url?: string;
   summary_model?: string;
   compress_audio?: boolean;
+  local_speaker_name?: string;
 };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
@@ -99,6 +100,7 @@ let settings: Settings = {
   ollama_url: "http://127.0.0.1:11434",
   summary_model: "qwen3:8b",
   compress_audio: true,
+  local_speaker_name: "You",
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -717,6 +719,15 @@ function render() {
                 >Recommended: <code>turbo</code> (large-v3-turbo), quantized — e.g. <code>ggml-large-v3-turbo-q5_0.bin</code> (~550 MB) from the whisper.cpp Hugging Face repo. It is far more accurate than <code>base</code> for a similar CPU cost.</small
               ></label
             ><label
+              >Your name<input
+                type="text"
+                name="local_speaker_name"
+                maxlength="64"
+                value="${escapeAttr(settings.local_speaker_name ?? "You")}"
+                ${disabled()} /><small
+                >Labels your own microphone lines in transcripts and summaries. Remote participants are labeled "Speaker 1", "Speaker 2", … when speaker identification below has run, or "Remote" otherwise.</small
+              ></label
+            ><label
               >Transcription language<select name="transcription_language" ${disabled()}>
                 ${([
                   ["auto", "Detect automatically"],
@@ -745,7 +756,7 @@ function render() {
               ></label
             >
             <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
-            <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Labels uncertain turns as unknown. Speaker labels are kept within each audio source and never infer people’s names.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
+            <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Runs on remote (loopback) audio only, labeling distinct voices "Speaker 1", "Speaker 2", … by first appearance, or "Remote" for uncertain turns. Numbers are not named identities and are not comparable across recordings.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="summary_enabled" ${settings.summary_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Summarize meetings locally with Ollama</b><small>Sends the finished transcript to a local Ollama server only (never the internet) for a title, summary, key points, decisions, action items, and open questions. Harmless when Ollama isn't running — summaries simply wait.</small></span></label>
               <label>Ollama URL<input type="text" name="ollama_url" value="${escapeAttr(settings.ollama_url ?? "http://127.0.0.1:11434")}" ${disabled()}/><small>Must be loopback (localhost/127.0.0.1/[::1]) so summaries can never leave this device.</small></label>
               <label>Summary model<select name="summary_model" ${disabled()}>${[...new Set([...summaryModels, settings.summary_model ?? "qwen3:8b"])].map((name) => `<option value="${escapeAttr(name)}" ${(settings.summary_model ?? "qwen3:8b") === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
@@ -913,6 +924,7 @@ function render() {
       ollama_url: String(form.get("ollama_url") ?? "http://127.0.0.1:11434").trim(),
       summary_model: String(form.get("summary_model") ?? "qwen3:8b"),
       compress_audio: form.get("compress_audio") === "on",
+      local_speaker_name: String(form.get("local_speaker_name") ?? "You").trim() || "You",
       audio_sources: settings.audio_sources,
     };
     try {

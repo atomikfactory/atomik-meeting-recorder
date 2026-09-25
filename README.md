@@ -33,8 +33,9 @@ npm run build
 - Silence skipping and anti-hallucination decode settings, reducing wasted decode time and repeated/hallucinated Whisper text on near-silent audio
 - Optional offline acoustic echo cancellation of the microphone against loopback (an independent Rust implementation modeled on WebRTC AEC3's design, not a binding to it -- see `src-tauri/src/echo_cancel/LICENSE-WEBRTC` for the BSD-3 attribution this required), plus a separate text-level duplicate-line cleanup pass after transcription; both toggle independently in Settings
 - x86-64-v3 (AVX2) CPU baseline for local transcription, and an optional CUDA build for GPU transcription (see Build and verify below)
-- Optional local speaker-identification stage with separately imported segmentation and voice models; it never blocks transcription
-- Optional local meeting summaries (title, key points, decisions, action items, open questions) via a local [Ollama](https://ollama.com) server, loopback-only so summaries never leave this device; see [local summaries](docs/summary.md)
+- Optional local speaker-identification stage with separately imported segmentation and voice models (verified against real audio; see [diarization](docs/diarization.md#verified-with-real-audio)); it never blocks transcription and runs only on remote (loopback) audio, labeling distinct voices "Speaker 1", "Speaker 2", …
+- Transcript Markdown and summaries label your own microphone lines with a name you choose in Settings (default "You") and remote lines "Speaker N"/"Remote", instead of raw device names; see [speaker labels](docs/transcription.md#speaker-labels)
+- Optional local meeting summaries (title, key points, decisions, action items, open questions) via a local [Ollama](https://ollama.com) server, loopback-only so summaries never leave this device, with section headings localized to the summary's language (English/French so far); see [local summaries](docs/summary.md)
 - Optional lossless FLAC compression of a finished recording's WAV tracks once transcription and speaker identification no longer need the raw audio, verified bit-exact before the WAV is ever removed; see [recording behavior](docs/recording.md#storage-lossless-flac-compression-of-finished-audio)
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
@@ -45,8 +46,8 @@ See [audio device management](docs/audio-devices.md) for platform differences an
 
 - Native meeting detection is Windows-only and heuristic; macOS/Linux retain manual recording
 - Chrome/Firefox background-tab detection needs a later local-only browser extension
-- Speaker identification is optional and labels uncertain turns as unknown; it does not infer names or merge identities across audio sources
-- Whisper and diarization models must be imported explicitly; native diarization inference has not yet been verified
+- Speaker identification is optional, runs only on remote (loopback) audio, and labels an uncertain turn "Remote" rather than guessing; it does not infer real names or merge identities across audio sources or recordings
+- Whisper and diarization models must be imported explicitly; native diarization inference has been verified on Windows against real recordings, but not yet on macOS/Linux
 - Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added. The Linux path is compile-checked and unit-tested in CI but not yet verified against a real PulseAudio/PipeWire session
 - Independent device clocks are not mixed; each source retains its own track. Acoustic echo cancellation now estimates and corrects for delay/drift between the microphone and loopback clocks when cancelling echo, but this does not merge or align the tracks themselves
 - No AppFlowy connection or export
