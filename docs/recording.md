@@ -48,7 +48,7 @@ While recording, state polling exposes per-source peak/RMS dBFS telemetry, a sho
 
 - Windows inputs use WASAPI. A selected output uses loopback of that endpoint's mix, potentially including other applications and notifications; it is not application-isolated meeting audio.
 - macOS inputs use Core Audio with microphone permission and a usage description. Native system audio needs a separate ScreenCaptureKit implementation; output selection is still unavailable.
-- Linux inputs depend on ALSA and installed sound-server routing. Exposed monitor/virtual inputs may work, but ordinary outputs are not treated as universal loopback devices.
+- Linux inputs depend on ALSA and installed sound-server routing. System-output capture uses a PulseAudio/PipeWire monitor source selected as an output track (see [audio device management](audio-devices.md)); a dedicated thread performs blocking reads on that source and feeds the same WAV-writer/meter/timeline pipeline as CPAL tracks. Unlike WASAPI loopback, a quiet/idle monitor keeps delivering real (silent) frames rather than none, so a silent meeting is not itself flagged as a failed capture; the source disappearing or never opening still is.
 - Device discovery and meeting detection do not record. Capture opens only after an explicit manual Start or approval of a detected meeting. The detector owns end-grace stopping only for approved meeting recordings; independently started manual recordings remain under user control. See [detection lifecycle](detection.md).
 - No cloud calls, remote transcription requests, summaries, or uploads occur. An explicitly requested local transcription stays on-device. Audio remains in the application-owned recordings folder. Obtain any required participant consent before recording.
 

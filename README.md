@@ -33,7 +33,7 @@ npm run build
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
 
-See [audio device management](docs/audio-devices.md) for platform differences and identity guarantees. Linux builds additionally require ALSA development headers (`libasound2-dev` and `pkg-config` on Ubuntu).
+See [audio device management](docs/audio-devices.md) for platform differences and identity guarantees. Linux builds additionally require ALSA development headers, libpulse's development headers, and pkg-config (`libasound2-dev libpulse-dev pkg-config` on Ubuntu) -- system-output capture there talks to PulseAudio/PipeWire's `pipewire-pulse` compatibility layer at runtime (`libpulse.so.0`, present on essentially every desktop distro).
 
 ## Current limits
 
@@ -41,7 +41,7 @@ See [audio device management](docs/audio-devices.md) for platform differences an
 - Chrome/Firefox background-tab detection needs a later local-only browser extension
 - Speaker identification is optional and labels uncertain turns as unknown; it does not infer names or merge identities across audio sources
 - Whisper and diarization models must be imported explicitly; native diarization inference has not yet been verified
-- Native system-output capture is Windows-only; macOS/Linux require exposed input/virtual devices for now
+- Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added
 - Independent device clocks are not drift-corrected or mixed; each source retains its own track
 - No AppFlowy connection or export
 - No cloud requests, analytics, telemetry, or downloaded fonts

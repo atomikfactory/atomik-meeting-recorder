@@ -28,7 +28,7 @@ jobs:
               env.write('LIBCLANG_PATH=' + str(pathlib.Path(clang.__file__).parent / 'native') + '\n')
       - name: Linux Tauri dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev pkg-config cmake
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev pkg-config cmake
       - run: npm ci
       - run: npm run build
       - name: Install test browser
