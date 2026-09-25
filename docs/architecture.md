@@ -8,6 +8,22 @@ The workspace was empty (including no Git repository or AGENTS.md). No applicati
 
 Tauri 2 owns the native tray, window lifecycle, single instance, paths, and IPC. Rust owns settings, eventual capture coordination, durable jobs, and integrations. A small vanilla TypeScript/Vite frontend renders snapshots and invokes commands; no frontend framework or bundled browser is necessary for this MVP. System fonts and local vector assets avoid runtime CDN requests.
 
+### Frontend module layout (`src/`)
+
+`main.ts` is a thin bootstrap: it assembles the page shell, wires page navigation and the Tauri event listeners, and starts the polling intervals. Everything else lives in its own module:
+
+- `types.ts` — every shared type (`Settings`, `Recording`, `*State`, …).
+- `api.ts` — the Tauri `invoke` re-export and the `preview` (browser-preview) flag.
+- `store.ts` — the single mutable `store` object holding all UI/poll state that gets reassigned wholesale (settings, recording/transcription/diarization/summary/AppFlowy/compression/browser-extension/detection state, drafts, in-flight flags), plus the `icon` constant and a few plain `Set`s (`transcribeInFlight`, `summaryActionInFlight`, `appflowyActionInFlight`) that are only ever mutated in place.
+- `util/escape.ts`, `util/format.ts` — `escapeHtml`/`escapeAttr`/`setTextIfChanged` and pure formatting helpers (durations, byte sizes, source summaries).
+- `ui/notice.ts` — the toast helper.
+- `views/dashboard.ts` — the dashboard section's markup, meeting-detection polling/UI, and the record/stop/approve/dismiss wiring.
+- `views/library.ts` — the recent-recordings list, live level meters, the manage-meeting dialog, and `updateRecordingUI`/`refreshRecordingState`.
+- `views/search.ts` — the transcript full-text search box and results.
+- `settings/index.ts` — composes the Settings page markup and wires the preferences form, delegating each subsection to its own module: `audio.ts` (devices), `transcription.ts`, `speakers.ts` (diarization), `summary.ts` (Ollama), `compression.ts` (audio storage/FLAC), `folder.ts` (recordings folder), `extension.ts` (browser extension), `appflowy.ts`.
+
+State that must be replaced wholesale (e.g. `store.settings = { ...saved }`) lives on the `store` object rather than as a plain top-level `let`, since an ES module cannot reassign a binding it imported — only mutate through a shared container. Several settings modules and `views/library.ts` import each other's update/refresh functions (e.g. `updateRecordingUI` refreshes device rows; `refreshSummaryState` re-renders the recording list), forming intentional circular imports; these are safe because every cross-module call happens inside an event handler or async callback, never during module evaluation.
+
 SQLite through rusqlite with bundled SQLite starts with transactional settings. Later migrations add recordings and processing jobs. Keep dependencies and interfaces small; add engine traits when implementations exist rather than building a general plugin framework now.
 
 Phase 2 uses CPAL 0.18.2 behind `AudioDeviceInventory` for native endpoint discovery. Blocking driver queries run off the UI thread and are serialized. Direction-qualified native IDs and display metadata persist in SQLite; older settings deserialize with an empty selection. Dedicated source saves validate the current inventory and preserve other preferences transactionally. No capture stream is opened. See [device architecture and platform limits](audio-devices.md).
