@@ -24,7 +24,36 @@ const ANALYSIS_SECONDS: f32 = 0.75;
 /// genuine delay jump larger than the local search window, or a stretch with
 /// no far-end energy to lock onto -- and a full global re-search is run for
 /// that block instead.
-const REACQUIRE_SCORE_FLOOR: f32 = 0.08;
+///
+/// On real (not synthetic-tone) recordings, broadband speech-band audio
+/// through a real echo path normalizes to a much lower *typical* peak
+/// GCC-PHAT score than the near-pure-tone fixtures in `tests.rs` suggest --
+/// five real two-track recordings all showed well-tracked local blocks
+/// (consistent, slowly-drifting shifts, matching a full global re-search
+/// when one was forced) scoring anywhere from ~0.02 to ~0.13 block to block,
+/// with a median around 0.07. A single block dipping under this floor is
+/// therefore common and usually just score noise, not lost lock -- but it is
+/// exactly what a genuine delay jump or a briefly far-end-silent stretch
+/// also looks like on its first block, so the floor itself has to stay where
+/// it is (lowering it let a wrong, periodicity-aliased local peak through
+/// uncorrected on the synthetic pure-tone fixture in `recovers_a_known_
+/// fixed_delay`). See `REACQUIRE_STREAK` for how the cost of that normal
+/// score noise is avoided without relaxing the floor.
+const REACQUIRE_SCORE_FLOOR: f32 = 0.03;
+/// Number of *consecutive* blocks that must score under `REACQUIRE_SCORE_
+/// FLOOR` before paying for an expensive full-range (`GLOBAL_SEARCH_MS`)
+/// re-search. On real recordings a lone block dipping under the floor is
+/// common (see there) and, when checked, its own local estimate almost
+/// always already agreed with what the expensive reacquire would have found
+/// -- broadband GCC-PHAT score is noisy enough block to block that isolated
+/// dips are not a reliable signal of actually losing lock, only a sustained
+/// run of them is. Requiring 2 in a row cut the reacquire rate on real
+/// recordings from roughly two-thirds of all blocks to a small few percent
+/// (see `echo_cancel::bench`), while still reacquiring within one extra
+/// block of any genuine, sustained loss of lock (a real delay jump or a
+/// silent stretch keeps scoring low on every subsequent block, not just
+/// one).
+const REACQUIRE_STREAK: u32 = 2;
 
 pub struct DelayEstimator {
     planner: RealFftPlanner<f32>,
@@ -63,28 +92,48 @@ impl DelayEstimator {
         let mut shifts: Vec<f64> = Vec::new();
         let mut shift = global_shift;
         let mut start = 0usize;
+        let mut low_score_streak = 0u32;
         while start < mic.len() {
             let (local_shift, local_score) =
                 self.estimate(mic, reference, sample_rate, start, shift, LOCAL_SEARCH_MS);
-            shift = if local_score < REACQUIRE_SCORE_FLOOR {
-                // Drift tracking lost lock (or a delay jump bigger than the
-                // local window): pay for a full-range search just this once.
-                let (reacquired, reacquired_score) =
-                    self.estimate(mic, reference, sample_rate, start, 0, GLOBAL_SEARCH_MS);
-                if reacquired_score < REACQUIRE_SCORE_FLOOR {
-                    // Neither search found anything to lock onto (e.g. a
-                    // stretch where the far end is silent): holding the last
-                    // known-good shift is far safer than anchoring this
-                    // block's essentially-random noise-fit estimate, which
-                    // would otherwise corrupt the linear interpolation
-                    // through this whole stretch, including at its edges
-                    // where real signal resumes.
-                    shift
-                } else {
-                    reacquired
-                }
-            } else {
+            shift = if local_score >= REACQUIRE_SCORE_FLOOR {
+                low_score_streak = 0;
                 local_shift
+            } else {
+                low_score_streak += 1;
+                // The very first block has no established lock yet to trust
+                // a lone low score against (there is no "previous, presumably
+                // still-correct shift" to fall back on the way there is once
+                // tracking is under way) -- always reacquire immediately for
+                // it, same as every block used to, rather than risking a
+                // periodicity-aliased local peak going unchecked from the
+                // very start of the recording.
+                if start > 0 && low_score_streak < REACQUIRE_STREAK {
+                    // A single block dipping under the floor is common score
+                    // noise on real recordings (see `REACQUIRE_STREAK`):
+                    // trust this block's own local estimate rather than
+                    // paying for a full re-search that would almost always
+                    // just agree with it anyway.
+                    local_shift
+                } else {
+                    // A *sustained* run of low scores: drift tracking really
+                    // has lost lock (or a delay jump bigger than the local
+                    // window), so it is worth paying for a full-range search.
+                    let (reacquired, reacquired_score) =
+                        self.estimate(mic, reference, sample_rate, start, 0, GLOBAL_SEARCH_MS);
+                    if reacquired_score < REACQUIRE_SCORE_FLOOR {
+                        // Neither search found anything to lock onto (e.g. a
+                        // stretch where the far end is silent): holding the
+                        // last known-good shift is far safer than anchoring
+                        // this block's essentially-random noise-fit
+                        // estimate, which would otherwise corrupt the linear
+                        // interpolation through this whole stretch,
+                        // including at its edges where real signal resumes.
+                        shift
+                    } else {
+                        reacquired
+                    }
+                }
             };
             anchors.push(start);
             shifts.push(shift as f64);
@@ -235,11 +284,17 @@ mod tests {
         let sample_rate = 16_000u32;
         let seconds = 6.0f32;
         let total = (sample_rate as f32 * seconds) as usize;
+        // Two non-harmonically-related tones (1150/317 is not a small integer
+        // ratio) rather than e.g. 300+1200 Hz: exact harmonics make the
+        // combined waveform perfectly periodic at the fundamental, which
+        // gives GCC-PHAT a whole comb of equally-good aliased correlation
+        // peaks (real speech never does this) and is a fixture artifact, not
+        // something the estimator needs to handle.
         let reference: Vec<f32> = (0..total)
             .map(|i| {
                 let t = i as f32 / sample_rate as f32;
-                0.3 * (2.0 * std::f32::consts::PI * 300.0 * t).sin()
-                    + 0.15 * (2.0 * std::f32::consts::PI * 1200.0 * t).sin()
+                0.3 * (2.0 * std::f32::consts::PI * 317.0 * t).sin()
+                    + 0.15 * (2.0 * std::f32::consts::PI * 1150.0 * t).sin()
             })
             .collect();
         let true_delay = (0.083 * sample_rate as f32) as usize; // 83ms

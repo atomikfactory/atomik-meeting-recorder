@@ -23,8 +23,19 @@ use std::{collections::VecDeque, sync::Arc};
 /// widening this only costs CPU, not correctness, once the coarse delay
 /// alignment in `delay.rs` has already removed the gross device latency.
 const FILTER_MS: u32 = 300;
-/// Adaptive-filter block period. 10 ms is the conventional AEC block size.
-const BLOCK_MS: u32 = 10;
+/// Adaptive-filter block period. 10 ms is the conventional real-time AEC
+/// block size, but this canceller is offline: doubling it to 20 ms roughly
+/// quarters the dominant per-block cost (the gradient-constraint FFT pair in
+/// `adapt`, paid once per *partition* per block -- see there -- and
+/// `partitions = FILTER_MS / BLOCK_MS` scales down with it too), for a
+/// combined ~4x speedup, at the cost of halving the double-talk detector's
+/// and the adaptive filter's time resolution. That resolution loss is safe
+/// here because `delay.rs` already removes essentially all linear drift
+/// before this filter ever sees the signal, leaving only short-timescale,
+/// non-linear residual for it to track, and because both passes replay the
+/// whole recording (see `cancel_echo`), so a slower-reacting double-talk
+/// detector still converges well before the audio it is judging matters.
+const BLOCK_MS: u32 = 20;
 /// Per-block leak applied to every filter weight before its update, so a
 /// long run of unlucky updates cannot let it drift away indefinitely.
 const WEIGHT_LEAK: f32 = 0.99995;
@@ -124,16 +135,27 @@ impl PartitionedFilter {
         self.scratch_time[self.n..].copy_from_slice(ref_block);
         self.prev_ref_block.copy_from_slice(ref_block);
 
-        let mut spectrum = vec![Complex32::new(0.0, 0.0); self.n + 1];
+        // Recycle the oldest entry's buffers once the history is full instead
+        // of allocating a fresh `Vec` (and dropping the displaced one) on
+        // every block: at steady state this is the only per-block allocation
+        // `estimate` would otherwise make, over the tens of thousands of
+        // blocks a long recording's two passes add up to.
+        let mut entry = if self.history.len() >= self.max_partitions {
+            self.history.pop_back().expect("max_partitions > 0")
+        } else {
+            HistEntry {
+                spectrum: vec![Complex32::new(0.0, 0.0); self.n + 1],
+                power: vec![0.0; self.n + 1],
+            }
+        };
         self.fft_fwd
-            .process(&mut self.scratch_time, &mut spectrum)
+            .process(&mut self.scratch_time, &mut entry.spectrum)
             .expect("fixed-size forward FFT");
-        clean_real_edges(&mut spectrum);
-        let power: Vec<f32> = spectrum.iter().map(|c| c.norm_sqr()).collect();
-        self.history.push_front(HistEntry { spectrum, power });
-        if self.history.len() > self.max_partitions {
-            self.history.pop_back();
+        clean_real_edges(&mut entry.spectrum);
+        for (power, bin) in entry.power.iter_mut().zip(entry.spectrum.iter()) {
+            *power = bin.norm_sqr();
         }
+        self.history.push_front(entry);
 
         for bin in self.echo_freq.iter_mut() {
             *bin = Complex32::new(0.0, 0.0);
