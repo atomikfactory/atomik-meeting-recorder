@@ -245,6 +245,35 @@ impl SummaryService {
         Ok(())
     }
 }
+/// Best-effort lookup of a recording's completed local summary, for the
+/// search index (see `search.rs`). Mirrors
+/// `diarization::read_completed_speaker_labels`: returns `None` on anything
+/// short of a fully validated, completed checkpoint, since indexing is
+/// optional and must never block or corrupt on a stale/foreign file. Returns
+/// the checkpoint bytes' checksum alongside the output so the index can
+/// detect staleness without re-reading the file on every reconcile tick.
+pub(crate) fn read_completed_summary(
+    root: &Path,
+    recording_id: &str,
+) -> Option<(String, SummaryOutput)> {
+    let store = SummaryStore::open(&root.join("summary.sqlite3")).ok()?;
+    let registry = TranscriptionStore::open(&root.join("transcription.sqlite3")).ok()?;
+    let recordings = RecordingStore::open(root).ok()?;
+    let job = store.get(recording_id).ok().flatten()?;
+    if job.status != "completed" {
+        return None;
+    }
+    let (recording, transcript, directory) =
+        load_parent(root, &registry, &recordings, &job).ok()?;
+    let json = output_path(&directory, "summary.json").ok()?;
+    let bytes = read_checkpoint(&json).ok()?;
+    let hash = checksum(&bytes);
+    if job.output_hash.as_deref() != Some(hash.as_str()) {
+        return None;
+    }
+    let checkpoint = validate_checkpoint(&bytes, &job, &recording, &transcript).ok()?;
+    Some((hash, checkpoint.output))
+}
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

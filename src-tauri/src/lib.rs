@@ -30,6 +30,10 @@ mod recording_paths;
 mod recording_store;
 mod recording_wav;
 mod residual_echo_gate;
+mod search;
+mod search_store;
+#[cfg(test)]
+mod search_tests;
 mod speaker_alignment;
 mod store;
 mod summary;
@@ -55,6 +59,7 @@ use meeting_signals::{MeetingDetector as NativeDetectorTrait, NativeMeetingDetec
 use recording::{RecordingService, RecordingState};
 use recording_paths::{library_directory, resolved_recording_directory};
 use recording_store::RecordingStore;
+use search::{SearchResults, SearchService};
 use serde::Serialize;
 use std::{
     sync::{
@@ -510,6 +515,7 @@ async fn rename_recording(
         }
         let updated = RecordingStore::open(&recordings_dir(&app)?)?.rename(&recording_id, title)?;
         service.refresh_history()?;
+        app.state::<SearchService>().reindex(&recording_id);
         Ok(updated)
     })
     .await
@@ -539,10 +545,21 @@ async fn delete_recording(
             .remove_if_idle(&recording_id)?;
         DiarizationStore::open(&root.join("diarization.sqlite3"))?.remove_if_idle(&recording_id)?;
         SummaryStore::open(&root.join("summary.sqlite3"))?.remove_if_idle(&recording_id)?;
+        app.state::<SearchService>().remove(&recording_id);
         service.refresh_history()
     })
     .await
     .map_err(app_error)?
+}
+#[tauri::command]
+async fn search_transcripts(
+    query: String,
+    limit: Option<usize>,
+    app: tauri::AppHandle,
+) -> Result<SearchResults, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<SearchService>().search(&query, limit))
+        .await
+        .map_err(app_error)?
 }
 #[tauri::command]
 async fn get_diarization_state(
@@ -848,6 +865,7 @@ fn request_exit(app: &tauri::AppHandle, service: RecordingService, gate: &ExitGa
             .and_then(|()| app.state::<DiarizationService>().shutdown())
             .and_then(|()| app.state::<SummaryService>().shutdown())
             .and_then(|()| app.state::<CompressionService>().shutdown());
+        app.state::<SearchService>().shutdown();
         match result {
             Ok(()) => {
                 gate.0.store(EXIT_ALLOWED, Ordering::Release);
@@ -1028,6 +1046,7 @@ pub fn run() {
         let settings = compress_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
         Ok(CompressionSettings { enabled: settings.compress_audio })
     })));
+    app.manage(SearchService::new(recording_dir.clone()));
     let availability = match install_tray(app) {
         Ok(controls) => {
             app.manage(controls);
@@ -1055,7 +1074,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application, search_transcripts]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();
