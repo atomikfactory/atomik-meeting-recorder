@@ -28,6 +28,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 const APP_NAME: &str = "meeting-recorder";
@@ -35,6 +36,14 @@ const APP_NAME: &str = "meeting-recorder";
 /// low and the capture thread responsive to Stop, large enough to avoid
 /// excessive syscall/wakeup overhead.
 const FRAGMENT_MS: u32 = 20;
+/// Upper bound on how long enumeration will wait for the server to connect
+/// or answer a query. `Mainloop::iterate(true)` blocks on the underlying
+/// socket with no built-in timeout, so a stale/unreachable `$PULSE_SERVER`
+/// (e.g. a remote TCP address that never refutes the connection, unlike a
+/// local socket with nothing listening) or a server that accepts the
+/// connection but never replies would otherwise hang this call, and with it
+/// the UI's device-refresh path, indefinitely.
+const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub(crate) struct PulseSinkInfo {
@@ -67,7 +76,8 @@ pub(crate) fn enumerate_sinks() -> Result<Vec<PulseSinkInfo>, String> {
         .borrow_mut()
         .connect(None, ContextFlagSet::NOFLAGS, None)
         .map_err(|e| format!("Could not connect to the PulseAudio/PipeWire server: {e}"))?;
-    wait_for_context_ready(&mut mainloop, &context)?;
+    let deadline = Instant::now() + ENUMERATE_TIMEOUT;
+    wait_for_context_ready(&mut mainloop, &context, deadline)?;
 
     let default_sink_name = Rc::new(RefCell::new(String::new()));
     {
@@ -83,14 +93,14 @@ pub(crate) fn enumerate_sinks() -> Result<Vec<PulseSinkInfo>, String> {
                 }
                 *done_cb.borrow_mut() = true;
             });
-        pump_until(&mut mainloop, &done)?;
+        pump_until(&mut mainloop, &done, deadline)?;
     }
 
     let sinks = Rc::new(RefCell::new(Vec::new()));
     let done = Rc::new(RefCell::new(false));
     {
         let sinks = sinks.clone();
-        let done = done.clone();
+        let done_cb = done.clone();
         let default_sink_name = default_sink_name.borrow().clone();
         context
             .borrow()
@@ -117,10 +127,10 @@ pub(crate) fn enumerate_sinks() -> Result<Vec<PulseSinkInfo>, String> {
                     });
                 }
                 ListResult::End | ListResult::Error => {
-                    *done.borrow_mut() = true;
+                    *done_cb.borrow_mut() = true;
                 }
             });
-        pump_until(&mut mainloop, &done)?;
+        pump_until(&mut mainloop, &done, deadline)?;
     }
 
     context.borrow_mut().disconnect();
@@ -132,9 +142,13 @@ pub(crate) fn enumerate_sinks() -> Result<Vec<PulseSinkInfo>, String> {
 fn wait_for_context_ready(
     mainloop: &mut Mainloop,
     context: &Rc<RefCell<Context>>,
+    deadline: Instant,
 ) -> Result<(), String> {
     loop {
-        match mainloop.iterate(true) {
+        // Non-blocking: `iterate(true)` blocks on the socket with no timeout
+        // of its own, which would defeat `deadline` for a server that never
+        // answers (see `ENUMERATE_TIMEOUT`'s doc comment).
+        match mainloop.iterate(false) {
             IterateResult::Quit(_) | IterateResult::Err(_) => {
                 return Err("PulseAudio mainloop stopped while connecting".into())
             }
@@ -150,17 +164,34 @@ fn wait_for_context_ready(
             }
             _ => {}
         }
+        if Instant::now() >= deadline {
+            return Err(
+                "Timed out connecting to the PulseAudio/PipeWire server".into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn pump_until(mainloop: &mut Mainloop, done: &Rc<RefCell<bool>>) -> Result<(), String> {
+fn pump_until(
+    mainloop: &mut Mainloop,
+    done: &Rc<RefCell<bool>>,
+    deadline: Instant,
+) -> Result<(), String> {
     while !*done.borrow() {
-        match mainloop.iterate(true) {
+        match mainloop.iterate(false) {
             IterateResult::Quit(_) | IterateResult::Err(_) => {
                 return Err("PulseAudio mainloop stopped mid-query".into())
             }
             IterateResult::Success(_) => {}
         }
+        if *done.borrow() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Timed out waiting for a reply from the PulseAudio/PipeWire server".into());
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     Ok(())
 }
