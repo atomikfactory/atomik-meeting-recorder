@@ -299,6 +299,10 @@ pub(crate) fn prompts(language_hint: Option<&str>, is_merge: bool) -> String {
 }
 
 #[cfg(test)]
+#[path = "ollama_http_tests.rs"]
+mod http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn segment(ms: u64, source: &str, text: &str) -> TranscriptSegment {
