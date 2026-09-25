@@ -75,14 +75,42 @@ export function recentRecordings() {
     const issues = recordingIssues(recording);
     const shortId = recording.recording_id.slice(0, 8);
     const started = new Date(recording.started_at).toLocaleString();
-    const job = transcriptionJob(recording.recording_id); const diarization = store.diarizationState.jobs.find((item) => item.recording_id === recording.recording_id); const summary = summaryJob(recording.recording_id); const folder = `<button class="secondary" data-open-folder="${escapeAttr(recording.recording_id)}">Open folder</button>`; const action = job?.status === "completed" ? `<button class="secondary" data-open-transcript="${escapeAttr(recording.recording_id)}">Open transcript</button>` : job?.status === "failed" ? `<button class="secondary" data-retry-transcript="${escapeAttr(recording.recording_id)}">Retry transcription</button>` : job?.status === "waiting_model" ? `<button class="secondary" data-choose-model>Choose Whisper model${job.model_key ? `: ${escapeHtml(job.model_key)}` : ""}</button>` : !job && ["recorded", "interrupted", "failed"].includes(recording.status) && recording.tracks.some(t => t.frames_written > 0) ? `<button class="secondary" data-transcribe="${escapeAttr(recording.recording_id)}" ${transcribeInFlight.has(recording.recording_id) ? "disabled" : ""}>Transcribe</button>` : ""; const retry = diarization?.status === "failed" ? `<button class="secondary" data-retry-diarization="${escapeAttr(recording.recording_id)}">Retry speaker identification</button>` : "";
+    const job = transcriptionJob(recording.recording_id);
+    const diarization = store.diarizationState.jobs.find((item) => item.recording_id === recording.recording_id);
+    const summary = summaryJob(recording.recording_id);
+    const folder = `<button class="secondary" data-open-folder="${escapeAttr(recording.recording_id)}">Open folder</button>`;
+    const action = job?.status === "completed"
+      ? `<button class="secondary" data-open-transcript="${escapeAttr(recording.recording_id)}">Open transcript</button>`
+      : job?.status === "failed"
+        ? `<button class="secondary" data-retry-transcript="${escapeAttr(recording.recording_id)}">Retry transcription</button>`
+        : job?.status === "waiting_model"
+          ? `<button class="secondary" data-choose-model>Choose Whisper model${job.model_key ? `: ${escapeHtml(job.model_key)}` : ""}</button>`
+          : !job && ["recorded", "interrupted", "failed"].includes(recording.status) && recording.tracks.some(t => t.frames_written > 0)
+            ? `<button class="secondary" data-transcribe="${escapeAttr(recording.recording_id)}" ${transcribeInFlight.has(recording.recording_id) ? "disabled" : ""}>Transcribe</button>`
+            : "";
+    const retry = diarization?.status === "failed"
+      ? `<button class="secondary" data-retry-diarization="${escapeAttr(recording.recording_id)}">Retry speaker identification</button>`
+      : "";
     const summaryBusy = summaryActionInFlight.has(recording.recording_id);
-    const summaryActions = summary?.status === "completed" ? `<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Regenerate summary</button>${summary.title && summary.title !== (recording.meeting_title ?? "Meeting") ? `<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy ? "disabled" : ""}>Use suggested title: ${escapeHtml(summary.title)}</button>` : ""}` : summary?.status === "failed" ? `<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Retry summary</button>` : "";
+    const summaryActions = summary?.status === "completed"
+      ? `<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Regenerate summary</button>${summary.title && summary.title !== (recording.meeting_title ?? "Meeting") ? `<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy ? "disabled" : ""}>Use suggested title: ${escapeHtml(summary.title)}</button>` : ""}`
+      : summary?.status === "failed"
+        ? `<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Retry summary</button>`
+        : "";
     const manage = `<button class="secondary" data-rename="${escapeAttr(recording.recording_id)}">Rename</button><button class="secondary" data-delete="${escapeAttr(recording.recording_id)}">Remove</button>${["completed", "failed", "waiting_model"].includes(job?.status ?? "") ? `<button class="secondary" data-restart="${escapeAttr(recording.recording_id)}">Restart transcription</button>` : ""}`;
-    const storageLine = audioStorageLine(recording.recording_id); const compressionLine = compressionSummary(recording.recording_id);
+    const storageLine = audioStorageLine(recording.recording_id);
+    const compressionLine = compressionSummary(recording.recording_id);
     const appflowyBusy = appflowyActionInFlight.has(recording.recording_id);
     const appflowyJobFor = appflowyJob(recording.recording_id);
-    const appflowyActions = !store.appflowyState.enabled ? "" : appflowyJobFor?.status === "completed" ? `<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy again</button>` : appflowyJobFor?.status === "failed" ? `<button class="secondary" data-appflowy-retry="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Retry AppFlowy export</button>` : !appflowyJobFor && store.appflowyState.connected ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>` : "";
+    const appflowyActions = !store.appflowyState.enabled
+      ? ""
+      : appflowyJobFor?.status === "completed"
+        ? `<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy again</button>`
+        : appflowyJobFor?.status === "failed"
+          ? `<button class="secondary" data-appflowy-retry="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Retry AppFlowy export</button>`
+          : !appflowyJobFor && store.appflowyState.connected
+            ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>`
+            : "";
     return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}</article>`;
   }).join("")}</div>`;
 }
@@ -133,18 +161,83 @@ export function updateRecordingUI() {
     store.renderedRecentRecordings = nextRecent;
     if (action && focusedRecording) Array.from(meetings.querySelectorAll<HTMLButtonElement>(`[${action}]`)).find(button => button.getAttribute(action) === focusedRecording)?.focus();
   }
-  document.querySelectorAll<HTMLButtonElement>("[data-open-transcript]").forEach(button => button.onclick = () => invoke("open_transcript", { recordingId: button.dataset.openTranscript }).catch(error => notice(String(error), "error")));
-  document.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach(button => button.onclick = () => invoke("open_recording_folder", { recordingId: button.dataset.openFolder }).catch(error => notice(String(error), "error")));
-  document.querySelectorAll<HTMLButtonElement>("[data-transcribe]").forEach(button => button.onclick = async () => { const id = button.dataset.transcribe!; if (transcribeInFlight.has(id)) return; transcribeInFlight.add(id); updateRecordingUI(); try { await invoke("transcribe_recording", { recordingId: id }); await refreshTranscriptionState() } catch (error) { notice(`Could not queue transcription: ${String(error)}`, "error") } finally { transcribeInFlight.delete(id); updateRecordingUI() } });
-  document.querySelectorAll<HTMLButtonElement>("[data-choose-model]").forEach(button => button.onclick = () => { document.querySelector<HTMLButtonElement>("[data-page='settings']")?.click(); setTimeout(() => document.querySelector<HTMLButtonElement>("#choose-model")?.focus(), 0) });
-  const search = document.querySelector<HTMLInputElement>("#history-search"); if (search) search.oninput = event => { store.historyQuery = (event.target as HTMLInputElement).value; store.renderedRecentRecordings = null; updateRecordingUI(); };
-  document.querySelectorAll<HTMLButtonElement>("[data-retry-transcript]").forEach(button => button.onclick = async () => { try { await invoke("retry_transcription", { recordingId: button.dataset.retryTranscript }); await refreshTranscriptionState(); } catch (error) { notice(`Could not retry transcription: ${String(error)}`, "error"); } });
-  document.querySelectorAll<HTMLButtonElement>("[data-retry-diarization]").forEach(button => button.onclick = async () => { try { await invoke("retry_diarization", { recordingId: button.dataset.retryDiarization }); await refreshDiarizationState(); } catch (error) { notice(`Could not retry speaker identification: ${String(error)}`, "error"); } });
-  document.querySelectorAll<HTMLButtonElement>("[data-open-summary]").forEach(button => button.onclick = () => invoke("open_summary", { recordingId: button.dataset.openSummary }).catch(error => notice(String(error), "error")));
-  const runSummaryAction = async (id: string, command: string) => { if (summaryActionInFlight.has(id)) return; summaryActionInFlight.add(id); updateRecordingUI(); try { await invoke(command, { recordingId: id }); await refreshSummaryStateAndUI(); } catch (error) { notice(`Could not update summary: ${String(error)}`, "error"); } finally { summaryActionInFlight.delete(id); updateRecordingUI(); } };
+  document.querySelectorAll<HTMLButtonElement>("[data-open-transcript]").forEach(button => button.onclick = () =>
+    invoke("open_transcript", { recordingId: button.dataset.openTranscript }).catch(error => notice(String(error), "error")));
+  document.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach(button => button.onclick = () =>
+    invoke("open_recording_folder", { recordingId: button.dataset.openFolder }).catch(error => notice(String(error), "error")));
+  document.querySelectorAll<HTMLButtonElement>("[data-transcribe]").forEach(button => button.onclick = async () => {
+    const id = button.dataset.transcribe!;
+    if (transcribeInFlight.has(id)) return;
+    transcribeInFlight.add(id);
+    updateRecordingUI();
+    try {
+      await invoke("transcribe_recording", { recordingId: id });
+      await refreshTranscriptionState();
+    } catch (error) {
+      notice(`Could not queue transcription: ${String(error)}`, "error");
+    } finally {
+      transcribeInFlight.delete(id);
+      updateRecordingUI();
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-choose-model]").forEach(button => button.onclick = () => {
+    document.querySelector<HTMLButtonElement>("[data-page='settings']")?.click();
+    setTimeout(() => document.querySelector<HTMLButtonElement>("#choose-model")?.focus(), 0);
+  });
+  const search = document.querySelector<HTMLInputElement>("#history-search");
+  if (search) search.oninput = event => {
+    store.historyQuery = (event.target as HTMLInputElement).value;
+    store.renderedRecentRecordings = null;
+    updateRecordingUI();
+  };
+  document.querySelectorAll<HTMLButtonElement>("[data-retry-transcript]").forEach(button => button.onclick = async () => {
+    try {
+      await invoke("retry_transcription", { recordingId: button.dataset.retryTranscript });
+      await refreshTranscriptionState();
+    } catch (error) {
+      notice(`Could not retry transcription: ${String(error)}`, "error");
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-retry-diarization]").forEach(button => button.onclick = async () => {
+    try {
+      await invoke("retry_diarization", { recordingId: button.dataset.retryDiarization });
+      await refreshDiarizationState();
+    } catch (error) {
+      notice(`Could not retry speaker identification: ${String(error)}`, "error");
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-open-summary]").forEach(button => button.onclick = () =>
+    invoke("open_summary", { recordingId: button.dataset.openSummary }).catch(error => notice(String(error), "error")));
+  const runSummaryAction = async (id: string, command: string) => {
+    if (summaryActionInFlight.has(id)) return;
+    summaryActionInFlight.add(id);
+    updateRecordingUI();
+    try {
+      await invoke(command, { recordingId: id });
+      await refreshSummaryStateAndUI();
+    } catch (error) {
+      notice(`Could not update summary: ${String(error)}`, "error");
+    } finally {
+      summaryActionInFlight.delete(id);
+      updateRecordingUI();
+    }
+  };
   document.querySelectorAll<HTMLButtonElement>("[data-retry-summary]").forEach(button => button.onclick = () => runSummaryAction(button.dataset.retrySummary!, "retry_summary"));
   document.querySelectorAll<HTMLButtonElement>("[data-regenerate-summary]").forEach(button => button.onclick = () => runSummaryAction(button.dataset.regenerateSummary!, "regenerate_summary"));
-  const runAppFlowyAction = async (id: string, command: string, args: Record<string, unknown> = {}) => { if (appflowyActionInFlight.has(id)) return; appflowyActionInFlight.add(id); updateRecordingUI(); try { await invoke(command, { recordingId: id, ...args }); await refreshAppFlowyStateAndUI(); } catch (error) { notice(`Could not update AppFlowy export: ${String(error)}`, "error"); } finally { appflowyActionInFlight.delete(id); updateRecordingUI(); } };
+  const runAppFlowyAction = async (id: string, command: string, args: Record<string, unknown> = {}) => {
+    if (appflowyActionInFlight.has(id)) return;
+    appflowyActionInFlight.add(id);
+    updateRecordingUI();
+    try {
+      await invoke(command, { recordingId: id, ...args });
+      await refreshAppFlowyStateAndUI();
+    } catch (error) {
+      notice(`Could not update AppFlowy export: ${String(error)}`, "error");
+    } finally {
+      appflowyActionInFlight.delete(id);
+      updateRecordingUI();
+    }
+  };
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export]").forEach(button => button.onclick = () => runAppFlowyAction(button.dataset.appflowyExport!, "appflowy_export_now"));
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-retry]").forEach(button => button.onclick = () => runAppFlowyAction(button.dataset.appflowyRetry!, "appflowy_retry"));
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export-again]").forEach(button => button.onclick = () => {
@@ -152,7 +245,16 @@ export function updateRecordingUI() {
     if (!window.confirm("Export again? This creates a new page in AppFlowy alongside the existing one -- the earlier export is never modified.")) return;
     runAppFlowyAction(id, "appflowy_export_again", { confirm: true });
   });
-  document.querySelectorAll<HTMLButtonElement>("[data-use-suggested-title]").forEach(button => button.onclick = async () => { const id = button.dataset.useSuggestedTitle!; const title = button.dataset.title!; try { await invoke("rename_recording", { recordingId: id, title }); await refreshRecordingState(true); } catch (error) { notice(`Could not use the suggested title: ${String(error)}`, "error"); } });
+  document.querySelectorAll<HTMLButtonElement>("[data-use-suggested-title]").forEach(button => button.onclick = async () => {
+    const id = button.dataset.useSuggestedTitle!;
+    const title = button.dataset.title!;
+    try {
+      await invoke("rename_recording", { recordingId: id, title });
+      await refreshRecordingState(true);
+    } catch (error) {
+      notice(`Could not use the suggested title: ${String(error)}`, "error");
+    }
+  });
   wireManagementDialog();
 }
 
@@ -164,10 +266,63 @@ import { refreshSummaryState as refreshSummaryStateAndUI } from "../settings/sum
 import { refreshAppFlowyState as refreshAppFlowyStateAndUI } from "../settings/appflowy";
 
 function wireManagementDialog() {
-  const dialog = document.querySelector<HTMLDialogElement>("#management-dialog"); const open = (kind: "rename" | "delete" | "restart", id: string) => { if (store.managementBusy) return; store.management = { kind, id, title: "" }; const record = store.recordingState.recent.find(item => item.recording_id === id); const input = document.querySelector<HTMLInputElement>("#management-name")!; input.value = record?.meeting_title ?? "Meeting"; input.closest("label")!.toggleAttribute("hidden", kind !== "rename"); document.querySelector("#management-detail")!.textContent = kind === "delete" ? "Remove from this list? Audio remains recoverable on disk." : kind === "restart" ? "Archive previous transcript output and queue a new transcript with " + store.settings.whisper_model + "?" : "Change the meeting title."; document.querySelector("#management-error")!.textContent = ""; if (!dialog?.open) dialog?.showModal(); if (kind === "rename") input.focus() };
-  document.querySelectorAll<HTMLButtonElement>("[data-rename]").forEach(button => button.onclick = () => open("rename", button.dataset.rename!)); document.querySelectorAll<HTMLButtonElement>("[data-delete]").forEach(button => button.onclick = () => open("delete", button.dataset.delete!)); document.querySelectorAll<HTMLButtonElement>("[data-restart]").forEach(button => button.onclick = () => open("restart", button.dataset.restart!));
-  const cancel = document.querySelector<HTMLButtonElement>("#management-cancel")!; cancel.onclick = event => { event.preventDefault(); if (store.managementBusy) return; store.management = null; dialog?.close() }; if (dialog) dialog.oncancel = event => { if (store.managementBusy) event.preventDefault(); else store.management = null };
-  document.querySelector<HTMLButtonElement>("#management-confirm")!.onclick = async event => { event.preventDefault(); if (!store.management || store.managementBusy) return; const task = store.management; store.managementBusy = true; const confirm = document.querySelector<HTMLButtonElement>("#management-confirm")!; confirm.disabled = true; cancel.disabled = true; try { if (task.kind === "rename") await invoke("rename_recording", { recordingId: task.id, title: document.querySelector<HTMLInputElement>("#management-name")!.value }); else await invoke(task.kind === "delete" ? "delete_recording" : "restart_transcription", { recordingId: task.id }); dialog?.close(); store.management = null; await refreshRecordingState(true); await refreshTranscriptionState() } catch (error) { document.querySelector("#management-error")!.textContent = String(error) } finally { store.managementBusy = false; confirm.disabled = false; cancel.disabled = false } };
+  const dialog = document.querySelector<HTMLDialogElement>("#management-dialog");
+  const open = (kind: "rename" | "delete" | "restart", id: string) => {
+    if (store.managementBusy) return;
+    store.management = { kind, id, title: "" };
+    const record = store.recordingState.recent.find(item => item.recording_id === id);
+    const input = document.querySelector<HTMLInputElement>("#management-name")!;
+    input.value = record?.meeting_title ?? "Meeting";
+    input.closest("label")!.toggleAttribute("hidden", kind !== "rename");
+    document.querySelector("#management-detail")!.textContent = kind === "delete"
+      ? "Remove from this list? Audio remains recoverable on disk."
+      : kind === "restart"
+        ? "Archive previous transcript output and queue a new transcript with " + store.settings.whisper_model + "?"
+        : "Change the meeting title.";
+    document.querySelector("#management-error")!.textContent = "";
+    if (!dialog?.open) dialog?.showModal();
+    if (kind === "rename") input.focus();
+  };
+  document.querySelectorAll<HTMLButtonElement>("[data-rename]").forEach(button => button.onclick = () => open("rename", button.dataset.rename!));
+  document.querySelectorAll<HTMLButtonElement>("[data-delete]").forEach(button => button.onclick = () => open("delete", button.dataset.delete!));
+  document.querySelectorAll<HTMLButtonElement>("[data-restart]").forEach(button => button.onclick = () => open("restart", button.dataset.restart!));
+  const cancel = document.querySelector<HTMLButtonElement>("#management-cancel")!;
+  cancel.onclick = event => {
+    event.preventDefault();
+    if (store.managementBusy) return;
+    store.management = null;
+    dialog?.close();
+  };
+  if (dialog) dialog.oncancel = event => {
+    if (store.managementBusy) event.preventDefault();
+    else store.management = null;
+  };
+  document.querySelector<HTMLButtonElement>("#management-confirm")!.onclick = async event => {
+    event.preventDefault();
+    if (!store.management || store.managementBusy) return;
+    const task = store.management;
+    store.managementBusy = true;
+    const confirm = document.querySelector<HTMLButtonElement>("#management-confirm")!;
+    confirm.disabled = true;
+    cancel.disabled = true;
+    try {
+      if (task.kind === "rename") {
+        await invoke("rename_recording", { recordingId: task.id, title: document.querySelector<HTMLInputElement>("#management-name")!.value });
+      } else {
+        await invoke(task.kind === "delete" ? "delete_recording" : "restart_transcription", { recordingId: task.id });
+      }
+      dialog?.close();
+      store.management = null;
+      await refreshRecordingState(true);
+      await refreshTranscriptionState();
+    } catch (error) {
+      document.querySelector("#management-error")!.textContent = String(error);
+    } finally {
+      store.managementBusy = false;
+      confirm.disabled = false;
+      cancel.disabled = false;
+    }
+  };
 }
 
 export async function refreshRecordingState(force = false) {
