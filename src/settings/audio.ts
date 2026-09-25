@@ -1,6 +1,6 @@
 import { invoke, preview } from "../api";
 import { notice } from "../ui/notice";
-import { disabled, recordingBusy, store } from "../store";
+import { recordingBusy, store } from "../store";
 import type { AudioDevice, AudioInventory, Settings } from "../types";
 import { escapeAttr, escapeHtml, setTextIfChanged } from "../util/escape";
 import { sourceInputId, sourceSummary } from "../util/format";

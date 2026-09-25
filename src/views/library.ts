@@ -5,7 +5,7 @@ import type { Recording, RecordingState } from "../types";
 import { escapeAttr, escapeHtml, setTextIfChanged } from "../util/escape";
 import { levelDb, recordingDuration, recordingSources, sourceSummary } from "../util/format";
 import { refreshDeviceSection } from "../settings/audio";
-import { transcriptionJob, transcriptionSummary, refreshTranscriptionState } from "../settings/transcription";
+import { transcriptionJob, refreshTranscriptionState } from "../settings/transcription";
 import { diarizationSummary, refreshDiarizationState } from "../settings/speakers";
 import { summaryJob, summarySummary } from "../settings/summary";
 import { appflowyJob, appflowySummary } from "../settings/appflowy";
