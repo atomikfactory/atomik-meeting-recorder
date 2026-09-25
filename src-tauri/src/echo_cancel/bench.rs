@@ -2,9 +2,10 @@
 //! real recordings on disk rather than synthetic fixtures. Not part of the
 //! normal test suite (no recordings are committed to this repo): point
 //! `AEC_BENCH_MIC` / `AEC_BENCH_REF` at a mic/loopback WAV pair (any channel
-//! count, 16-bit PCM, native sample rate -- matching what
-//! `transcription_engine::load_wav_native_mono` feeds `cancel_echo` in
-//! production) and run
+//! count, 16-bit PCM; `cancel_echo` itself is sample-rate-agnostic, but
+//! production always calls it with 16 kHz buffers from
+//! `transcription_engine::decode_track_16k`, so a 16 kHz pair benchmarks the
+//! actual production path most closely) and run
 //!   cargo test --release --manifest-path src-tauri/Cargo.toml \
 //!       echo_cancel::bench -- --ignored --nocapture
 //! Reports wall time and speed as a multiple of real time (audio duration /

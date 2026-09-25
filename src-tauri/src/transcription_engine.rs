@@ -6,7 +6,7 @@ use crate::{
     recording_paths::resolved_recording_directory,
     transcription_types::{ModelInfo, Transcript, TranscriptSegment, TranscriptionRequest},
 };
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavReader};
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Fft, FixedSync, Resampler};
 use sha2::{Digest, Sha256};
 use std::{
@@ -28,6 +28,14 @@ use whisper_rs::{
 /// context creation fails.
 const GPU_BUILD: bool = cfg!(feature = "cuda");
 
+/// Test-only hook counting calls to `decode_track_16k`, the single decode
+/// point for a track (see `transcribe`). Used to assert a whole
+/// `LocalWhisperEngine::transcribe` run decodes each track exactly once,
+/// rather than once for its own transcription and again to feed acoustic
+/// echo cancellation, which is the double decode this file used to do.
+#[cfg(test)]
+static DECODE_TRACK_16K_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 const BACKEND_CPU: u8 = 1;
 const BACKEND_CUDA: u8 = 2;
 
@@ -44,6 +52,12 @@ const MAX_CHUNK_SECONDS: u32 = 60;
 const MAX_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_WAV_SAMPLE_RATE: u32 = 192_000;
 const MAX_WAV_CHANNELS: u16 = 8;
+/// The VAD/Whisper stage still walks a track in `MAX_CHUNK_SECONDS` windows
+/// (independent noise-floor adaptation per window, and bounded progress
+/// granularity), but now over an already-fully-decoded 16 kHz buffer (see
+/// `decode_track_16k`) rather than re-deriving chunk boundaries from the
+/// native-rate file.
+const CHUNK_SAMPLES_16K: usize = (TARGET_RATE * MAX_CHUNK_SECONDS) as usize;
 
 // Energy-based speech-region pre-pass (see `detect_speech_regions`), applied
 // independently within each `MAX_CHUNK_SECONDS` window so the existing bounded
@@ -136,25 +150,34 @@ impl TranscriptionEngine for LocalWhisperEngine {
         }
         let tracks = validated_tracks(request)?;
         let mut warnings = Vec::new();
-        // Acoustic echo cancellation runs on already-decoded, in-memory PCM
-        // before anything below touches the recorder's own WAV files, and
-        // only when the recording actually has both an input (microphone)
-        // and an output (loopback) track -- the common two-track meeting
-        // recorder setup where the user has speakers, not headphones, so
-        // remote audio leaks into the mic and would otherwise be
-        // transcribed twice. It is CPU-bound and touches no Whisper state,
-        // so it runs on a background thread concurrently with the main
-        // thread creating the (possibly GPU) Whisper context and decoding
-        // whichever tracks AEC never substitutes (every "output" track);
-        // only the "input" tracks actually wait on its result below. This
-        // overlaps AEC's own cost (tens of x real time, but still real: see
-        // `echo_cancel::bench`) with GPU decode time instead of adding it on
-        // top, which otherwise made AEC'd recordings slower to transcribe
-        // end-to-end even when Whisper itself decoded the cleaned audio no
-        // slower than the original (see docs/transcription.md).
+        // Every track is decoded to mono 16 kHz `f32` exactly once, here, and
+        // the resulting buffer is shared, unmodified, by every stage below
+        // that used to decode the same track again: the VAD pre-pass,
+        // Whisper, and -- for a recording with both an input (microphone)
+        // and an output (loopback) track -- acoustic echo cancellation,
+        // which now runs directly on these buffers (mic against the summed
+        // output buffers as its reference) instead of re-decoding each
+        // track natively and writing a cleaned microphone track back out to
+        // a temporary WAV purely to re-enter this same decode path a second
+        // time. An hour at 16 kHz mono `f32` is about 230 MB per track; see
+        // docs/transcription.md. `Arc` lets the AEC thread below share these
+        // buffers with the main thread instead of cloning the audio itself.
+        let pcm = decode_tracks_16k(&tracks, cancelled)?;
+        // Acoustic echo cancellation is CPU-bound and touches no Whisper
+        // state, so -- when requested and the recording has both track
+        // directions -- it runs on a background thread concurrently with
+        // the main thread creating the (possibly GPU) Whisper context and
+        // transcribing whichever tracks AEC never substitutes (every
+        // "output" track); only the "input" tracks actually wait on its
+        // result below. This overlaps AEC's own cost (tens of x real time,
+        // but still real: see `echo_cancel::bench`) with GPU decode time
+        // instead of adding it on top, which otherwise made AEC'd
+        // recordings slower to transcribe end-to-end even when Whisper
+        // itself decoded the cleaned audio no slower than the original (see
+        // docs/transcription.md).
         let aec_handle = request.echo_cancellation.then(|| {
-            let tracks_for_aec = tracks.clone();
-            std::thread::spawn(move || apply_echo_cancellation(&tracks_for_aec))
+            let pcm_for_aec = pcm.clone();
+            std::thread::spawn(move || apply_echo_cancellation(pcm_for_aec))
         });
         // Redirect library diagnostics away from stdout/stderr when no application
         // logging backend is configured. This is process-global but idempotent.
@@ -167,11 +190,11 @@ impl TranscriptionEngine for LocalWhisperEngine {
         let mut segments = Vec::new();
         let mut directions: Vec<&'static str> = Vec::new();
         let mut languages_used = Vec::new();
-        let total = tracks.len().max(1) as u32;
+        let total = pcm.len().max(1) as u32;
         let mut processed: u32 = 0;
         progress(0);
         let mut run_track = |track: &Track,
-                              path: &Path,
+                              samples: &[f32],
                               processed: &mut u32,
                               segments: &mut Vec<TranscriptSegment>,
                               directions: &mut Vec<&'static str>,
@@ -182,10 +205,10 @@ impl TranscriptionEngine for LocalWhisperEngine {
             let start_progress = ((*processed * 100) / total) as u8;
             let end_progress = ((( *processed + 1) * 100) / total) as u8;
             let before = segments.len();
-            let (chunk_count, detected_language) = transcribe_track(
+            let (chunk_count, detected_language) = transcribe_decoded_track(
                 &context,
                 track,
-                path,
+                samples,
                 request.language.as_deref(),
                 cancelled,
                 segments,
@@ -216,13 +239,13 @@ impl TranscriptionEngine for LocalWhisperEngine {
         };
         if let Some(handle) = aec_handle {
             // AEC only ever substitutes "input" tracks (see
-            // `apply_echo_cancellation`); every other track's path is
-            // unaffected by its outcome, so decode those first, while AEC
-            // still runs in the background.
-            for (track, path) in tracks.iter().filter(|(track, _)| track.direction != "input") {
+            // `apply_echo_cancellation`); every other track's samples are
+            // unaffected by its outcome, so transcribe those first, while
+            // AEC still runs in the background.
+            for (track, samples) in pcm.iter().filter(|(track, _)| track.direction != "input") {
                 run_track(
                     track,
-                    path,
+                    samples,
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -230,14 +253,14 @@ impl TranscriptionEngine for LocalWhisperEngine {
                     &mut warnings,
                 )?;
             }
-            let (aec_tracks, _aec_temp_files, aec_warnings) = handle
+            let (cleaned_inputs, aec_warnings) = handle
                 .join()
-                .map_err(|_| "Echo cancellation thread panicked.".to_string())??;
+                .map_err(|_| "Echo cancellation thread panicked.".to_string())?;
             warnings.extend(aec_warnings);
-            for (track, path) in aec_tracks.iter().filter(|(track, _)| track.direction == "input") {
+            for (track, samples) in cleaned_inputs.iter() {
                 run_track(
                     track,
-                    path,
+                    samples,
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -246,10 +269,10 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 )?;
             }
         } else {
-            for (track, path) in tracks.iter() {
+            for (track, samples) in pcm.iter() {
                 run_track(
                     track,
-                    path,
+                    samples,
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -330,15 +353,15 @@ impl LocalWhisperEngine {
     }
 }
 
-fn transcribe_track(
-    context: &WhisperContext,
-    track: &Track,
-    path: &Path,
-    language: Option<&str>,
-    cancelled: &AtomicBool,
-    segments: &mut Vec<TranscriptSegment>,
-    progress: &mut dyn FnMut(u8),
-) -> Result<(u32, Option<String>), String> {
+/// Decodes a recorder-owned PCM16 WAV to one contiguous mono 16 kHz `f32`
+/// buffer -- the single decode point for a track (see the comment in
+/// `transcribe` above). Read in bounded `MAX_CHUNK_SECONDS` native-rate
+/// pieces, same as every other decode in this file, and resampled with the
+/// same anti-aliased resampler, but concatenated into one buffer instead of
+/// being handed to Whisper piece by piece and discarded.
+fn decode_track_16k(path: &Path) -> Result<Vec<f32>, String> {
+    #[cfg(test)]
+    DECODE_TRACK_16K_CALLS.fetch_add(1, Ordering::Relaxed);
     let header = validate_wav(path)?;
     if header.channels == 0 || header.sample_rate == 0 {
         return Err("WAV has an invalid channel count or sample rate.".into());
@@ -356,35 +379,77 @@ fn transcribe_track(
         );
     }
     let chunk_frames = (u64::from(spec.sample_rate) * u64::from(MAX_CHUNK_SECONDS)).max(1) as usize;
-    let total_frames = header.data_bytes / (u64::from(spec.channels) * 2);
-    let total_chunks = total_frames.div_ceil(chunk_frames as u64).max(1);
     let mut samples = reader.samples::<i16>();
-    let mut offset_frames = 0u64;
+    let mut pcm16k = Vec::new();
+    loop {
+        let mono = read_mono_chunk(&mut samples, spec.channels, chunk_frames)?;
+        if mono.is_empty() {
+            break;
+        }
+        pcm16k.extend(resample_16k(mono, spec.sample_rate)?);
+    }
+    Ok(pcm16k)
+}
+
+/// Decodes every track exactly once (see `decode_track_16k`), up front, so
+/// the rest of `transcribe` -- VAD, Whisper, and acoustic echo cancellation
+/// -- shares one in-memory buffer per track instead of any of them decoding
+/// a track again. Split out from `transcribe` mainly so a test can assert
+/// the "exactly once" part directly, without needing a real Whisper model.
+/// A track paired with its once-decoded, shared 16 kHz mono buffer (see
+/// `decode_track_16k`).
+type TrackPcm = (Track, Arc<Vec<f32>>);
+
+fn decode_tracks_16k(
+    tracks: &[(Track, PathBuf)],
+    cancelled: &AtomicBool,
+) -> Result<Vec<TrackPcm>, String> {
+    let mut pcm = Vec::with_capacity(tracks.len());
+    for (track, path) in tracks {
+        check_cancelled(cancelled)?;
+        pcm.push((track.clone(), Arc::new(decode_track_16k(path)?)));
+    }
+    Ok(pcm)
+}
+
+/// Runs the VAD pre-pass and Whisper over an already-decoded (and, for a
+/// microphone track that went through it, already echo-cancelled) 16 kHz
+/// mono buffer, walking it in `CHUNK_SAMPLES_16K` windows purely to keep the
+/// VAD's per-window noise-floor adaptation and progress granularity
+/// unchanged from when this loop read straight from the WAV file (see
+/// `decode_track_16k`, which now does that reading).
+fn transcribe_decoded_track(
+    context: &WhisperContext,
+    track: &Track,
+    pcm16k: &[f32],
+    language: Option<&str>,
+    cancelled: &AtomicBool,
+    segments: &mut Vec<TranscriptSegment>,
+    progress: &mut dyn FnMut(u8),
+) -> Result<(u32, Option<String>), String> {
+    let total_chunks = pcm16k.len().div_ceil(CHUNK_SAMPLES_16K.max(1)).max(1) as u64;
     let mut chunks = 0u32;
+    let mut chunk_start = 0usize;
     // Auto mode ("auto"/`language: None`) detects once from the first decoded
     // speech window and pins every later window of this track to it, instead
     // of letting each 60-second chunk re-detect (and potentially flip
     // languages mid-meeting on a quiet or code-switched chunk).
     let mut detected_language: Option<String> = None;
-    loop {
+    while chunk_start < pcm16k.len() {
         check_cancelled(cancelled)?;
-        let mono = read_mono_chunk(&mut samples, spec.channels, chunk_frames)?;
-        if mono.is_empty() {
-            break;
-        }
-        let input_frames = mono.len() as u64;
-        let offset_ms = offset_frames.saturating_mul(1000) / u64::from(spec.sample_rate);
-        offset_frames = offset_frames.saturating_add(input_frames);
+        let chunk_end = (chunk_start + CHUNK_SAMPLES_16K).min(pcm16k.len());
+        let chunk = &pcm16k[chunk_start..chunk_end];
+        let offset_ms = (chunk_start as u64).saturating_mul(1000) / u64::from(TARGET_RATE);
         chunks += 1;
-        // Exact digital silence cannot contain speech. We intentionally do not use
-        // a broad RMS threshold that could discard quiet participants.
-        if is_digital_silence(&mono) {
+        // Exact digital silence cannot contain speech. We intentionally do not
+        // use a broad RMS threshold that could discard quiet participants.
+        // Resampling exact silence stays exact silence, so this check means
+        // the same thing here (post-resample, and post-AEC for a cleaned
+        // microphone track) as it did when it ran on the native-rate PCM
+        // straight off disk.
+        if is_digital_silence(chunk) {
             progress(((u64::from(chunks) * 100) / total_chunks) as u8);
-            continue;
-        }
-        let pcm = resample_16k(mono, spec.sample_rate)?;
-        if pcm.is_empty() {
-            progress(((u64::from(chunks) * 100) / total_chunks) as u8);
+            chunk_start = chunk_end;
             continue;
         }
         // A silence pre-pass over this chunk: fully silent/quiet chunks (long
@@ -392,7 +457,7 @@ fn transcribe_track(
         // skipped entirely rather than decoded, which both saves time and
         // avoids a common source of hallucinated text ("Thank you.", repeated
         // lines) on near-silent input.
-        let regions = detect_speech_regions(&pcm, TARGET_RATE);
+        let regions = detect_speech_regions(chunk, TARGET_RATE);
         for (window_start, window_end) in windows_for_regions(&regions, TARGET_RATE) {
             check_cancelled(cancelled)?;
             let window_offset_ms = offset_ms.saturating_add(
@@ -401,7 +466,7 @@ fn transcribe_track(
             let effective_language = language.or(detected_language.as_deref());
             let newly_detected = decode_window(
                 context,
-                &pcm[window_start..window_end],
+                &chunk[window_start..window_end],
                 window_offset_ms,
                 effective_language,
                 cancelled,
@@ -413,6 +478,7 @@ fn transcribe_track(
             }
         }
         progress(((u64::from(chunks) * 100) / total_chunks) as u8);
+        chunk_start = chunk_end;
     }
     Ok((chunks, detected_language))
 }
@@ -856,149 +922,63 @@ pub(crate) fn load_wav_16k_mono(
     Ok(output)
 }
 
-/// Upper bound on a track's duration for echo cancellation: `cancel_echo`
-/// holds full-length, native-rate `f32` buffers for both the microphone and
-/// the summed reference in memory (see docs/transcription.md), unlike the
-/// bounded 60-second chunking the rest of this file uses. Recordings longer
-/// than this skip echo cancellation for that track (with a warning) rather
-/// than risk an unbounded allocation on an unusually long capture.
-const AEC_MAX_DURATION_SECONDS: u64 = 6 * 60 * 60;
-
-/// As `load_wav_16k_mono`, but returns mono samples at the WAV's own native
-/// sample rate (no resampling) alongside that rate. Used for echo
-/// cancellation, which needs to align a microphone track against a loopback
-/// track at whatever rate they were actually recorded at.
-fn load_wav_native_mono(path: &Path, max_duration_seconds: u64) -> Result<(Vec<f32>, u32), String> {
-    let header = validate_wav(path)?;
-    let max_frames = max_duration_seconds
-        .checked_mul(u64::from(header.sample_rate))
-        .ok_or_else(|| "WAV duration limit overflowed.".to_string())?;
-    let frames = header.data_bytes / (u64::from(header.channels) * 2);
-    if frames > max_frames {
-        return Err(format!(
-            "Recorded source exceeds the {} minute echo-cancellation limit.",
-            max_duration_seconds / 60
-        ));
-    }
-    let mut reader =
-        WavReader::open(path).map_err(|error| format!("Could not read saved WAV: {error}"))?;
-    let spec = reader.spec();
-    if spec.channels != header.channels
-        || spec.sample_rate != header.sample_rate
-        || spec.sample_format != SampleFormat::Int
-        || spec.bits_per_sample != 16
-    {
-        return Err(
-            "Only the recorder's PCM16 WAV tracks are supported for local processing.".into(),
-        );
-    }
-    let chunk_frames = (u64::from(spec.sample_rate) * u64::from(MAX_CHUNK_SECONDS)).max(1) as usize;
-    let mut samples = reader.samples::<i16>();
-    let mut output = Vec::with_capacity(frames as usize);
-    loop {
-        let mono = read_mono_chunk(&mut samples, spec.channels, chunk_frames)?;
-        if mono.is_empty() {
-            break;
-        }
-        output.extend(mono);
-    }
-    Ok((output, spec.sample_rate))
-}
-
-/// Writes a mono `f32` buffer as a temporary PCM16 WAV, for feeding an
-/// echo-cancelled buffer back through the existing (file-based) per-track
-/// decode path unchanged. Removed automatically by the returned guard.
-fn write_temp_pcm16_wav(samples: &[f32], sample_rate: u32) -> Result<TempWavGuard, String> {
-    let path = std::env::temp_dir().join(format!("meeting-recorder-aec-{}.wav", uuid::Uuid::new_v4()));
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let result = (|| {
-        let mut writer =
-            WavWriter::create(&path, spec).map_err(|error| format!("Could not open temporary AEC WAV: {error}"))?;
-        for &sample in samples {
-            let clamped = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            writer
-                .write_sample(clamped)
-                .map_err(|error| format!("Could not write temporary AEC WAV: {error}"))?;
-        }
-        writer
-            .finalize()
-            .map_err(|error| format!("Could not finalize temporary AEC WAV: {error}"))
-    })();
-    match result {
-        Ok(()) => Ok(TempWavGuard(path)),
-        Err(error) => {
-            let _ = fs::remove_file(&path);
-            Err(error)
-        }
-    }
-}
-
-/// Deletes its temporary file when dropped. A best-effort cleanup: a failure
-/// to remove an OS temp file is not surfaced as a transcription error.
-struct TempWavGuard(PathBuf);
-impl Drop for TempWavGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-impl TempWavGuard {
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
 /// Runs acoustic echo cancellation (`echo_cancel::cancel_echo`) on every
-/// input (microphone) track against the sum of every output (loopback)
-/// track, when the recording has at least one of each -- the two-track
-/// meeting-recorder setup where the local speakers leak remote audio back
-/// into the mic. Tracks are otherwise returned unchanged (same paths), so a
-/// recording with only one track direction, or where cancellation is
-/// skipped for a specific track (too long, decode failure, or a linear
-/// no-op such as a silent reference), costs nothing beyond the direction
-/// check. Returns the (possibly-substituted) track list, the temporary WAV
-/// guards backing any substituted input track (which must outlive the
-/// caller's use of those paths), and any warnings generated -- returned
-/// rather than written through a `&mut` so this can run on a background
-/// thread (see its caller in `transcribe`) while the main thread keeps
-/// decoding tracks AEC never touches.
-type TracksWithGuards = (Vec<(Track, PathBuf)>, Vec<TempWavGuard>, Vec<String>);
+/// already-decoded input (microphone) track's 16 kHz buffer against the sum
+/// of every already-decoded output (loopback) track's 16 kHz buffer, when
+/// the recording has at least one of each -- the two-track meeting-recorder
+/// setup where the local speakers leak remote audio back into the mic.
+/// Every buffer here was already produced once by `decode_track_16k` in
+/// `transcribe`; this does no file I/O and no resampling of its own (both
+/// mic and reference are already at the shared `TARGET_RATE`), and unlike
+/// the previous native-rate implementation cannot fail, so a recording with
+/// only one track direction, or where cancellation is a no-op for a
+/// specific track (e.g. a silent reference), costs nothing beyond the
+/// direction check and, for a no-op track, one buffer clone. Returns the
+/// (possibly-cleaned) input tracks' samples and any warnings generated --
+/// returned rather than written through a `&mut` so this can run on a
+/// background thread (see its caller in `transcribe`) while the main thread
+/// keeps transcribing tracks AEC never touches.
+type CleanedInputs = (Vec<(Track, Vec<f32>)>, Vec<String>);
 
-fn apply_echo_cancellation(tracks: &[(Track, PathBuf)]) -> Result<TracksWithGuards, String> {
+fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
     let mut warnings = Vec::new();
-    let output_tracks: Vec<&(Track, PathBuf)> =
-        tracks.iter().filter(|(track, _)| track.direction == "output").collect();
-    if output_tracks.is_empty() || !tracks.iter().any(|(track, _)| track.direction == "input") {
-        return Ok((tracks.to_vec(), Vec::new(), warnings));
+    let output_tracks: Vec<&TrackPcm> =
+        pcm.iter().filter(|(track, _)| track.direction == "output").collect();
+    let input_tracks: Vec<&TrackPcm> =
+        pcm.iter().filter(|(track, _)| track.direction == "input").collect();
+    if output_tracks.is_empty() || input_tracks.is_empty() {
+        let unchanged = input_tracks
+            .into_iter()
+            .map(|(track, samples)| (track.clone(), samples.as_ref().clone()))
+            .collect();
+        return (unchanged, warnings);
     }
-    let mut result = Vec::with_capacity(tracks.len());
-    let mut guards = Vec::new();
-    for (track, path) in tracks {
-        if track.direction != "input" {
-            result.push((track.clone(), path.clone()));
-            continue;
-        }
-        match echo_cancel_one_track(track, path, &output_tracks) {
-            Ok(Some((cleaned_track, guard))) => {
-                let path = guard.path().to_owned();
-                guards.push(guard);
-                result.push((cleaned_track, path));
-            }
-            Ok(None) => result.push((track.clone(), path.clone())),
-            Err(error) => {
-                warnings.push(format!(
-                    "Echo cancellation for {} was skipped: {error}",
-                    track.name
-                ));
-                result.push((track.clone(), path.clone()));
-            }
+    // Every output track is already at the shared 16 kHz rate (see
+    // `decode_track_16k`), so summing them into one reference needs no
+    // further resampling -- unlike the previous implementation, which
+    // resampled every output track to each microphone track's own native
+    // rate separately, once per microphone track.
+    let reference_len = output_tracks.iter().map(|(_, samples)| samples.len()).max().unwrap_or(0);
+    let mut reference = vec![0.0f32; reference_len];
+    for (_, samples) in &output_tracks {
+        for (slot, sample) in reference.iter_mut().zip(samples.iter()) {
+            *slot += *sample;
         }
     }
-    if !guards.is_empty() {
+    let mut cleaned_any = false;
+    let result = input_tracks
+        .iter()
+        .map(|(track, mic)| {
+            let (cleaned, stats) = echo_cancel::cancel_echo(mic, &reference, TARGET_RATE);
+            if stats.applied {
+                cleaned_any = true;
+                ((*track).clone(), cleaned)
+            } else {
+                ((*track).clone(), mic.as_ref().clone())
+            }
+        })
+        .collect();
+    if cleaned_any {
         let reference_names: Vec<&str> =
             output_tracks.iter().map(|(track, _)| track.name.as_str()).collect();
         warnings.push(format!(
@@ -1006,32 +986,7 @@ fn apply_echo_cancellation(tracks: &[(Track, PathBuf)]) -> Result<TracksWithGuar
             reference_names.join(", ")
         ));
     }
-    Ok((result, guards, warnings))
-}
-
-/// Cancels echo for one input track against the summed, rate-matched output
-/// tracks. `Ok(None)` means cancellation legitimately did nothing (e.g. a
-/// silent reference) and the original track/path should be used unchanged.
-fn echo_cancel_one_track(
-    track: &Track,
-    path: &Path,
-    output_tracks: &[&(Track, PathBuf)],
-) -> Result<Option<(Track, TempWavGuard)>, String> {
-    let (mic, sample_rate) = load_wav_native_mono(path, AEC_MAX_DURATION_SECONDS)?;
-    let mut reference = vec![0.0f32; mic.len()];
-    for (_output_track, output_path) in output_tracks {
-        let (samples, output_rate) = load_wav_native_mono(output_path, AEC_MAX_DURATION_SECONDS)?;
-        let resampled = resample_to(samples, output_rate, sample_rate)?;
-        for (slot, sample) in reference.iter_mut().zip(resampled.iter()) {
-            *slot += *sample;
-        }
-    }
-    let (cleaned, stats) = echo_cancel::cancel_echo(&mic, &reference, sample_rate);
-    if !stats.applied {
-        return Ok(None);
-    }
-    let guard = write_temp_pcm16_wav(&cleaned, sample_rate)?;
-    Ok(Some((track.clone(), guard)))
+    (result, warnings)
 }
 
 pub fn hash_model(path: &Path) -> Result<String, String> {
@@ -1299,74 +1254,109 @@ mod tests {
             .collect()
     }
 
+    fn tone_f32(seconds: u32, amplitude: f32) -> Vec<f32> {
+        tone_i16(seconds, TARGET_RATE, (amplitude * i16::MAX as f32) as i16)
+            .into_iter()
+            .map(|sample| f32::from(sample) / 32768.0)
+            .collect()
+    }
+
+    fn dummy_path() -> PathBuf {
+        PathBuf::from("unused")
+    }
+
     #[test]
     fn echo_cancellation_substitutes_the_input_track_when_both_directions_are_present() {
-        let dir = temp_dir("aec");
-        let sample_rate = 16_000;
-        let reference_samples = tone_i16(3, sample_rate, 8_000);
+        let reference_samples = tone_f32(3, 0.25);
         // The "mic" is just the reference attenuated and delayed a little,
         // simulating loudspeaker leakage picked up by the microphone.
         let delay = 8usize;
-        let mic_samples: Vec<i16> = (0..reference_samples.len())
-            .map(|i| {
-                if i >= delay {
-                    (reference_samples[i - delay] as f32 * 0.6) as i16
-                } else {
-                    0
-                }
-            })
+        let mic_samples: Vec<f32> = (0..reference_samples.len())
+            .map(|i| if i >= delay { reference_samples[i - delay] * 0.6 } else { 0.0 })
             .collect();
-        let input_path = dir.join("mic.wav");
-        let output_path = dir.join("loopback.wav");
-        fs::write(&input_path, pcm16_wav(&mic_samples, 1, sample_rate)).unwrap();
-        fs::write(&output_path, pcm16_wav(&reference_samples, 1, sample_rate)).unwrap();
-        let tracks = vec![
-            (track("input", "Microphone", &input_path, sample_rate), input_path.clone()),
-            (track("output", "Speakers", &output_path, sample_rate), output_path.clone()),
+        let pcm = vec![
+            (
+                track("input", "Microphone", &dummy_path(), TARGET_RATE),
+                Arc::new(mic_samples.clone()),
+            ),
+            (
+                track("output", "Speakers", &dummy_path(), TARGET_RATE),
+                Arc::new(reference_samples),
+            ),
         ];
-        let (result, guards, warnings) = apply_echo_cancellation(&tracks).unwrap();
-        assert_eq!(result.len(), 2);
-        let cleaned_input = &result.iter().find(|(t, _)| t.direction == "input").unwrap().1;
-        assert_ne!(cleaned_input, &input_path, "input track should be substituted with a temp file");
-        assert!(!guards.is_empty());
+        let (result, warnings) = apply_echo_cancellation(pcm);
+        assert_eq!(result.len(), 1, "only the input track's samples are returned");
+        let (cleaned_track, cleaned_samples) = &result[0];
+        assert_eq!(cleaned_track.direction, "input");
+        assert_ne!(cleaned_samples, &mic_samples, "input track should be cleaned in place");
         assert!(warnings.iter().any(|w| w.contains("echo cancellation")));
-        // The substituted output track is untouched.
-        let output_result = &result.iter().find(|(t, _)| t.direction == "output").unwrap().1;
-        assert_eq!(output_result, &output_path);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn echo_cancellation_is_a_no_op_without_both_track_directions() {
-        let dir = temp_dir("aec-noop");
-        let sample_rate = 16_000;
-        let input_path = dir.join("mic.wav");
-        fs::write(&input_path, pcm16_wav(&tone_i16(1, sample_rate, 4_000), 1, sample_rate)).unwrap();
-        let tracks = vec![(track("input", "Microphone", &input_path, sample_rate), input_path.clone())];
-        let (result, guards, warnings) = apply_echo_cancellation(&tracks).unwrap();
+        let mic_samples = tone_f32(1, 0.12);
+        let pcm = vec![(
+            track("input", "Microphone", &dummy_path(), TARGET_RATE),
+            Arc::new(mic_samples.clone()),
+        )];
+        let (result, warnings) = apply_echo_cancellation(pcm);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].1, tracks[0].1);
-        assert!(guards.is_empty());
+        assert_eq!(result[0].1, mic_samples);
         assert!(warnings.is_empty());
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn echo_cancellation_leaves_the_track_unchanged_when_the_reference_is_silent() {
-        let dir = temp_dir("aec-silent");
-        let sample_rate = 16_000;
+        let mic_samples = tone_f32(1, 0.12);
+        let reference_samples = vec![0.0f32; TARGET_RATE as usize];
+        let pcm = vec![
+            (
+                track("input", "Microphone", &dummy_path(), TARGET_RATE),
+                Arc::new(mic_samples.clone()),
+            ),
+            (
+                track("output", "Speakers", &dummy_path(), TARGET_RATE),
+                Arc::new(reference_samples),
+            ),
+        ];
+        let (result, warnings) = apply_echo_cancellation(pcm);
+        assert_eq!(
+            result[0].1, mic_samples,
+            "a silent reference must leave the mic track untouched"
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn each_track_is_decoded_to_16k_exactly_once() {
+        // Regression test for the double decode this refactor removes: a
+        // recording with one input and one output track must read/resample
+        // each WAV file's samples exactly once, not once for its own
+        // transcription and again (natively) to build the AEC
+        // reference/input -- `decode_tracks_16k` is the single decode point
+        // `transcribe` calls before doing anything else (including spawning
+        // acoustic echo cancellation, which -- by its signature, taking
+        // already-decoded buffers rather than paths -- structurally cannot
+        // decode a track again; see `apply_echo_cancellation`).
+        let dir = temp_dir("decode-once");
+        let sample_rate = 48_000;
         let input_path = dir.join("mic.wav");
         let output_path = dir.join("loopback.wav");
-        fs::write(&input_path, pcm16_wav(&tone_i16(1, sample_rate, 4_000), 1, sample_rate)).unwrap();
-        fs::write(&output_path, pcm16_wav(&vec![0i16; sample_rate as usize], 1, sample_rate)).unwrap();
+        fs::write(&input_path, pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate)).unwrap();
+        fs::write(&output_path, pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate)).unwrap();
         let tracks = vec![
             (track("input", "Microphone", &input_path, sample_rate), input_path.clone()),
             (track("output", "Speakers", &output_path, sample_rate), output_path.clone()),
         ];
-        let (result, guards, _warnings) = apply_echo_cancellation(&tracks).unwrap();
-        let input_result = &result.iter().find(|(t, _)| t.direction == "input").unwrap().1;
-        assert_eq!(input_result, &input_path, "a silent reference must leave the mic track untouched");
-        assert!(guards.is_empty());
+        DECODE_TRACK_16K_CALLS.store(0, Ordering::SeqCst);
+        let cancelled = AtomicBool::new(false);
+        let pcm = decode_tracks_16k(&tracks, &cancelled).unwrap();
+        assert_eq!(pcm.len(), 2);
+        assert_eq!(
+            DECODE_TRACK_16K_CALLS.load(Ordering::SeqCst),
+            2,
+            "one decode_track_16k call per track, not two"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
