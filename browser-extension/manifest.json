@@ -20,20 +20,28 @@
     {
       "matches": ["https://meet.google.com/*"],
       "js": ["content-meet.js"],
-      "run_at": "document_idle",
-      "type": "module"
+      "run_at": "document_idle"
     },
     {
       "matches": ["https://teams.microsoft.com/*", "https://teams.live.com/*"],
       "js": ["content-teams.js"],
-      "run_at": "document_idle",
-      "type": "module"
+      "run_at": "document_idle"
     },
     {
       "matches": ["https://app.zoom.us/wc/*"],
       "js": ["content-zoom.js"],
-      "run_at": "document_idle",
-      "type": "module"
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content-runtime.js", "content-logic.js"],
+      "matches": [
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/*",
+        "https://teams.live.com/*",
+        "https://app.zoom.us/*"
+      ]
     }
   ]
 }
