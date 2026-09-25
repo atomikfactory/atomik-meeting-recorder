@@ -32,6 +32,8 @@ mod summary_real_ollama_tests;
 #[cfg(test)]
 mod diarization_real_tests;
 #[cfg(test)]
+mod residual_echo_gate_real_tests;
+#[cfg(test)]
 mod speakers_end_to_end_tests;
 mod meeting_signals;
 mod meeting_title;

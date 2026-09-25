@@ -81,6 +81,23 @@ pub struct BlockEnergy {
     pub mic_rms: f32,
     /// RMS of the post-AEC signal actually written to `output` for this block.
     pub residual_rms: f32,
+    /// RMS of the delay-aligned far-end reference for this block. Used
+    /// (together with `far_end_only`) by `residual_echo_gate` to estimate the
+    /// echo path's coupling -- far-end level -> echo level in the raw mic --
+    /// from converged, far-end-only stretches, and then predict expected echo
+    /// energy for any block, converged or not. `0.0` when `far_end_active` is
+    /// `false` (the block was never fed into `estimate`/`adapt`).
+    pub reference_rms: f32,
+    /// Whether `DoubleTalkDetector::classify` judged this block far-end-only
+    /// (safe to trust as "AEC had a clean, near-end-free echo to learn from"),
+    /// as opposed to double talk. Always `false` when `far_end_active` is
+    /// `false` -- there is no far-end signal to classify. This is a stricter
+    /// signal than `far_end_active`: it additionally requires the *linear
+    /// filter's own echo estimate* to already explain most of the block's
+    /// mic energy, which is exactly the condition under which the mic/
+    /// reference ratio is a trustworthy coupling sample rather than one
+    /// polluted by near-end speech.
+    pub far_end_only: bool,
 }
 
 /// Cancels acoustic echo from `mic` using `reference` (already summed, if
@@ -214,6 +231,8 @@ fn run_pass(
                     far_end_active: false,
                     mic_rms,
                     residual_rms: mic_rms,
+                    reference_rms: 0.0,
+                    far_end_only: false,
                 });
             }
             start = end;
@@ -249,12 +268,15 @@ fn run_pass(
         if let Some(blocks) = blocks.as_deref_mut() {
             let mic_rms = rms(&mic_block[..len]);
             let residual_rms = rms(&error[..len]) * gain;
+            let reference_rms = rms(&ref_block[..len]);
             blocks.push(BlockEnergy {
                 start_sample: start,
                 len_samples: len,
                 far_end_active: true,
                 mic_rms,
                 residual_rms,
+                reference_rms,
+                far_end_only,
             });
         }
         if let Some(output) = output.as_deref_mut() {

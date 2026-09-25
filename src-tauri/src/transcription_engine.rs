@@ -544,6 +544,13 @@ fn transcribe_decoded_track(
     let near_end_level_rms = echo_blocks
         .map(residual_echo_gate::derive_near_end_level_rms)
         .unwrap_or(0.0);
+    // Per-recording echo-path coupling estimate (see `residual_echo_gate`),
+    // used to recognize residual echo in stretches AEC has not converged on
+    // yet, where suppression alone underestimates how much of the block is
+    // really just echo. `None` when there is no trace, or too little clean
+    // far-end-only audio to trust an estimate -- the coupling-based check is
+    // then simply skipped, falling back to the existing suppression checks.
+    let echo_coupling = echo_blocks.and_then(residual_echo_gate::estimate_echo_coupling);
     while chunk_start < pcm16k.len() {
         check_cancelled(cancelled)?;
         let chunk_end = (chunk_start + CHUNK_SAMPLES_16K).min(pcm16k.len());
@@ -583,6 +590,7 @@ fn transcribe_decoded_track(
                     chunk_start + window_start,
                     chunk_start + window_end,
                     near_end_level_rms,
+                    echo_coupling,
                 ),
                 None => true,
             })
@@ -602,6 +610,7 @@ fn transcribe_decoded_track(
                 track,
                 echo_blocks,
                 near_end_level_rms,
+                echo_coupling,
                 segments,
             )?;
             if detected_language.is_none() {
@@ -629,6 +638,7 @@ fn decode_window(
     track: &Track,
     echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
     near_end_level_rms: f32,
+    echo_coupling: Option<f32>,
     segments: &mut Vec<TranscriptSegment>,
 ) -> Result<Option<String>, String> {
     check_cancelled(cancelled)?;
@@ -710,6 +720,55 @@ fn decode_window(
             if let Some(blocks) = echo_blocks {
                 let start_sample = (start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
                 let end_sample = (end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                // Text+timing tiny-segment rule (see `residual_echo_gate`):
+                // a mic segment of one or two words, fully inside far-end
+                // speech, with mic energy that never rises above this
+                // recording's own near-end level, is dropped outright --
+                // this catches the shortest hallucinated fragments (a
+                // spurious "and") a coarser window-level region check can
+                // miss, without ever touching a genuinely loud (i.e. real)
+                // brief interjection.
+                let word_count = text.split_whitespace().count();
+                if residual_echo_gate::is_tiny_far_end_fragment(
+                    blocks,
+                    start_sample,
+                    end_sample,
+                    near_end_level_rms,
+                    word_count,
+                ) {
+                    continue;
+                }
+                // Alignment-dead-zone rule (see `residual_echo_gate`): a
+                // spurious short word right at the very start of the
+                // recording, in the stretch before AEC's delay-compensated
+                // reference has any samples to compare the mic against at
+                // all -- signal-based checks cannot see this window (it is,
+                // by construction, far-end-inactive), so this is text/timing
+                // only, and deliberately narrow.
+                if residual_echo_gate::is_leading_alignment_dead_zone_fragment(
+                    blocks,
+                    start_sample,
+                    end_sample,
+                    word_count,
+                ) {
+                    continue;
+                }
+                // Signal-level check with this recording's echo-coupling
+                // estimate: catches a segment AEC had not converged on yet
+                // (weak suppression) but whose energy is still fully
+                // explained by predicted echo -- the same coupling-based
+                // logic the pre-Whisper window filter uses, applied again
+                // here at segment granularity in case a window contained a
+                // real mix of speech and residual echo.
+                if residual_echo_gate::is_residual_echo_region(
+                    blocks,
+                    start_sample,
+                    end_sample,
+                    near_end_level_rms,
+                    echo_coupling,
+                ) {
+                    continue;
+                }
                 let weak_far_end_residual = residual_echo_gate::overlaps_weak_far_end_residual(
                     blocks,
                     start_sample,
