@@ -1,22 +1,12 @@
 import { invoke, preview } from "../api";
 import { notice } from "../ui/notice";
 import { store } from "../store";
-import type { Model, Recording, TranscriptionState } from "../types";
+import type { Model, TranscriptionState } from "../types";
 import { escapeHtml, setTextIfChanged } from "../util/escape";
 import { updateRecordingUI } from "../views/library";
 
 export function transcriptionJob(id: string) {
   return store.transcriptionState.jobs.find((job) => job.recording_id === id);
-}
-
-export function transcriptionSummary(recording: Recording) {
-  const job = transcriptionJob(recording.recording_id);
-  if (job?.status === "transcribing") return `Transcribing ${Math.round(job.progress)}%`;
-  if (job) return job.status.replaceAll("_", " ");
-  if (recording.status === "recording") return "Transcription follows capture";
-  if (recording.status === "failed") return "Capture failed — not queued";
-  if (recording.auto_transcribe) return store.transcriptionState.inhibited ? "Processing disabled for this test session" : "Waiting for processing queue";
-  return "Not queued — legacy recordings are never transcribed automatically.";
 }
 
 export async function refreshTranscriptionState() {
