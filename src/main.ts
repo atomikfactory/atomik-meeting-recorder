@@ -22,6 +22,7 @@ type Settings = {
   local_speaker_name?: string;
   recordings_folder?: string | null;
 };
+type BrowserExtensionStatus = { connected: boolean; last_message_seconds_ago: number | null; registered: boolean; browsers: string[] };
 type MoveResult = { recording_id: string; moved: boolean; error: string | null };
 type MoveSummary = { results: MoveResult[] };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
@@ -125,6 +126,7 @@ let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base
 let diarizationState:DiarizationState={enabled:true,inhibited:false,models:[],jobs:[],error:null}; let diarizationPoll=false;
 let summaryState:SummaryState={enabled:true,inhibited:false,jobs:[],error:null}; let summaryPoll=false;
 let compressionState:CompressionState={enabled:true,inhibited:false,jobs:[],error:null}; let compressionPoll=false;
+let browserExtensionState:BrowserExtensionStatus={connected:false,last_message_seconds_ago:null,registered:false,browsers:[]}; let browserExtensionPoll=false; let browserExtensionActionInFlight=false;
 let audioStorage:AudioStorageSummary={total_bytes:0,total_original_bytes:0,recordings:[]}; let audioStoragePoll=false;
 let summaryModels:string[]=[]; let summaryModelsError:string|null=null; let summaryModelsLoading=false;
 const summaryActionInFlight = new Set<string>();
@@ -363,6 +365,21 @@ function summarySummary(recordingId: string) {
 async function refreshSummaryState(){if(preview||!backendReady||document.hidden||summaryPoll)return;summaryPoll=true;try{summaryState=await invoke<SummaryState>("get_summary_state")}catch(error){summaryState={...summaryState,error:`Could not check local summaries: ${String(error)}`}}finally{summaryPoll=false;updateRecordingUI()}}
 async function refreshCompressionState(){if(preview||!backendReady||document.hidden||compressionPoll)return;compressionPoll=true;try{compressionState=await invoke<CompressionState>("get_compression_state")}catch(error){compressionState={...compressionState,error:`Could not check audio compression: ${String(error)}`}}finally{compressionPoll=false;updateRecordingUI()}}
 async function refreshAudioStorage(){if(preview||!backendReady||document.hidden||audioStoragePoll)return;audioStoragePoll=true;try{audioStorage=await invoke<AudioStorageSummary>("audio_storage_summary")}catch{/* best-effort only */}finally{audioStoragePoll=false;updateRecordingUI()}}
+async function refreshBrowserExtensionState(){if(preview||!backendReady||document.hidden||browserExtensionPoll)return;browserExtensionPoll=true;try{browserExtensionState=await invoke<BrowserExtensionStatus>("get_browser_extension_status")}catch{/* best-effort only */}finally{browserExtensionPoll=false;updateBrowserExtensionUI()}}
+function browserExtensionStatusText(): string {
+  if (!browserExtensionState.registered) return "Not connected. Click Connect, then load the extension in your browser.";
+  if (!browserExtensionState.connected) return `Registered for ${browserExtensionState.browsers.join(", ")}. Waiting for the browser extension to report in.`;
+  const ago = browserExtensionState.last_message_seconds_ago;
+  const freshness = ago == null ? "" : ago < 60 ? ` (last message ${ago}s ago)` : ` (last message ${Math.round(ago / 60)}m ago -- may be idle or disconnected)`;
+  return `Connected via ${browserExtensionState.browsers.join(", ")}${freshness}.`;
+}
+function updateBrowserExtensionUI() {
+  setTextIfChanged(document.querySelector("#browser-extension-status"), browserExtensionStatusText());
+  const connectBtn = document.querySelector<HTMLButtonElement>("#connect-browser-extension");
+  const disconnectBtn = document.querySelector<HTMLButtonElement>("#disconnect-browser-extension");
+  if (connectBtn) connectBtn.disabled = preview || !backendReady || browserExtensionActionInFlight;
+  if (disconnectBtn) disconnectBtn.disabled = preview || !backendReady || browserExtensionActionInFlight || !browserExtensionState.registered;
+}
 async function refreshSummaryModels(url: string) {
   if (preview || !backendReady || summaryModelsLoading) return;
   summaryModelsLoading = true;
@@ -441,6 +458,7 @@ async function loadDesktop() {
     refreshSummaryState();
     refreshCompressionState();
     refreshAudioStorage();
+    refreshBrowserExtensionState();
     refreshSummaryModels(settings.ollama_url ?? "http://127.0.0.1:11434");
   } catch (error) {
     backendReady = false;
@@ -913,6 +931,17 @@ function render() {
               <p id="capture-next" class="capture-next">Select one or more sources for your next local recording.</p>
               <div id="device-list">${deviceRows()}</div><p id="inventory-backend" class="inventory-backend">${inventory?.backend ? `Backend: ${escapeHtml(inventory.backend)}` : "Backend unavailable"}</p><p id="device-errors" class="device-errors" role="alert" aria-live="assertive"></p><button class="primary" type="button" id="save-audio-sources" ${disabled()}>Save audio sources</button>
             </section>
+            <section class="model-settings" aria-labelledby="browser-extension-heading">
+              <b id="browser-extension-heading">Browser extension</b>
+              <small>A local-only Chrome/Edge/Firefox extension detects Google Meet (and Teams/Zoom) calls, including background tabs, and sends only the platform, call state, a title, and an opaque tab id to this app over native messaging -- never URLs, participant names, or page content. Recording still always asks for your approval first.</small>
+              <p id="browser-extension-status" role="status">${escapeHtml(browserExtensionStatusText())}</p>
+              <div>
+                <button type="button" class="secondary" id="connect-browser-extension" ${preview || !backendReady ? "disabled" : ""}>Connect browser extension</button>
+                <button type="button" class="secondary" id="disconnect-browser-extension" ${preview || !backendReady || !browserExtensionState.registered ? "disabled" : ""}>Disconnect</button>
+                <button type="button" class="secondary" id="open-browser-extension-folder">Open extension folder</button>
+              </div>
+              <small>After connecting: in Chrome/Edge, open chrome://extensions (or edge://extensions), enable Developer mode, and "Load unpacked" the opened folder. In Firefox, open about:debugging#/runtime/this-firefox and "Load Temporary Add-on…", selecting manifest.firefox.json's folder. See docs/browser-extension.md.</small>
+            </section>
             <div class="integration">
               <b>AppFlowy</b><span>Disconnected</span
               ><small>Connection and exports are not available yet.</small>
@@ -1128,6 +1157,33 @@ function render() {
   document.querySelector("#open-recordings-folder-btn")?.addEventListener("click", () =>
     invoke("open_recordings_folder").catch((error) => notice(String(error), "error")),
   );
+  document.querySelector("#connect-browser-extension")?.addEventListener("click", async () => {
+    if (browserExtensionActionInFlight) return;
+    browserExtensionActionInFlight = true; updateBrowserExtensionUI();
+    try {
+      browserExtensionState = await invoke<BrowserExtensionStatus>("connect_browser_extension");
+      notice("Browser extension host registered. Load the extension in your browser to finish connecting.", "status");
+    } catch (error) {
+      notice(String(error), "error");
+    } finally {
+      browserExtensionActionInFlight = false; updateBrowserExtensionUI();
+    }
+  });
+  document.querySelector("#disconnect-browser-extension")?.addEventListener("click", async () => {
+    if (browserExtensionActionInFlight) return;
+    browserExtensionActionInFlight = true; updateBrowserExtensionUI();
+    try {
+      browserExtensionState = await invoke<BrowserExtensionStatus>("disconnect_browser_extension");
+      notice("Browser extension host unregistered.", "status");
+    } catch (error) {
+      notice(String(error), "error");
+    } finally {
+      browserExtensionActionInFlight = false; updateBrowserExtensionUI();
+    }
+  });
+  document.querySelector("#open-browser-extension-folder")?.addEventListener("click", () =>
+    invoke("open_browser_extension_folder").catch((error) => notice(String(error), "error")),
+  );
   document.querySelector("#move-recordings")?.addEventListener("click", async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
     const status = document.querySelector<HTMLElement>("#recordings-folder-status");
@@ -1204,8 +1260,9 @@ if (!preview) {
   window.setInterval(refreshCompressionState, 1000);
   window.setInterval(refreshAudioStorage, 5000);
   window.setInterval(refreshDetectionState, 1000);
+  window.setInterval(refreshBrowserExtensionState, 5000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); } });
 } else render();
