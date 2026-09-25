@@ -32,6 +32,7 @@ impl Fixture {
             status: "recorded".into(),
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: true,
             error: None,
             transcription_status: "pending".into(),
@@ -117,7 +118,7 @@ fn cancel() -> AtomicBool {
 fn ineligible_recording_is_not_enqueued() {
     let f = Fixture::new();
     // Transcription never marked completed.
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     assert!(f.store.all().unwrap().is_empty());
     assert!(f.track_path().extension().unwrap() == "wav");
     cleanup(&f);
@@ -131,7 +132,7 @@ fn pending_diarization_blocks_compression() {
     speakers
         .enqueue(&f.recording.recording_id, &"b".repeat(64))
         .unwrap();
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     assert!(f.store.all().unwrap().is_empty());
     cleanup(&f);
 }
@@ -156,7 +157,7 @@ fn completed_diarization_unblocks_compression() {
     speakers
         .complete(&f.recording.recording_id, &"c".repeat(64), 1)
         .unwrap();
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     let job = f.store.get(&f.recording.recording_id).unwrap().unwrap();
     assert_eq!(job.status, "completed");
     cleanup(&f);
@@ -166,7 +167,7 @@ fn completed_diarization_unblocks_compression() {
 fn end_to_end_compresses_verifies_and_swaps_metadata() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     let job = f.store.get(&f.recording.recording_id).unwrap().unwrap();
     assert_eq!(job.status, "completed");
     assert!(job.bytes_after.unwrap() > 0);
@@ -184,11 +185,11 @@ fn end_to_end_compresses_verifies_and_swaps_metadata() {
 fn already_compressed_track_is_skipped_idempotently() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     // Re-running compress_recording directly (as a resumed/crashed job would)
     // must be a no-op that neither errors nor touches the FLAC again.
     let recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
-    let (before, after) = compress_recording(&f.root, recording, &f.recordings, &cancel()).unwrap();
+    let (before, after) = compress_recording(&f.root, &[], recording, &f.recordings, &cancel()).unwrap();
     assert!(after > 0 && after <= before);
     cleanup(&f);
 }
@@ -200,7 +201,7 @@ fn existing_flac_without_metadata_update_is_left_untouched() {
     // Simulate a stray .flac left by something else at the target path.
     let flac_path = f.dir.join("track-00.flac");
     fs::write(&flac_path, b"not a real flac").unwrap();
-    tick(&f.root, &f.store, &f.recordings, &cancel()).unwrap();
+    tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     let job = f.store.get(&f.recording.recording_id).unwrap().unwrap();
     assert_eq!(job.status, "failed");
     assert!(job.error.unwrap().contains("without updated metadata"));
@@ -216,7 +217,7 @@ fn cancellation_mid_job_requeues_without_partial_loss() {
     f.mark_transcription_completed();
     let recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
     let cancelled = AtomicBool::new(true);
-    let result = compress_recording(&f.root, recording, &f.recordings, &cancelled);
+    let result = compress_recording(&f.root, &[], recording, &f.recordings, &cancelled);
     assert!(result.is_err());
     // Nothing was swapped: the WAV must still be the referenced, existing file.
     assert!(f.track_path().extension().unwrap() == "wav");
@@ -228,7 +229,7 @@ fn cancellation_mid_job_requeues_without_partial_loss() {
 fn disabled_setting_is_reflected_in_state_without_enqueueing() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    let settings: SettingsReader = Arc::new(|| Ok(CompressionSettings { enabled: false }));
+    let settings: SettingsReader = Arc::new(|| Ok(CompressionSettings { enabled: false, extra_library_roots: Vec::new() }));
     let service =
         CompressionService::with_inhibition(f.root.clone(), settings, true);
     let state = service.state();
@@ -242,7 +243,7 @@ fn recovery_removes_orphan_temp_files() {
     let f = Fixture::new();
     let orphan = f.dir.join("track-00.flac.tmp-deadbeef");
     fs::write(&orphan, b"partial").unwrap();
-    recover_tracks(&f.root, &f.recordings).unwrap();
+    recover_tracks(&f.root, &[], &f.recordings).unwrap();
     assert!(!orphan.exists());
     // Untouched otherwise.
     assert!(f.track_path().exists());
@@ -259,7 +260,7 @@ fn recovery_finishes_an_interrupted_swap_when_both_files_are_present() {
     let flac_path = f.dir.join("track-00.flac");
     audio_file::encode_flac_new(&flac_path, info.sample_rate, info.channels, &samples).unwrap();
     assert!(f.track_path().exists()); // WAV still present too
-    recover_tracks(&f.root, &f.recordings).unwrap();
+    recover_tracks(&f.root, &[], &f.recordings).unwrap();
     let track_path = f.track_path();
     assert_eq!(track_path.extension().unwrap(), "flac");
     assert!(!track_path.with_extension("wav").exists());
@@ -277,7 +278,7 @@ fn recovery_finishes_a_lagging_wav_delete_when_metadata_already_points_at_flac()
     recording.tracks[0].file_path = flac_path.display().to_string();
     f.recordings.save(&recording).unwrap();
     assert!(f.dir.join("track-00.wav").exists());
-    recover_tracks(&f.root, &f.recordings).unwrap();
+    recover_tracks(&f.root, &[], &f.recordings).unwrap();
     assert!(!f.dir.join("track-00.wav").exists());
     assert!(f.track_path().exists());
     cleanup(&f);
@@ -291,7 +292,7 @@ fn recovery_falls_back_to_wav_when_metadata_flac_is_missing() {
     let missing_flac = f.dir.join("track-00.flac");
     recording.tracks[0].file_path = missing_flac.display().to_string();
     f.recordings.save(&recording).unwrap();
-    recover_tracks(&f.root, &f.recordings).unwrap();
+    recover_tracks(&f.root, &[], &f.recordings).unwrap();
     let track_path = f.track_path();
     assert_eq!(track_path.extension().unwrap(), "wav");
     assert!(track_path.exists());

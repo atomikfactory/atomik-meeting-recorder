@@ -58,6 +58,7 @@ fn synthetic_recording(transcript: &Transcript) -> Recording {
         error: None,
         meeting_title: None,
         storage_path: None,
+        library_root: None,
         auto_transcribe: true,
         transcription_status: "completed".into(),
         appflowy_status: "idle".into(),

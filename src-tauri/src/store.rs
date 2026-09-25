@@ -65,7 +65,28 @@ pub struct Settings {
     /// payloads default to "You". Trimmed and length-limited on save.
     #[serde(default = "default_local_speaker_name")]
     pub local_speaker_name: String,
+    /// Where meeting folders (audio tracks, transcript/summary files) are
+    /// stored. `None` means the default location inside the app data
+    /// directory. Databases and imported models always stay in the app data
+    /// directory regardless of this setting -- see `docs/recording.md`.
+    /// Only set through the dedicated `set_recordings_folder`/
+    /// `reset_recordings_folder` commands, which perform the real
+    /// existence/writability validation; `save_settings` accepts this field
+    /// unchanged (like `audio_sources`) so it cannot be used as a bypass.
+    #[serde(default)]
+    pub recordings_folder: Option<String>,
+    /// Folders `recordings_folder` previously pointed to, most recent first,
+    /// kept so recordings that were never explicitly moved (see
+    /// `move_recordings_to_configured_folder`) can still be found after the
+    /// folder changes again. Capped and de-duplicated by
+    /// `record_previous_library_root`. Not directly user-editable.
+    #[serde(default)]
+    pub legacy_library_roots: Vec<String>,
 }
+/// Longest accepted `legacy_library_roots` list -- generous for anyone who
+/// changes folders occasionally, bounded so the settings payload cannot grow
+/// without limit.
+pub const MAX_LEGACY_LIBRARY_ROOTS: usize = 10;
 fn enabled_by_default() -> bool {
     true
 }
@@ -128,6 +149,8 @@ impl Default for Settings {
             summary_model: default_summary_model(),
             compress_audio: enabled_by_default(),
             local_speaker_name: default_local_speaker_name(),
+            recordings_folder: None,
+            legacy_library_roots: Vec::new(),
         }
     }
 }
@@ -169,6 +192,24 @@ impl Settings {
             return Err(StoreError::Validation(format!(
                 "Your name must be 1-{MAX_LOCAL_SPEAKER_NAME_LEN} plain-text characters."
             )));
+        }
+        // Only a shape check: `recordings_folder` must be an absolute path if
+        // set at all. The real existence/writability/symlink/install-dir
+        // checks run once, up front, in the dedicated
+        // `set_recordings_folder` command -- not on every settings load,
+        // since the folder (e.g. a removable drive) may legitimately become
+        // unavailable later without that being an error in stored settings.
+        if let Some(folder) = &self.recordings_folder {
+            if !Path::new(folder).is_absolute() {
+                return Err(StoreError::Validation(
+                    "Recordings folder must be an absolute path.".into(),
+                ));
+            }
+        }
+        if self.legacy_library_roots.len() > MAX_LEGACY_LIBRARY_ROOTS {
+            return Err(StoreError::Validation(
+                "Too many previous recordings folders are recorded.".into(),
+            ));
         }
         Ok(())
     }
@@ -285,6 +326,13 @@ mod tests {
             summary_model: "qwen2.5:7b-instruct".into(),
             compress_audio: false,
             local_speaker_name: "Ben".into(),
+            recordings_folder: Some(
+                std::env::temp_dir().join("recordings").display().to_string(),
+            ),
+            legacy_library_roots: vec![std::env::temp_dir()
+                .join("old-recordings")
+                .display()
+                .to_string()],
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -465,5 +513,65 @@ mod tests {
         }
         .normalize();
         assert_eq!(settings.local_speaker_name, "Ben");
+    }
+    #[test]
+    fn relative_recordings_folder_does_not_replace_saved_value() {
+        let p = path("recordings-folder.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                recordings_folder: Some("relative/folder".into()),
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
+        let absolute = std::env::temp_dir().join("recordings").display().to_string();
+        assert!(store
+            .save(Settings {
+                recordings_folder: Some(absolute.clone()),
+                ..good.clone()
+            })
+            .is_ok());
+        assert_eq!(
+            store.get().unwrap().recordings_folder,
+            Some(absolute)
+        );
+    }
+    #[test]
+    fn too_many_legacy_library_roots_does_not_replace_saved_value() {
+        let p = path("legacy-roots.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        let too_many = (0..=MAX_LEGACY_LIBRARY_ROOTS)
+            .map(|i| format!("root-{i}"))
+            .collect();
+        assert!(store
+            .save(Settings {
+                legacy_library_roots: too_many,
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
+        let exactly_max = (0..MAX_LEGACY_LIBRARY_ROOTS)
+            .map(|i| format!("root-{i}"))
+            .collect();
+        assert!(store
+            .save(Settings {
+                legacy_library_roots: exactly_max,
+                ..good
+            })
+            .is_ok());
+    }
+    #[test]
+    fn recordings_folder_defaults_to_none_and_is_none_by_default() {
+        assert_eq!(Settings::default().recordings_folder, None);
+        assert!(Settings::default().legacy_library_roots.is_empty());
+        let parsed: Settings = serde_json::from_str(
+            r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.recordings_folder, None);
+        assert!(parsed.legacy_library_roots.is_empty());
     }
 }

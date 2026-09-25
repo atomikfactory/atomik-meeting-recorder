@@ -29,6 +29,7 @@ impl Fixture {
             status: "recorded".into(),
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: true,
             error: None,
             transcription_status: "pending".into(),

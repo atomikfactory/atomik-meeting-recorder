@@ -57,6 +57,10 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressionSettings {
     pub enabled: bool,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    pub extra_library_roots: Vec<PathBuf>,
 }
 type SettingsReader = Arc<dyn Fn() -> Result<CompressionSettings, String> + Send + Sync>;
 
@@ -119,11 +123,14 @@ impl CompressionService {
                 match thread::Builder::new().name("audio-compress".into()).spawn(move || {
                     lower_thread_priority();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let startup_extra_roots = settings_reader()
+                            .map(|s| s.extra_library_roots)
+                            .unwrap_or_default();
                         if let Err(err) = processing_guard()
                             .lock()
                             .map_err(|_| "Processing guard failed.".to_string())
                             .and_then(|_guard| s.recover())
-                            .and_then(|()| recover_tracks(&root, &r))
+                            .and_then(|()| recover_tracks(&root, &startup_extra_roots, &r))
                         {
                             set_error(&e, Some(err));
                             return;
@@ -134,7 +141,7 @@ impl CompressionService {
                                     let _guard = processing_guard()
                                         .lock()
                                         .map_err(|_| "Processing guard failed.".to_string())?;
-                                    tick(&root, &s, &r, &c)
+                                    tick(&root, &settings.extra_library_roots, &s, &r, &c)
                                 } else {
                                     Ok(())
                                 }
@@ -261,6 +268,7 @@ fn diarization_settled(root: &Path, id: &str) -> Result<bool, String> {
 
 fn tick(
     root: &Path,
+    extra_roots: &[PathBuf],
     store: &CompressionStore,
     recordings: &RecordingStore,
     cancel: &AtomicBool,
@@ -285,7 +293,7 @@ fn tick(
     if !store.claim(&job.recording_id)? {
         return Ok(());
     }
-    let result = compress_recording(root, recording, recordings, cancel);
+    let result = compress_recording(root, extra_roots, recording, recordings, cancel);
     match result {
         Ok((bytes_before, bytes_after)) => {
             store.complete(&job.recording_id, bytes_before, bytes_after)?;
@@ -313,11 +321,12 @@ fn tick(
 /// than anything that could have been lost mid-job.
 fn compress_recording(
     root: &Path,
+    extra_roots: &[PathBuf],
     mut recording: Recording,
     recordings: &RecordingStore,
     cancel: &AtomicBool,
 ) -> Result<(u64, u64), String> {
-    let directory = resolved_recording_directory(root, &recording)?;
+    let directory = resolved_recording_directory(root, extra_roots, &recording)?;
     for index in 0..recording.tracks.len() {
         if cancel.load(Ordering::Acquire) {
             return Err("Compression cancelled; no result was applied.".into());
@@ -411,9 +420,13 @@ fn compress_recording(
 /// Startup recovery: removes orphaned encode temp files, and finishes any
 /// track swap that a crash interrupted between the verified rename and the
 /// WAV delete (see the module doc comment for why this is always safe).
-pub(crate) fn recover_tracks(root: &Path, recordings: &RecordingStore) -> Result<(), String> {
+pub(crate) fn recover_tracks(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    recordings: &RecordingStore,
+) -> Result<(), String> {
     for mut recording in recordings.finalized_eligible()? {
-        let Ok(directory) = resolved_recording_directory(root, &recording) else {
+        let Ok(directory) = resolved_recording_directory(root, extra_roots, &recording) else {
             continue;
         };
         if let Ok(entries) = fs::read_dir(&directory) {

@@ -65,28 +65,35 @@ pub struct SearchResults {
     pub took_ms: u64,
 }
 
+/// Extra known library roots (the currently configured recordings folder and
+/// any it replaced), read fresh so a folder change takes effect on the next
+/// reconcile pass without restarting the app.
+pub type LibraryRootsProvider = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
+
 pub struct SearchService {
     root: PathBuf,
     store: Arc<Mutex<Option<SearchStore>>>,
+    library_roots: LibraryRootsProvider,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl SearchService {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn with_library_roots(root: PathBuf, library_roots: LibraryRootsProvider) -> Self {
         let store = Arc::new(Mutex::new(
             SearchStore::open_or_rebuild(&root.join("search.sqlite3")).ok(),
         ));
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker = {
-            let (root, store, cancel) = (root.clone(), store.clone(), cancel.clone());
+            let (root, store, cancel, library_roots) =
+                (root.clone(), store.clone(), cancel.clone(), library_roots.clone());
             thread::Builder::new()
                 .name("search-reconcile".into())
                 .spawn(move || {
                     // First pass runs immediately (still off the UI thread); later
                     // passes are cheap because only changed recordings do real work.
                     while !cancel.load(std::sync::atomic::Ordering::Acquire) {
-                        reconcile(&root, &store);
+                        reconcile(&root, &library_roots(), &store);
                         let start = Instant::now();
                         while start.elapsed() < RECONCILE_INTERVAL {
                             if cancel.load(std::sync::atomic::Ordering::Acquire) {
@@ -101,6 +108,7 @@ impl SearchService {
         Self {
             root,
             store,
+            library_roots,
             cancel,
             worker: Mutex::new(worker),
         }
@@ -117,7 +125,7 @@ impl SearchService {
             return;
         };
         if let Ok(Some(recording)) = RecordingStore::open(&self.root).and_then(|r| r.get_by_id(recording_id)) {
-            let _ = index_one(&self.root, store, &recording);
+            let _ = index_one(&self.root, &(self.library_roots)(), store, &recording);
         } else {
             let _ = store.remove_recording(recording_id);
         }
@@ -324,13 +332,13 @@ pub(crate) fn build_match_query(input: &str) -> Option<String> {
 /// since it was last indexed (including "never indexed"). Cheap when nothing
 /// changed: each recording costs one small-row lookup per store, not a
 /// re-read of transcript/summary bytes.
-fn reconcile(root: &Path, store: &Mutex<Option<SearchStore>>) {
+fn reconcile(root: &Path, extra_roots: &[PathBuf], store: &Mutex<Option<SearchStore>>) {
     let Ok(mut guard) = store.lock() else { return };
     if guard.is_none() {
         *guard = SearchStore::open_or_rebuild(&root.join("search.sqlite3")).ok();
     }
     if let Some(store) = guard.as_ref() {
-        reconcile_store(root, store);
+        reconcile_store(root, extra_roots, store);
     }
 }
 
@@ -339,7 +347,7 @@ fn reconcile(root: &Path, store: &Mutex<Option<SearchStore>>) {
 /// which own a `SearchStore` directly): drop rows for recordings that no
 /// longer exist, then (re)index anything whose transcript/summary checksum
 /// changed since it was last indexed, including "never indexed".
-fn reconcile_store(root: &Path, store: &SearchStore) {
+fn reconcile_store(root: &Path, extra_roots: &[PathBuf], store: &SearchStore) {
     let Ok(recordings) = RecordingStore::open(root) else {
         return;
     };
@@ -354,7 +362,7 @@ fn reconcile_store(root: &Path, store: &SearchStore) {
         return;
     };
     for recording in eligible {
-        let _ = index_one(root, store, &recording);
+        let _ = index_one(root, extra_roots, store, &recording);
     }
 }
 
@@ -363,11 +371,16 @@ fn reconcile_store(root: &Path, store: &SearchStore) {
 /// spinning up `SearchService`'s background thread and file-backed index.
 #[cfg(test)]
 pub(crate) fn reconcile_for_test(root: &Path, store: &SearchStore) {
-    reconcile_store(root, store);
+    reconcile_store(root, &[], store);
 }
 
-fn index_one(root: &Path, store: &SearchStore, recording: &Recording) -> Result<(), String> {
-    let (title, started_at, state, rows) = gather_index_data(root, recording);
+fn index_one(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    store: &SearchStore,
+    recording: &Recording,
+) -> Result<(), String> {
+    let (title, started_at, state, rows) = gather_index_data(root, extra_roots, recording);
     let previous = store.state(&recording.recording_id)?;
     let unchanged = previous
         .map(|p| {
@@ -388,6 +401,7 @@ fn index_one(root: &Path, store: &SearchStore, recording: &Recording) -> Result<
 /// (at minimum its title) is still indexed.
 fn gather_index_data(
     root: &Path,
+    extra_roots: &[PathBuf],
     recording: &Recording,
 ) -> (String, i64, RecordingIndexState, Vec<IndexRow>) {
     let title = recording
@@ -405,7 +419,7 @@ fn gather_index_data(
     }];
     let mut state = RecordingIndexState::default();
 
-    if let Some(transcript) = completed_transcript(root, recording) {
+    if let Some(transcript) = completed_transcript(root, extra_roots, recording) {
         state.transcript_checksum = Some(transcript.0.clone());
         let labels = read_completed_speaker_labels(root, recording, &transcript.1);
         let local_speaker_name = transcript.1.local_speaker_name.as_deref().unwrap_or("You");
@@ -483,13 +497,17 @@ fn gather_index_data(
 /// checkpoint checksum. `None` for anything short of that (not transcribed
 /// yet, checksum mismatch, corrupt checkpoint) -- the caller treats it the
 /// same as "nothing to index yet".
-fn completed_transcript(root: &Path, recording: &Recording) -> Option<(String, Transcript)> {
+fn completed_transcript(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    recording: &Recording,
+) -> Option<(String, Transcript)> {
     let registry = TranscriptionStore::open(&root.join("transcription.sqlite3")).ok()?;
     let job = registry.get(&recording.recording_id).ok().flatten()?;
     if job.status != "completed" {
         return None;
     }
-    let directory = recording_directory(root, &recording.recording_id).ok()?;
+    let directory = recording_directory(root, extra_roots, &recording.recording_id).ok()?;
     let json = output_path(&directory, "transcript.json").ok()?;
     if job.transcript_path.as_deref() != Some(json.to_string_lossy().as_ref()) {
         return None;

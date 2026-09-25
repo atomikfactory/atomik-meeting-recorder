@@ -8,6 +8,10 @@ use std::path::PathBuf;
 pub struct TranscriptionRequest {
     pub recording: Recording,
     pub recordings_root: PathBuf,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    pub extra_library_roots: Vec<PathBuf>,
     pub model_path: PathBuf,
     pub model_key: String,
     pub model_hash: String,

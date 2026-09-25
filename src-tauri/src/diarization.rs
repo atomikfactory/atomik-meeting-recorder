@@ -28,7 +28,16 @@ use std::{
     time::Duration,
 };
 
-type SettingsReader = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+/// The subset of app settings the speaker worker needs on each tick.
+#[derive(Clone, Debug)]
+pub struct DiarizationSettings {
+    pub enabled: bool,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    pub extra_library_roots: Vec<PathBuf>,
+}
+type SettingsReader = Arc<dyn Fn() -> Result<DiarizationSettings, String> + Send + Sync>;
 const KINDS: [&str; 2] = ["segmentation", "embedding"];
 #[derive(Serialize)]
 pub struct ModelStatus {
@@ -120,10 +129,10 @@ impl DiarizationService {
                             Ok(value) => value, Err(err) => { set_error(&e, Some(err)); return; }
                         };
                         while !c.load(Ordering::Acquire) {
-                            let result = s().and_then(|enabled| {
-                                if enabled {
+                            let result = s().and_then(|settings| {
+                                if settings.enabled {
                                     let _guard = processing_guard().lock().map_err(|_| "Processing guard failed.".to_string())?;
-                                    tick(&r, &d, &t, &recordings, engine.as_ref(), &c)
+                                    tick(&r, &settings.extra_library_roots, &d, &t, &recordings, engine.as_ref(), &c)
                                 } else { Ok(()) }
                             });
                             set_error(&e, result.err());
@@ -160,10 +169,15 @@ impl DiarizationService {
     }
     pub fn state(&self) -> DiarizationState {
         let mut error = self.error.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let enabled = (self.settings)().unwrap_or_else(|e| {
-            error = Some(e);
-            false
-        });
+        let enabled = (self.settings)()
+            .unwrap_or_else(|e| {
+                error = Some(e);
+                DiarizationSettings {
+                    enabled: false,
+                    extra_library_roots: Vec::new(),
+                }
+            })
+            .enabled;
         let mut models = Vec::new();
         let mut jobs = Vec::new();
         for kind in KINDS {
@@ -272,8 +286,9 @@ impl DiarizationService {
             return Ok(None);
         }
         let recordings = RecordingStore::open(&self.root)?;
+        let extra_roots = (self.settings)()?.extra_library_roots;
         let (recording, transcript, directory) =
-            load_parent(&self.root, registry, &recordings, &job)?;
+            load_parent(&self.root, &extra_roots, registry, &recordings, &job)?;
         let json = output_path(&directory, "speakers.json")?;
         let bytes = read_checkpoint(&json)?;
         if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {
@@ -369,6 +384,7 @@ fn model_pair(root: &Path, registry: &TranscriptionStore) -> Result<Option<Model
 }
 fn load_parent(
     root: &Path,
+    extra_roots: &[PathBuf],
     registry: &TranscriptionStore,
     recordings: &RecordingStore,
     job: &SpeakerJob,
@@ -389,7 +405,7 @@ fn load_parent(
     {
         return Err("Recording is not eligible for speaker processing.".into());
     }
-    let directory = recording_directory(root, &job.recording_id)?;
+    let directory = recording_directory(root, extra_roots, &job.recording_id)?;
     let json = output_path(&directory, "transcript.json")?;
     if parent.transcript_path.as_deref() != Some(json.to_string_lossy().as_ref()) {
         return Err("Whisper checkpoint path is invalid.".into());
@@ -474,7 +490,10 @@ pub(crate) fn read_completed_speaker_labels(
     if job.status != "completed" {
         return None;
     }
-    let directory = recording_directory(root, &recording.recording_id).ok()?;
+    // Best-effort only (see doc comment above): a recording under a custom
+    // library folder is not resolved here, so this simply returns `None`
+    // rather than threading settings through this free function.
+    let directory = recording_directory(root, &[], &recording.recording_id).ok()?;
     let json = output_path(&directory, "speakers.json").ok()?;
     let bytes = read_checkpoint(&json).ok()?;
     if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {
@@ -487,6 +506,7 @@ pub(crate) fn read_completed_speaker_labels(
 
 fn tick(
     root: &Path,
+    extra_roots: &[PathBuf],
     store: &DiarizationStore,
     registry: &TranscriptionStore,
     recordings: &RecordingStore,
@@ -542,7 +562,8 @@ fn tick(
     }
     job.models = Some(models.clone());
     let result = (|| {
-        let (recording, transcript, directory) = load_parent(root, registry, recordings, &job)?;
+        let (recording, transcript, directory) =
+            load_parent(root, extra_roots, registry, recordings, &job)?;
         let json = output_path(&directory, "speakers.json")?;
         let md = output_path(&directory, "transcript-speakers.md")?;
         let (checkpoint, bytes) = if json.exists() {
@@ -573,6 +594,7 @@ fn tick(
             let request = DiarizationRequest {
                 recording: recording.clone(),
                 recordings_root: root.to_owned(),
+                extra_library_roots: extra_roots.to_vec(),
                 segmentation_model,
                 embedding_model,
                 segmentation_hash: models.segmentation_hash.clone(),

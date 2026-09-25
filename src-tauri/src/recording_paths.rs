@@ -54,14 +54,53 @@ pub(crate) fn create_recording_directory(
         return Err("recording folder escaped its library".into());
     }
     recording.storage_path = Some(format!("meetings/{basename}"));
+    // Record which root this recording actually lives under so it can still be
+    // found later even if the configured library folder subsequently changes.
+    // `library`'s parent is the (canonical) root the caller asked us to create
+    // under -- capture that, not `root` itself, since `library` is already the
+    // canonicalized, symlink-checked path.
+    recording.library_root = library
+        .parent()
+        .map(|p| p.display().to_string())
+        .or_else(|| Some(root.display().to_string()));
     Ok(path)
 }
 
+/// Resolves a recording's on-disk folder against `default_root` (the location
+/// used before this feature existed, and still the implicit home for any
+/// recording whose `library_root` is `None`) plus `extra_roots` -- typically
+/// the currently configured library folder and any folder it replaced. A
+/// recording created under a custom folder records that folder's canonical
+/// path in `recording.library_root`; that value is only trusted when it
+/// matches one of these known roots, so a tampered or stale value can never
+/// point resolution somewhere unexpected.
 pub(crate) fn resolved_recording_directory(
-    root: &Path,
+    default_root: &Path,
+    extra_roots: &[PathBuf],
     recording: &Recording,
 ) -> Result<PathBuf, String> {
-    let root = fs::canonicalize(root).map_err(|e| format!("canonicalize recordings root: {e}"))?;
+    let canonical_default = fs::canonicalize(default_root)
+        .map_err(|e| format!("canonicalize recordings root: {e}"))?;
+    let root = match recording.library_root.as_deref() {
+        None => canonical_default.clone(),
+        Some(saved) => {
+            let saved_canonical = fs::canonicalize(saved)
+                .map_err(|e| format!("recording's storage location is unavailable: {e}"))?;
+            let known = std::iter::once(&canonical_default).chain(extra_roots.iter());
+            let mut matched = None;
+            for candidate in known {
+                if let Ok(candidate_canonical) = fs::canonicalize(candidate) {
+                    if candidate_canonical == saved_canonical {
+                        matched = Some(candidate_canonical);
+                        break;
+                    }
+                }
+            }
+            matched.ok_or_else(|| {
+                "recording's storage location is not a recognized recordings folder".to_string()
+            })?
+        }
+    };
     let (parent, path) = match recording.storage_path.as_deref() {
         None => {
             if !valid_legacy_id(&recording.recording_id) {
@@ -199,6 +238,7 @@ mod tests {
             error: None,
             meeting_title: Some("A / B: <C>".into()),
             storage_path: None,
+            library_root: None,
             auto_transcribe: false,
             transcription_status: "idle".into(),
             appflowy_status: "idle".into(),
@@ -227,7 +267,7 @@ mod tests {
             .to_string_lossy()
             .contains("A__B_C--"));
         assert_eq!(
-            resolved_recording_directory(&root, &record).unwrap(),
+            resolved_recording_directory(&root, &[], &record).unwrap(),
             directory
         );
         let _ = fs::remove_dir_all(root);
@@ -242,7 +282,7 @@ mod tests {
         let legacy = root.join("legacy_one");
         fs::create_dir(&legacy).unwrap();
         assert_eq!(
-            resolved_recording_directory(&root, &record).unwrap(),
+            resolved_recording_directory(&root, &[], &record).unwrap(),
             legacy.canonicalize().unwrap()
         );
         assert!(!root.join("meetings").exists());
@@ -262,13 +302,66 @@ mod tests {
         ] {
             record.storage_path = Some(path.into());
             assert!(
-                resolved_recording_directory(&root, &record).is_err(),
+                resolved_recording_directory(&root, &[], &record).is_err(),
                 "{path}"
             );
         }
         record.recording_id = id.to_ascii_uppercase();
         record.storage_path = Some(format!("meetings/x--{}", record.recording_id));
-        assert!(resolved_recording_directory(&root, &record).is_err());
+        assert!(resolved_recording_directory(&root, &[], &record).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_recording_created_under_a_custom_root_resolves_via_extra_roots() {
+        let default_root = root("default-a");
+        let custom_root = root("custom-a");
+        let mut record = recording(uuid::Uuid::new_v4().to_string());
+        let directory = create_recording_directory(&custom_root, &mut record).unwrap();
+        assert!(record.library_root.is_some());
+        // The default root alone does not know about it...
+        assert!(resolved_recording_directory(&default_root, &[], &record).is_err());
+        // ...but listing the custom root as a known extra root resolves it.
+        assert_eq!(
+            resolved_recording_directory(&default_root, std::slice::from_ref(&custom_root), &record).unwrap(),
+            directory
+        );
+        let _ = fs::remove_dir_all(default_root);
+        let _ = fs::remove_dir_all(custom_root);
+    }
+
+    #[test]
+    fn an_untrusted_library_root_is_rejected_even_if_the_path_is_real() {
+        let default_root = root("default-b");
+        let untracked_root = root("untracked-b");
+        let mut record = recording(uuid::Uuid::new_v4().to_string());
+        create_recording_directory(&untracked_root, &mut record).unwrap();
+        // `untracked_root` is a real directory containing a real, validly
+        // named recording folder -- but it was never registered as the
+        // default or an extra (configured/legacy) root, so it must not be
+        // trusted merely because the recording's own JSON claims it.
+        assert!(resolved_recording_directory(&default_root, &[], &record).is_err());
+        let _ = fs::remove_dir_all(default_root);
+        let _ = fs::remove_dir_all(untracked_root);
+    }
+
+    #[test]
+    fn a_legacy_recording_with_no_library_root_always_uses_the_default_root() {
+        let default_root = root("default-c");
+        let mut record = recording("legacy_two".into());
+        record.meeting_title = None;
+        record.storage_path = None;
+        record.library_root = None;
+        let legacy = default_root.join("legacy_two");
+        fs::create_dir(&legacy).unwrap();
+        // Even with unrelated extra roots supplied, a `None` library_root
+        // always means the default root -- extra roots are irrelevant here.
+        let unrelated = root("unrelated-c");
+        assert_eq!(
+            resolved_recording_directory(&default_root, std::slice::from_ref(&unrelated), &record).unwrap(),
+            legacy.canonicalize().unwrap()
+        );
+        let _ = fs::remove_dir_all(default_root);
+        let _ = fs::remove_dir_all(unrelated);
     }
 }

@@ -32,6 +32,7 @@ impl Fixture {
             status: "recorded".into(),
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: true,
             error: None,
             transcription_status: "pending".into(),
@@ -124,6 +125,7 @@ impl Fixture {
     fn tick(&self, engine: &FakeEngine) {
         tick(
             &self.root,
+            &[],
             &self.store,
             &self.registry,
             &self.recordings,
@@ -144,7 +146,7 @@ impl Fixture {
     fn service(&self) -> DiarizationService {
         DiarizationService::with_inhibition(
             self.root.clone(),
-            Arc::new(|| Ok(true)),
+            Arc::new(|| Ok(crate::diarization::DiarizationSettings { enabled: true, extra_library_roots: Vec::new() })),
             Arc::new(FakeEngine::default()),
             true,
         )
@@ -400,7 +402,7 @@ fn inhibited_service_makes_no_claims() {
     let engine = Arc::new(FakeEngine::default());
     let service = DiarizationService::with_inhibition(
         f.root.clone(),
-        Arc::new(|| Ok(true)),
+        Arc::new(|| Ok(crate::diarization::DiarizationSettings { enabled: true, extra_library_roots: Vec::new() })),
         engine.clone(),
         true,
     );

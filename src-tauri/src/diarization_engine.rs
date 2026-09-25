@@ -166,8 +166,12 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 }
 
 fn recording_directory(request: &DiarizationRequest) -> Result<PathBuf, String> {
-    resolved_recording_directory(&request.recordings_root, &request.recording)
-        .map_err(|_| "Recording directory is unavailable or invalid.".to_string())
+    resolved_recording_directory(
+        &request.recordings_root,
+        &request.extra_library_roots,
+        &request.recording,
+    )
+    .map_err(|_| "Recording directory is unavailable or invalid.".to_string())
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -223,7 +227,8 @@ fn validate_managed_model(
 fn validate_request(request: &DiarizationRequest) -> Result<(PathBuf, PathBuf), String> {
     let root = fs::canonicalize(&request.recordings_root)
         .map_err(|_| "Recording root is unavailable.".to_string())?;
-    let _ = validated_recording_tracks(&request.recording, &root)?;
+    let _ =
+        validated_recording_tracks(&request.recording, &root, &request.extra_library_roots)?;
     let segmentation = validate_managed_model(
         &root,
         &request.segmentation_model,
@@ -313,7 +318,11 @@ pub fn run_worker(request_path: &Path, result_path: &Path) -> Result<(), String>
     {
         return Err("Diarization worker request or result path is invalid.".into());
     }
-    let tracks = validated_recording_tracks(&request.recording, &request.recordings_root)?;
+    let tracks = validated_recording_tracks(
+        &request.recording,
+        &request.recordings_root,
+        &request.extra_library_roots,
+    )?;
     let (output_tracks, mut warnings) = select_diarizable_tracks(tracks);
     let mut turns = Vec::new();
     for (track, path) in output_tracks {
@@ -475,6 +484,7 @@ mod tests {
             error: None,
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: false,
             transcription_status: "idle".into(),
             appflowy_status: "idle".into(),
@@ -494,6 +504,7 @@ mod tests {
         let request = DiarizationRequest {
             recording: recording.clone(),
             recordings_root: PathBuf::from("unused"),
+            extra_library_roots: Vec::new(),
             segmentation_model: PathBuf::from("segment.onnx"),
             embedding_model: PathBuf::from("embed.onnx"),
             segmentation_hash: "a".repeat(64),
@@ -519,6 +530,7 @@ mod tests {
         let request = DiarizationRequest {
             recording: recording.clone(),
             recordings_root: PathBuf::from("unused"),
+            extra_library_roots: Vec::new(),
             segmentation_model: PathBuf::from("segment.onnx"),
             embedding_model: PathBuf::from("embed.onnx"),
             segmentation_hash: "a".repeat(64),
@@ -544,6 +556,7 @@ mod tests {
         let request = DiarizationRequest {
             recording: recording.clone(),
             recordings_root: PathBuf::from("unused"),
+            extra_library_roots: Vec::new(),
             segmentation_model: PathBuf::from("segment.onnx"),
             embedding_model: PathBuf::from("embed.onnx"),
             segmentation_hash: "a".repeat(64),

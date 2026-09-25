@@ -998,11 +998,12 @@ fn validate_wav(path: &Path) -> Result<WavHeader, String> {
 pub(crate) fn validated_recording_tracks(
     recording: &crate::recording::Recording,
     recordings_root: &Path,
+    extra_roots: &[PathBuf],
 ) -> Result<Vec<(Track, PathBuf)>, String> {
     if uuid::Uuid::parse_str(&recording.recording_id).is_err() {
         return Err("Recording identity is invalid.".into());
     }
-    let directory = resolved_recording_directory(recordings_root, recording)
+    let directory = resolved_recording_directory(recordings_root, extra_roots, recording)
         .map_err(|_| "Recording directory is unavailable or invalid.".to_string())?;
     if recording.tracks.is_empty() {
         return Err("Recording has no audio tracks to transcribe.".into());
@@ -1027,7 +1028,11 @@ pub(crate) fn validated_recording_tracks(
 }
 
 fn validated_tracks(request: &TranscriptionRequest) -> Result<Vec<(Track, PathBuf)>, String> {
-    validated_recording_tracks(&request.recording, &request.recordings_root)
+    validated_recording_tracks(
+        &request.recording,
+        &request.recordings_root,
+        &request.extra_library_roots,
+    )
 }
 
 /// Reads a recorder-owned PCM16 WAV in bounded pieces and returns 16 kHz mono
@@ -1614,11 +1619,13 @@ mod tests {
                 error: None,
                 meeting_title: None,
                 storage_path: None,
+                library_root: None,
                 auto_transcribe: false,
                 transcription_status: "idle".into(),
                 appflowy_status: "idle".into(),
             },
             recordings_root: root.clone(),
+            extra_library_roots: Vec::new(),
             model_path: root.join("model.bin"),
             model_key: "tiny".into(),
             model_hash: "hash".into(),
@@ -1735,11 +1742,13 @@ mod tests {
                 error: None,
                 meeting_title: None,
                 storage_path: None,
+                library_root: None,
                 auto_transcribe: false,
                 transcription_status: "idle".into(),
                 appflowy_status: "idle".into(),
             },
             recordings_root: root.clone(),
+            extra_library_roots: Vec::new(),
             model_path: PathBuf::from(model_path),
             model_key: info.key.clone(),
             model_hash: info.sha256.clone(),

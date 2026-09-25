@@ -8,6 +8,11 @@ use std::path::PathBuf;
 pub struct DiarizationRequest {
     pub recording: Recording,
     pub recordings_root: PathBuf,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    #[serde(default)]
+    pub extra_library_roots: Vec<PathBuf>,
     pub segmentation_model: PathBuf,
     pub embedding_model: PathBuf,
     pub segmentation_hash: String,

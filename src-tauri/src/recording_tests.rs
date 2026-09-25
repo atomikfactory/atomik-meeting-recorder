@@ -6,7 +6,7 @@ fn levels_are_source_mapped_independent_and_cleared_on_stop() {
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
     let mut engine = Engine {
-        dir: dir.clone(),
+        current_library_root: Arc::new({ let dir = dir.clone(); move || Ok(dir.clone()) }),
         store,
         backend: backend(vec![("a", false, false, false), ("b", false, false, false)]),
         active: None,
@@ -36,7 +36,7 @@ fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
     let mut engine = Engine {
-        dir: dir.clone(),
+        current_library_root: Arc::new({ let dir = dir.clone(); move || Ok(dir.clone()) }),
         store,
         backend: backend(vec![("a", false, false, false)]),
         active: None,

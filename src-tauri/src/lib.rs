@@ -12,6 +12,7 @@ mod diarization_store;
 mod diarization_types;
 #[cfg(target_os = "linux")]
 mod linux_pulse;
+mod library_move;
 #[cfg(test)]
 mod flac_transcription_parity_tests;
 #[cfg(test)]
@@ -190,6 +191,9 @@ fn switch_to_imported_model_if_unavailable(
 fn app_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+/// Where SQLite databases and imported models live. Never affected by the
+/// user's configured recordings folder -- see `docs/recording.md`'s storage
+/// section for why these stay in the app data directory.
 fn recordings_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let path = app
         .path()
@@ -198,8 +202,127 @@ fn recordings_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> 
         .join("recordings");
     Ok(path)
 }
+fn app_settings(app: &tauri::AppHandle) -> Result<Settings, String> {
+    app.state::<Mutex<SettingsStorage>>()
+        .lock()
+        .map_err(app_error)?
+        .load()
+        .map_err(app_error)
+}
+/// Writes and immediately removes a small probe file, the only reliable way
+/// to confirm a directory is actually writable by this process (permissions
+/// can look fine and still refuse writes, e.g. a read-only network share).
+fn probe_writable(dir: &std::path::Path) -> Result<(), String> {
+    let probe = dir.join(format!(".meeting-recorder-write-check-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&probe, b"ok").map_err(|e| format!("not writable: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+/// Where a brand-new recording's meeting folder should be created right now:
+/// the user's configured recordings folder if one is set, otherwise the
+/// default location. Deliberately fails loudly (rather than silently
+/// falling back to the default) when a configured folder is set but
+/// currently unreachable -- e.g. its drive is unplugged -- so a recording
+/// never starts somewhere the user did not intend.
+fn current_library_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    match app_settings(app)?.recordings_folder {
+        None => recordings_dir(app),
+        Some(folder) => {
+            let path = std::path::PathBuf::from(&folder);
+            if !path.is_dir() {
+                return Err(format!(
+                    "The configured recordings folder is unavailable: {folder}. Check that the drive or network share is connected, or reset to the default location in Settings."
+                ));
+            }
+            probe_writable(&path).map_err(|e| {
+                format!("The configured recordings folder is not writable ({e}): {folder}")
+            })?;
+            Ok(path)
+        }
+    }
+}
+/// Extra known library roots for resolving recordings that already exist on
+/// disk: the currently configured folder (even if it happens to be
+/// unreachable right now -- resolution will simply fail clearly for
+/// recordings under it, rather than treating the value as unknown/untrusted)
+/// plus every folder it has previously replaced. The default location
+/// (`recordings_dir`) is always implicitly included by
+/// `recording_paths::resolved_recording_directory` and does not need to be
+/// listed here.
+fn extra_library_roots(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
+    let Ok(settings) = app_settings(app) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<std::path::PathBuf> = settings
+        .recordings_folder
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    roots.extend(settings.legacy_library_roots.into_iter().map(std::path::PathBuf::from));
+    roots
+}
+/// The library ("meetings") folder used for display and "Open recordings
+/// folder", resolved against whichever root is effective right now.
 fn recordings_library(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    library_directory(&recordings_dir(app)?)
+    library_directory(&current_library_root(app)?)
+}
+/// Deep validation for a folder the user is about to choose as the
+/// recordings folder: an absolute, real (or creatable) directory, actually
+/// writable, not a symlink/junction, and not somewhere that would be
+/// surprising to store user data -- the application's own install
+/// directory, or the root of a drive/filesystem.
+fn validate_new_recordings_folder(
+    _app: &tauri::AppHandle,
+    raw: &str,
+) -> Result<std::path::PathBuf, String> {
+    validate_new_recordings_folder_path(raw)
+}
+/// The path-only half of `validate_new_recordings_folder`, kept separate so
+/// it can be unit tested without a running Tauri app.
+fn validate_new_recordings_folder_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(raw);
+    if !path.is_absolute() {
+        return Err("Choose an absolute folder path.".into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("The chosen folder must not be a symbolic link or junction.".into());
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err("Choose a folder, not a file.".into());
+        }
+        Ok(_) => {}
+        Err(_) => {
+            std::fs::create_dir_all(path)
+                .map_err(|e| format!("Could not create the chosen folder: {e}"))?;
+        }
+    }
+    probe_writable(path).map_err(|e| format!("The chosen folder is not writable ({e})."))?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("canonicalize chosen folder: {e}"))?;
+    if canonical.parent().is_none() {
+        return Err("Choose a folder, not a drive or filesystem root.".into());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(install_dir) = exe.parent().and_then(|p| std::fs::canonicalize(p).ok()) {
+            if canonical.starts_with(&install_dir) {
+                return Err(
+                    "Choose a folder outside the application's install directory.".into(),
+                );
+            }
+        }
+    }
+    Ok(canonical)
+}
+/// Remembers `previous` as a legacy library root (most recent first, capped
+/// and de-duplicated) so recordings under it remain resolvable even if the
+/// user never runs "Move existing recordings".
+fn record_previous_library_root(settings: &mut Settings, previous: String) {
+    settings.legacy_library_roots.retain(|r| r != &previous);
+    settings.legacy_library_roots.insert(0, previous);
+    settings
+        .legacy_library_roots
+        .truncate(store::MAX_LEGACY_LIBRARY_ROOTS);
 }
 struct NativeDetectorAdapter(NativeMeetingDetector);
 impl MeetingDetector for NativeDetectorAdapter {
@@ -269,11 +392,14 @@ fn save_settings(
     summary: State<'_, SummaryService>,
 ) -> Result<Settings, String> {
     // General preferences must not be an escape hatch around validated source
-    // selection. Keep the persisted selection until the dedicated command runs.
+    // selection or the recordings folder. Keep those fields until their own
+    // dedicated commands run.
     let mut storage = store.lock().map_err(app_error)?;
     let existing = storage.load().map_err(app_error)?;
     let saved = storage.save(Settings {
         audio_sources: existing.audio_sources,
+        recordings_folder: existing.recordings_folder,
+        legacy_library_roots: existing.legacy_library_roots,
         ..settings
     }.normalize()).map_err(app_error)?;
     // A user who just enabled summaries, or fixed the URL/model, expects a
@@ -822,6 +948,131 @@ fn open_folder(path: &std::path::Path) -> Result<(), String> {
 fn open_recordings_folder(app: tauri::AppHandle) -> Result<(), String> {
     open_folder(&recordings_library(&app)?)
 }
+fn set_recordings_folder_inner(app: &tauri::AppHandle, raw: String) -> Result<Settings, String> {
+    let canonical = validate_new_recordings_folder(app, &raw)?;
+    let state = app.state::<Mutex<SettingsStorage>>();
+    let mut storage = state.lock().map_err(app_error)?;
+    let mut current = storage.load().map_err(app_error)?;
+    let new_value = canonical.display().to_string();
+    if current.recordings_folder.as_deref() == Some(new_value.as_str()) {
+        return Ok(current);
+    }
+    let previous = current
+        .recordings_folder
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| recordings_dir(app).map(|p| p.display().to_string()))?;
+    record_previous_library_root(&mut current, previous);
+    current.recordings_folder = Some(new_value);
+    storage.save(current).map_err(app_error)
+}
+/// Opens the OS folder picker and, if the user chooses a folder, validates
+/// and saves it as the recordings folder. `None` means the user cancelled.
+#[tauri::command]
+async fn choose_recordings_folder(app: tauri::AppHandle) -> Result<Option<Settings>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("Choose a recordings folder")
+            .blocking_pick_folder();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected
+            .as_path()
+            .ok_or("Choose a local folder.")?
+            .to_path_buf();
+        set_recordings_folder_inner(&app, path.display().to_string()).map(Some)
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Same validation as `choose_recordings_folder`, for a path supplied
+/// directly (used by tests and any future manual-entry UI).
+#[tauri::command]
+async fn set_recordings_folder(path: String, app: tauri::AppHandle) -> Result<Settings, String> {
+    tauri::async_runtime::spawn_blocking(move || set_recordings_folder_inner(&app, path))
+        .await
+        .map_err(app_error)?
+}
+/// Reverts to the default (app data directory) location. New recordings go
+/// there immediately; existing ones already under the just-abandoned folder
+/// remain resolvable because it is kept as a legacy root.
+#[tauri::command]
+async fn reset_recordings_folder(app: tauri::AppHandle) -> Result<Settings, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<SettingsStorage>>();
+        let mut storage = state.lock().map_err(app_error)?;
+        let mut current = storage.load().map_err(app_error)?;
+        if let Some(folder) = current.recordings_folder.take() {
+            record_previous_library_root(&mut current, folder);
+        }
+        storage.save(current).map_err(app_error)
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Explicitly moves every finalized recording (plus anything left mid-move
+/// by a prior crash) from wherever it currently lives to the configured
+/// recordings folder. Never automatic, and never touches a recording that is
+/// still recording/processing -- see `library_move.rs` for the crash-safe
+/// copy-verify-commit-delete sequence used per recording.
+#[tauri::command]
+async fn move_recordings_to_configured_folder(
+    app: tauri::AppHandle,
+    recording: State<'_, RecordingService>,
+) -> Result<library_move::MoveSummary, String> {
+    let service = recording.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = try_processing_guard()?;
+        if matches!(service.state().status.as_str(), "recording" | "processing") {
+            return Err("Stop the active recording before moving recordings.".into());
+        }
+        let state_root = recordings_dir(&app)?;
+        let destination = current_library_root(&app)?;
+        let extra_roots = extra_library_roots(&app);
+        let store = RecordingStore::open(&state_root)?;
+        let destination_canonical = std::fs::canonicalize(&destination).ok();
+        let mut ids = library_move::pending_recording_ids(&state_root);
+        for recording in store.finalized_eligible()? {
+            if !ids.contains(&recording.recording_id) {
+                ids.push(recording.recording_id);
+            }
+        }
+        let mut results = Vec::with_capacity(ids.len());
+        for recording_id in ids {
+            let Some(recording) = store.get_by_id(&recording_id)? else {
+                continue;
+            };
+            let already_there = recording
+                .library_root
+                .as_deref()
+                .and_then(|saved| std::fs::canonicalize(saved).ok())
+                == destination_canonical;
+            if already_there {
+                continue;
+            }
+            let outcome = library_move::move_one(
+                &state_root,
+                &state_root,
+                &extra_roots,
+                &destination,
+                &store,
+                &recording,
+            );
+            results.push(library_move::MoveResult {
+                recording_id,
+                moved: outcome.is_ok(),
+                error: outcome.err(),
+            });
+        }
+        service.refresh_history()?;
+        Ok(library_move::MoveSummary { results })
+    })
+    .await
+    .map_err(app_error)?
+}
 #[tauri::command]
 async fn open_recording_folder(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -833,7 +1084,8 @@ async fn open_recording_folder(recording_id: String, app: tauri::AppHandle) -> R
         let recording = RecordingStore::open(&root)?
             .get_by_id(&recording_id)?
             .ok_or("Recording metadata is unavailable.")?;
-        let directory = resolved_recording_directory(&root, &recording)?;
+        let directory =
+            resolved_recording_directory(&root, &extra_library_roots(&app), &recording)?;
         open_folder(&directory)
     })
     .await
@@ -1012,7 +1264,15 @@ pub fn run() {
     let app = tauri::Builder::default().plugin(single_instance(|app, _, _| show(app))).plugin(tauri_plugin_dialog::init()).setup(|app| {
     let database = app.path().app_config_dir()?.join("settings.sqlite3");
     let recording_dir = recordings_dir(app.handle()).map_err(std::io::Error::other)?;
-    app.manage(Mutex::new(SettingsStorage::new(database))); app.manage(RecordingService::new(recording_dir.clone())); app.manage(TrayStatus::default()); app.manage(AudioScanGate::default()); app.manage(ExitGate(Arc::new(AtomicU8::new(EXIT_NORMAL))));
+    app.manage(Mutex::new(SettingsStorage::new(database)));
+    let recording_service_app = app.handle().clone();
+    let recording_library_app = app.handle().clone();
+    app.manage(RecordingService::with_library_roots(
+        recording_dir.clone(),
+        Arc::new(move || current_library_root(&recording_service_app)),
+        Arc::new(move || extra_library_roots(&recording_library_app)),
+    ));
+    app.manage(TrayStatus::default()); app.manage(AudioScanGate::default()); app.manage(ExitGate(Arc::new(AtomicU8::new(EXIT_NORMAL))));
     let detection_app = app.handle().clone();
     let prompt_app = app.handle().clone();
     let detection = DetectionService::new(recording_dir.join("detection.sqlite3"), NativeDetectorAdapter(NativeMeetingDetector::new()), Arc::new(move || detection_settings(&detection_app)), Arc::new(AppRecordingBoundary(app.handle().clone())), Arc::new(move |snapshot| {
@@ -1030,23 +1290,26 @@ pub fn run() {
             echo_cancellation: settings.echo_cancellation,
             dedupe_echo_segments: settings.dedupe_echo_segments,
             local_speaker_name: settings.local_speaker_name,
+            extra_library_roots: extra_library_roots(&transcription_app),
         })
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();
     app.manage(DiarizationService::new(recording_dir.clone(), Arc::new(move || {
-        Ok(speaker_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?.diarization_enabled)
+        let enabled = speaker_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?.diarization_enabled;
+        Ok(diarization::DiarizationSettings { enabled, extra_library_roots: extra_library_roots(&speaker_app) })
     }), Arc::new(diarization_engine::LocalDiarizationEngine::new())));
     let summary_app = app.handle().clone();
     app.manage(SummaryService::new(recording_dir.clone(), Arc::new(move || {
         let settings = summary_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
-        Ok(SummarySettings { enabled: settings.summary_enabled, ollama_url: settings.ollama_url, model: settings.summary_model })
+        Ok(SummarySettings { enabled: settings.summary_enabled, ollama_url: settings.ollama_url, model: settings.summary_model, extra_library_roots: extra_library_roots(&summary_app) })
     }), Arc::new(summary_engine::OllamaSummaryEngine::new())));
     let compress_app = app.handle().clone();
     app.manage(CompressionService::new(recording_dir.clone(), Arc::new(move || {
         let settings = compress_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
-        Ok(CompressionSettings { enabled: settings.compress_audio })
+        Ok(CompressionSettings { enabled: settings.compress_audio, extra_library_roots: extra_library_roots(&compress_app) })
     })));
-    app.manage(SearchService::new(recording_dir.clone()));
+    let search_app = app.handle().clone();
+    app.manage(SearchService::with_library_roots(recording_dir.clone(), Arc::new(move || extra_library_roots(&search_app))));
     let availability = match install_tray(app) {
         Ok(controls) => {
             app.manage(controls);
@@ -1074,7 +1337,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application, search_transcripts]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();
@@ -1184,5 +1447,100 @@ mod tests {
             store::WhisperModel::Base
         );
         service.shutdown().unwrap();
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("meeting-lib-folder-test-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn relative_path_is_rejected() {
+        assert!(validate_new_recordings_folder_path("relative/folder").is_err());
+    }
+
+    #[test]
+    fn a_file_is_rejected() {
+        let dir = scratch_dir("file");
+        let file = dir.join("not-a-folder.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let error = validate_new_recordings_folder_path(&file.display().to_string()).unwrap_err();
+        assert!(error.contains("not a file"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_rejected() {
+        let dir = scratch_dir("symlink-base");
+        let target = dir.join("real");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = validate_new_recordings_folder_path(&link.display().to_string()).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn a_drive_or_filesystem_root_is_rejected() {
+        let root = if cfg!(windows) {
+            std::path::Path::new(&scratch_dir("root-probe"))
+                .components()
+                .next()
+                .map(|c| {
+                    let mut prefix = c.as_os_str().to_os_string();
+                    prefix.push("\\");
+                    std::path::PathBuf::from(prefix)
+                })
+                .unwrap()
+        } else {
+            std::path::PathBuf::from("/")
+        };
+        let error = validate_new_recordings_folder_path(&root.display().to_string()).unwrap_err();
+        // Either this process cannot write directly to a drive root (the
+        // common case, caught first), or it can and the root-path check
+        // below catches it instead -- both are the correct rejection.
+        assert!(
+            error.contains("root") || error.contains("not writable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_applications_own_install_directory_is_rejected() {
+        let exe = std::env::current_exe().unwrap();
+        let install_dir = exe.parent().unwrap();
+        let error =
+            validate_new_recordings_folder_path(&install_dir.display().to_string()).unwrap_err();
+        assert!(error.contains("install directory"), "{error}");
+    }
+
+    #[test]
+    fn a_fresh_writable_nested_folder_is_accepted_and_created() {
+        let dir = scratch_dir("valid").join("nested").join("recordings");
+        assert!(!dir.exists());
+        let accepted = validate_new_recordings_folder_path(&dir.display().to_string()).unwrap();
+        assert!(accepted.is_dir());
+    }
+
+    #[test]
+    fn record_previous_library_root_dedupes_and_caps() {
+        let mut settings = Settings::default();
+        for i in 0..(store::MAX_LEGACY_LIBRARY_ROOTS + 3) {
+            record_previous_library_root(&mut settings, format!("root-{i}"));
+        }
+        assert_eq!(settings.legacy_library_roots.len(), store::MAX_LEGACY_LIBRARY_ROOTS);
+        // Most recent first.
+        assert_eq!(
+            settings.legacy_library_roots[0],
+            format!("root-{}", store::MAX_LEGACY_LIBRARY_ROOTS + 2)
+        );
+        // Re-recording an existing root moves it to the front instead of duplicating it.
+        record_previous_library_root(&mut settings, "root-5".into());
+        assert_eq!(settings.legacy_library_roots[0], "root-5");
+        assert_eq!(
+            settings.legacy_library_roots.iter().filter(|r| *r == "root-5").count(),
+            1
+        );
     }
 }

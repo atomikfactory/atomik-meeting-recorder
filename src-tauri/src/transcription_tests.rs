@@ -28,6 +28,7 @@ impl Fixture {
             status: "recorded".into(),
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: true,
             error: None,
             transcription_status: "pending".into(),
@@ -711,7 +712,7 @@ fn transcript_outputs_follow_validated_new_storage_metadata() {
     let engine = FakeEngine::default();
     f.tick(&engine);
     assert_eq!(
-        recording_directory(&f.root, &f.recording.recording_id).unwrap(),
+        recording_directory(&f.root, &[], &f.recording.recording_id).unwrap(),
         directory.canonicalize().unwrap()
     );
     assert!(directory.join("transcript.json").is_file());
@@ -839,6 +840,7 @@ fn labeled_recording() -> Recording {
         status: "recorded".into(),
         meeting_title: None,
         storage_path: None,
+        library_root: None,
         auto_transcribe: true,
         error: None,
         transcription_status: "completed".into(),

@@ -37,6 +37,10 @@ pub struct TranscriptionSettings {
     pub dedupe_echo_segments: bool,
     /// See `store::Settings::local_speaker_name`.
     pub local_speaker_name: String,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    pub extra_library_roots: Vec<PathBuf>,
 }
 impl TranscriptionSettings {
     /// Convenience for tests and fixtures that only care about the model size.
@@ -48,6 +52,7 @@ impl TranscriptionSettings {
             echo_cancellation: true,
             dedupe_echo_segments: true,
             local_speaker_name: "You".into(),
+            extra_library_roots: Vec::new(),
         }
     }
 }
@@ -409,14 +414,15 @@ impl TranscriptionService {
         ) {
             return Err("Transcription is already queued or running; it was not restarted.".into());
         }
-        let key = (self.settings)()?.model_key;
+        let current_settings = (self.settings)()?;
+        let key = current_settings.model_key;
         let hash = store
             .model(&key)?
             .map(|(_, hash, _)| hash)
             .unwrap_or_default();
         let intent = store.begin_restart(id, &key, &hash)?;
         archive_outputs(
-            &recording_directory(&self.root, id)?,
+            &recording_directory(&self.root, &current_settings.extra_library_roots, id)?,
             id,
             &intent.archive_id,
         )?;
@@ -429,7 +435,7 @@ impl TranscriptionService {
         if j.status != "completed" {
             return Err("Transcript is not complete.".into());
         }
-        let directory = recording_directory(&self.root, id)?;
+        let directory = recording_directory(&self.root, &(self.settings)()?.extra_library_roots, id)?;
         let json = output_path(&directory, "transcript.json")?;
         let markdown = output_path(&directory, "transcript.md")?;
         if j.transcript_path.as_deref() != Some(json.to_string_lossy().as_ref())
@@ -495,12 +501,16 @@ pub(crate) fn reject_symlink(path: &Path) -> Result<(), String> {
         Err(e) => Err(io_error(e)),
     }
 }
-pub(crate) fn recording_directory(root: &Path, id: &str) -> Result<PathBuf, String> {
+pub(crate) fn recording_directory(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    id: &str,
+) -> Result<PathBuf, String> {
     safe_id(id)?;
     let recording = RecordingStore::open(root)?
         .get_by_id(id)?
         .ok_or_else(|| "Recording was not found.".to_string())?;
-    resolved_recording_directory(root, &recording)
+    resolved_recording_directory(root, extra_roots, &recording)
 }
 pub(crate) fn output_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let path = directory.join(name);
@@ -577,6 +587,7 @@ fn archive_outputs(directory: &Path, id: &str, archive_id: &str) -> Result<(), S
 }
 fn recover_restart_intents(
     root: &Path,
+    extra_roots: &[PathBuf],
     store: &TranscriptionStore,
     recordings: &RecordingStore,
 ) -> Result<(), String> {
@@ -588,7 +599,7 @@ fn recover_restart_intents(
             continue;
         };
         archive_outputs(
-            &resolved_recording_directory(root, &recording)?,
+            &resolved_recording_directory(root, extra_roots, &recording)?,
             &intent.recording_id,
             &intent.archive_id,
         )?;
@@ -677,8 +688,8 @@ fn tick(
     engine: &dyn TranscriptionEngine,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    recover_restart_intents(root, store, recordings)?;
     let current_settings = settings()?;
+    recover_restart_intents(root, &current_settings.extra_library_roots, store, recordings)?;
     let key = current_settings.model_key;
     for recording in recordings.finalized_eligible()? {
         if recording.auto_transcribe {
@@ -744,7 +755,8 @@ fn tick(
         if !automatic && !explicitly_requested {
             return Err("This recording is not eligible for transcription. A failed capture must be explicitly requested and retain audio.".into());
         }
-        let directory = recording_directory(root, &job.recording_id)?;
+        let directory =
+            recording_directory(root, &current_settings.extra_library_roots, &job.recording_id)?;
         let json = output_path(&directory, "transcript.json")?;
         let md = output_path(&directory, "transcript.md")?;
         // Recover a JSON rename that succeeded before the database commit.
@@ -763,6 +775,7 @@ fn tick(
             let request = TranscriptionRequest {
                 recording: recording.clone(),
                 recordings_root: root.to_owned(),
+                extra_library_roots: current_settings.extra_library_roots.clone(),
                 model_path: path,
                 model_key: job.model_key.clone(),
                 model_hash: hash,

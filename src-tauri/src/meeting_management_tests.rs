@@ -40,6 +40,7 @@ fn recording(id: &str, track: PathBuf, status: &str) -> Recording {
         error: None,
         meeting_title: Some("Original".into()),
         storage_path: None,
+        library_root: None,
         auto_transcribe: false,
         transcription_status: "idle".into(),
         appflowy_status: "idle".into(),

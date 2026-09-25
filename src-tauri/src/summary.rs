@@ -35,6 +35,10 @@ pub struct SummarySettings {
     pub enabled: bool,
     pub ollama_url: String,
     pub model: String,
+    /// Extra known library roots (the currently configured recordings folder
+    /// and any it replaced) so a recording created under a custom folder can
+    /// still be located; see `recording_paths::resolved_recording_directory`.
+    pub extra_library_roots: Vec<PathBuf>,
 }
 #[cfg(test)]
 impl SummarySettings {
@@ -43,6 +47,7 @@ impl SummarySettings {
             enabled: true,
             ollama_url: "http://127.0.0.1:11434".into(),
             model: model.into(),
+            extra_library_roots: Vec::new(),
         }
     }
 }
@@ -217,7 +222,9 @@ impl SummaryService {
             return Err("Summary is not complete.".into());
         }
         let recordings = RecordingStore::open(&self.root)?;
-        let (recording, transcript, directory) = load_parent(&self.root, registry, &recordings, &job)?;
+        let extra_roots = (self.settings)()?.extra_library_roots;
+        let (recording, transcript, directory) =
+            load_parent(&self.root, &extra_roots, registry, &recordings, &job)?;
         let json = output_path(&directory, "summary.json")?;
         let bytes = read_checkpoint(&json)?;
         if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {
@@ -263,8 +270,10 @@ pub(crate) fn read_completed_summary(
     if job.status != "completed" {
         return None;
     }
+    // Best-effort only (see doc comment above): a recording under a custom
+    // library folder is not resolved here, so this simply returns `None`.
     let (recording, transcript, directory) =
-        load_parent(root, &registry, &recordings, &job).ok()?;
+        load_parent(root, &[], &registry, &recordings, &job).ok()?;
     let json = output_path(&directory, "summary.json").ok()?;
     let bytes = read_checkpoint(&json).ok()?;
     let hash = checksum(&bytes);
@@ -282,6 +291,7 @@ fn set_error(slot: &Mutex<Option<String>>, value: Option<String>) {
 }
 fn load_parent(
     root: &Path,
+    extra_roots: &[PathBuf],
     registry: &TranscriptionStore,
     recordings: &RecordingStore,
     job: &SummaryJob,
@@ -302,7 +312,7 @@ fn load_parent(
     {
         return Err("Recording is not eligible for summarizing.".into());
     }
-    let directory = recording_directory(root, &job.recording_id)?;
+    let directory = recording_directory(root, extra_roots, &job.recording_id)?;
     let json = output_path(&directory, "transcript.json")?;
     if parent.transcript_path.as_deref() != Some(json.to_string_lossy().as_ref()) {
         return Err("Whisper checkpoint path is invalid.".into());
@@ -469,7 +479,8 @@ fn tick(
     }
     job.model = Some(settings.model.clone());
     let result: Result<(), String> = (|| {
-        let (recording, transcript, directory) = load_parent(root, registry, recordings, &job)?;
+        let (recording, transcript, directory) =
+            load_parent(root, &settings.extra_library_roots, registry, recordings, &job)?;
         let json = output_path(&directory, "summary.json")?;
         let md = output_path(&directory, "summary.md")?;
         let (checkpoint, bytes) = if json.exists() {

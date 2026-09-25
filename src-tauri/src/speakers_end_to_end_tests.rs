@@ -121,6 +121,7 @@ fn real_end_to_end_speakers_pipeline() {
         status: "recorded".into(),
         meeting_title: None,
         storage_path: None,
+        library_root: None,
         auto_transcribe: true,
         error: None,
         transcription_status: "completed".into(),
@@ -156,6 +157,7 @@ fn real_end_to_end_speakers_pipeline() {
     let request = TranscriptionRequest {
         recording: recording.clone(),
         recordings_root: recording_dir.parent().unwrap_or(&recording_dir).to_owned(),
+        extra_library_roots: Vec::new(),
         model_path: whisper_model,
         model_key: info.key,
         model_hash: info.sha256,

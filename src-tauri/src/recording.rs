@@ -20,6 +20,17 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Resolves the folder a brand-new recording should be created under right
+/// now. Returning `Err` (e.g. the user's configured folder is on an
+/// unplugged drive) refuses to start the recording rather than silently
+/// falling back to the default location.
+pub type CurrentLibraryRoot = Arc<dyn Fn() -> Result<PathBuf, String> + Send + Sync>;
+/// Extra folders (besides the default app-data location) that existing
+/// recordings may live under -- the currently configured library folder and
+/// any folder it replaced. Used only to resolve/recover recordings already
+/// on disk; never as a fallback for where a new recording is created.
+pub type KnownLibraryRoots = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub source_id: String,
@@ -45,6 +56,12 @@ pub struct Recording {
     pub meeting_title: Option<String>,
     #[serde(default)]
     pub storage_path: Option<String>,
+    /// Canonical path of the library folder this recording's `storage_path`
+    /// is relative to. `None` means the default location (the app data
+    /// directory), matching every recording made before the configurable
+    /// recordings folder existed. See `recording_paths::resolved_recording_directory`.
+    #[serde(default)]
+    pub library_root: Option<String>,
     #[serde(default)]
     pub auto_transcribe: bool,
     pub transcription_status: String,
@@ -85,18 +102,35 @@ pub struct RecordingService {
     state: SharedState,
 }
 impl RecordingService {
-    pub fn new(dir: PathBuf) -> Self {
-        Self::with_backend_and_title(dir, || Box::new(NativeCapture), best_effort_title)
+    /// Used from `lib.rs`: `current` resolves where new recordings go right
+    /// now (the user's configured folder, or the default), and `known`
+    /// supplies extra folders -- the configured folder plus any it replaced
+    /// -- for locating recordings that already exist on disk.
+    pub fn with_library_roots(
+        dir: PathBuf,
+        current: CurrentLibraryRoot,
+        known: KnownLibraryRoots,
+    ) -> Self {
+        Self::with_backend_and_title(dir, current, known, || Box::new(NativeCapture), best_effort_title)
     }
     #[cfg(test)]
     fn with_backend(
         dir: PathBuf,
         factory: impl FnOnce() -> Box<dyn AudioCapture> + Send + 'static,
     ) -> Self {
-        Self::with_backend_and_title(dir, factory, || None)
+        let default_dir = dir.clone();
+        Self::with_backend_and_title(
+            dir,
+            Arc::new(move || Ok(default_dir.clone())),
+            Arc::new(Vec::new),
+            factory,
+            || None,
+        )
     }
     fn with_backend_and_title(
         dir: PathBuf,
+        current_library_root: CurrentLibraryRoot,
+        known_library_roots: KnownLibraryRoots,
         factory: impl FnOnce() -> Box<dyn AudioCapture> + Send + 'static,
         title_provider: fn() -> Option<String>,
     ) -> Self {
@@ -108,7 +142,17 @@ impl RecordingService {
         let shared = state.clone();
         if let Err(error) = thread::Builder::new()
             .name("recording-coordinator".into())
-            .spawn(move || run(dir, factory(), rx, shared, title_provider))
+            .spawn(move || {
+                run(
+                    dir,
+                    current_library_root,
+                    known_library_roots,
+                    factory(),
+                    rx,
+                    shared,
+                    title_provider,
+                )
+            })
         {
             set_error(
                 &state,
@@ -197,7 +241,7 @@ struct Active {
     errors: mpsc::Receiver<String>,
 }
 struct Engine {
-    dir: PathBuf,
+    current_library_root: CurrentLibraryRoot,
     store: RecordingStore,
     backend: Box<dyn AudioCapture>,
     active: Option<Active>,
@@ -220,12 +264,15 @@ fn set_error(state: &SharedState, error: String) {
 }
 fn run(
     dir: PathBuf,
+    current_library_root: CurrentLibraryRoot,
+    known_library_roots: KnownLibraryRoots,
     backend: Box<dyn AudioCapture>,
     rx: mpsc::Receiver<Command>,
     state: SharedState,
     title_provider: fn() -> Option<String>,
 ) {
-    let store = RecordingStore::open(&dir).and_then(|store| {
+    let store = RecordingStore::open(&dir).and_then(|mut store| {
+        store.set_extra_roots(known_library_roots());
         store.recover()?;
         Ok(store)
     });
@@ -258,7 +305,7 @@ fn run(
         Err(error) => set_error(&state, error),
     }
     let mut engine = Engine {
-        dir,
+        current_library_root,
         store,
         backend,
         active: None,
@@ -346,11 +393,13 @@ impl Engine {
             error: None,
             meeting_title: (self.title_provider)(),
             storage_path: None,
+            library_root: None,
             auto_transcribe: true,
             transcription_status: "not_started".into(),
             appflowy_status: "not_started".into(),
         };
-        let folder = create_recording_directory(&self.dir, &mut layout)?;
+        let target_root = (self.current_library_root)()?;
+        let folder = create_recording_directory(&target_root, &mut layout)?;
         let tracks = sources
             .iter()
             .zip(&devices)
@@ -387,6 +436,7 @@ impl Engine {
             error: None,
             meeting_title: layout.meeting_title,
             storage_path: layout.storage_path,
+            library_root: layout.library_root,
             auto_transcribe: true,
             transcription_status: "not_started".into(),
             appflowy_status: "not_started".into(),

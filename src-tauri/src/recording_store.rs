@@ -18,6 +18,11 @@ pub type StoreResult<T> = Result<T, String>;
 /// database contains only serialized metadata and is never used to discover files.
 pub struct RecordingStore {
     root: PathBuf,
+    /// Extra known library roots (the currently configured recordings folder,
+    /// plus any folder it replaced) used only to resolve recordings on disk;
+    /// see `recording_paths::resolved_recording_directory`. Empty unless a
+    /// caller opts in with `set_extra_roots`.
+    extra_roots: Vec<PathBuf>,
     connection: Mutex<Connection>,
 }
 
@@ -55,8 +60,17 @@ impl RecordingStore {
             .map_err(|e| format!("initialize recording database: {e}"))?;
         Ok(Self {
             root,
+            extra_roots: Vec::new(),
             connection: Mutex::new(connection),
         })
+    }
+
+    /// Supplies extra known library roots (the currently configured
+    /// recordings folder, plus any it replaced) so crash recovery can find a
+    /// recording that was created under a custom folder. Safe to call
+    /// repeatedly; the latest call wins.
+    pub fn set_extra_roots(&mut self, roots: Vec<PathBuf>) {
+        self.extra_roots = roots;
     }
 
     /// Atomically writes the entire metadata document.  In particular, a database error
@@ -147,7 +161,11 @@ impl RecordingStore {
                 failures.push("recording has no tracks".into());
             }
             let prior_error = recording.error.clone();
-            let recording_dir = match resolved_recording_directory(&self.root, &recording) {
+            let recording_dir = match resolved_recording_directory(
+                &self.root,
+                &self.extra_roots,
+                &recording,
+            ) {
                 Ok(dir) => dir,
                 Err(e) => {
                     failures.push(e);
@@ -235,6 +253,7 @@ impl RecordingStore {
                     ),
                     meeting_title: None,
                     storage_path: None,
+                    library_root: None,
                     auto_transcribe: false,
                     transcription_status: "not_started".into(),
                     appflowy_status: "not_started".into(),
@@ -284,6 +303,7 @@ impl RecordingStore {
                         ),
                         meeting_title: None,
                         storage_path: None,
+                        library_root: None,
                         auto_transcribe: false,
                         transcription_status: "not_started".into(),
                         appflowy_status: "not_started".into(),
@@ -602,6 +622,7 @@ mod tests {
             error: None,
             meeting_title: None,
             storage_path: None,
+            library_root: None,
             auto_transcribe: false,
             transcription_status: "not_started".into(),
             appflowy_status: "not_started".into(),
