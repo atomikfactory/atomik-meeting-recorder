@@ -84,7 +84,7 @@ impl DelayEstimator {
         if mic.is_empty() || reference.is_empty() || sample_rate == 0 {
             return (vec![0.0; mic.len()], 0.0);
         }
-        let global_shift = self.estimate(mic, reference, sample_rate, 0, 0, GLOBAL_SEARCH_MS).0;
+        let global_shift = self.estimate(mic, reference, sample_rate, 0, 0.0, GLOBAL_SEARCH_MS).0;
         let block_len = ((sample_rate as f32 * BLOCK_SECONDS) as usize).max(1);
 
         // Pass 1: one delay estimate anchored at the start of each block.
@@ -120,7 +120,7 @@ impl DelayEstimator {
                     // has lost lock (or a delay jump bigger than the local
                     // window), so it is worth paying for a full-range search.
                     let (reacquired, reacquired_score) =
-                        self.estimate(mic, reference, sample_rate, start, 0, GLOBAL_SEARCH_MS);
+                        self.estimate(mic, reference, sample_rate, start, 0.0, GLOBAL_SEARCH_MS);
                     if reacquired_score < REACQUIRE_SCORE_FLOOR {
                         // Neither search found anything to lock onto (e.g. a
                         // stretch where the far end is silent): holding the
@@ -136,7 +136,7 @@ impl DelayEstimator {
                 }
             };
             anchors.push(start);
-            shifts.push(shift as f64);
+            shifts.push(shift);
             start += block_len;
         }
         debug_assert!(!shifts.is_empty());
@@ -162,28 +162,34 @@ impl DelayEstimator {
         (aligned, first_shift_ms)
     }
 
-    /// GCC-PHAT delay estimate: the shift `d` (samples) such that
-    /// `reference[t - d]` best predicts `mic[t]` for `t` near `probe_start`,
-    /// searched within `search_ms` of `center_shift`. Also returns the raw
-    /// (unnormalized) peak correlation score, comparable only against other
-    /// calls with the same analysis window length.
+    /// GCC-PHAT delay estimate: the shift `d` (samples, fractional -- see
+    /// `gcc_phat_lag`'s sub-sample refinement) such that `reference[t - d]`
+    /// best predicts `mic[t]` for `t` near `probe_start`, searched within
+    /// `search_ms` of `center_shift`. Also returns the raw (unnormalized)
+    /// peak correlation score, comparable only against other calls with the
+    /// same analysis window length.
     fn estimate(
         &mut self,
         mic: &[f32],
         reference: &[f32],
         sample_rate: u32,
         probe_start: usize,
-        center_shift: i64,
+        center_shift: f64,
         search_ms: i64,
-    ) -> (i64, f32) {
+    ) -> (f64, f32) {
         let window = ((sample_rate as f32 * ANALYSIS_SECONDS) as usize)
             .min(mic.len().saturating_sub(probe_start));
         if window < 16 {
             return (center_shift, 0.0);
         }
+        // The snippet search window itself stays on the integer-sample grid
+        // (there is no such thing as a fractional array index); only the
+        // final reported delay -- via `gcc_phat_lag`'s sub-sample refinement
+        // -- is fractional.
+        let center_shift_i = center_shift.round() as i64;
         let sig = &mic[probe_start..probe_start + window];
         let max_shift = ((search_ms * i64::from(sample_rate)) / 1000).max(1);
-        let ref_abs_start = probe_start as i64 - center_shift - max_shift;
+        let ref_abs_start = probe_start as i64 - center_shift_i - max_shift;
         let ref_len = (2 * max_shift) as usize + window;
         let mut ref_snip = vec![0.0f32; ref_len];
         for (i, sample) in ref_snip.iter_mut().enumerate() {
@@ -192,18 +198,26 @@ impl DelayEstimator {
                 *sample = reference[idx as usize];
             }
         }
-        let (lag, score) = self.gcc_phat_lag(sig, &ref_snip);
+        let (lag, frac, score) = self.gcc_phat_lag(sig, &ref_snip);
         // sig[i] is compared against ref_snip[lag + i], whose absolute index
         // is ref_abs_start + lag + i = (probe_start - center_shift -
         // max_shift) + lag + i. We want that to equal probe_start + i - d,
-        // so d = center_shift + max_shift - lag.
-        (center_shift + max_shift - lag as i64, score)
+        // so d = center_shift + max_shift - lag (lag now including its
+        // sub-sample fractional correction).
+        (center_shift_i as f64 + max_shift as f64 - (lag as f64 + f64::from(frac)), score)
     }
 
     /// Full (non-circular-wraparound) GCC-PHAT cross-correlation of `sig`
     /// against every offset of `sig` within `ref_snip` (`ref_snip` must be at
-    /// least as long as `sig`). Returns the best offset and its score.
-    fn gcc_phat_lag(&mut self, sig: &[f32], ref_snip: &[f32]) -> (usize, f32) {
+    /// least as long as `sig`). Returns the best integer offset, a sub-sample
+    /// correction in `[-0.5, 0.5]` refining it (via parabolic interpolation
+    /// of the correlation peak against its immediate neighbors -- standard
+    /// for GCC-PHAT, and particularly valuable at a lower sample rate like
+    /// this canceller's 16 kHz production input, where a single integer
+    /// sample already spans 62.5 us and would otherwise be the resolution
+    /// floor for every downstream delay/drift estimate), and the peak's raw
+    /// score.
+    fn gcc_phat_lag(&mut self, sig: &[f32], ref_snip: &[f32]) -> (usize, f32, f32) {
         let fft_len = (sig.len() + ref_snip.len()).next_power_of_two();
         let r2c = self.planner.plan_fft_forward(fft_len);
         let c2r = self.planner.plan_fft_inverse(fft_len);
@@ -247,7 +261,25 @@ impl DelayEstimator {
             .iter()
             .enumerate()
             .fold((0usize, f32::MIN), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
-        (best_index, best_value * norm)
+        // Parabolic (quadratic) interpolation of the peak against its two
+        // immediate neighbors: the standard sub-sample refinement for a
+        // discrete correlation peak, only defined (and only trustworthy) when
+        // both neighbors are themselves inside the valid, non-wraparound
+        // correlation range.
+        let frac = if best_index > 0 && best_index + 1 < valid_len {
+            let y0 = f64::from(corr[best_index - 1]);
+            let y1 = f64::from(corr[best_index]);
+            let y2 = f64::from(corr[best_index + 1]);
+            let denom = y0 - 2.0 * y1 + y2;
+            if denom.abs() > 1e-12 {
+                (0.5 * (y0 - y2) / denom).clamp(-0.5, 0.5) as f32
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        (best_index, frac, best_value * norm)
     }
 }
 
