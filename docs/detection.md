@@ -20,7 +20,7 @@ When a meeting finishes, WAV finalization and recording metadata persistence run
 
 ## Platform boundaries
 
-See [native signals and limitations](detection-platforms.md). Windows meeting signals are heuristics, not authoritative conferencing-provider call events. A running process alone does not produce a request. Browser detection cannot reliably observe background tabs without an additional supported browser integration. The user has accepted a local-only Chrome/Firefox extension as a future increment; this release does not install or implement one. No browser profile, browsing history, camera stream, or audio payload is inspected by detection. Normal application runtime makes no network calls.
+See [native signals and limitations](detection-platforms.md). Windows meeting signals are heuristics, not authoritative conferencing-provider call events. A running process alone does not produce a request. An optional local-only browser extension (see [browser-extension.md](browser-extension.md)) now covers background-tab Google Meet/Teams/Zoom detection that the native Windows heuristic cannot see, and extends detection to Linux/macOS for the platforms it covers, once connected from Settings. A fresh browser signal is treated as high confidence and its title is preferred; the extension only ever supplies a detection signal through the same debounce/approval/end-grace machinery described above, and never starts or stops a recording directly. No browser profile, browsing history, camera stream, or audio payload is inspected by detection, with or without the extension. Normal application runtime makes no network calls; the extension's transport to the app is native messaging over local stdio/IPC, never a network socket.
 
 ## Development verification
 

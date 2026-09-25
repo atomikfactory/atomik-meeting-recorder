@@ -49,3 +49,22 @@ Microsoft API references: [IAudioSessionEnumerator](https://learn.microsoft.com/
 
 The native provider explicitly returns `supported: false` on macOS and Linux.
 No process, browser, microphone, or window inspection is performed there.
+
+## Browser extension (all platforms)
+
+An optional local-only browser extension (see [browser-extension.md](browser-extension.md))
+supplies a second, platform-independent signal source: it detects Google
+Meet, Microsoft Teams web, and the Zoom web client from inside the browser
+itself, including background tabs, and reports `{platform, state, title}`
+over native messaging. This is what covers background tabs, since the
+Windows provider above only sees a *visible* window title.
+
+Once connected (Settings > Browser extension > Connect, then load the
+extension in the browser -- see [browser-extension.md](browser-extension.md)),
+this signal is available on **every** platform, including macOS and Linux,
+for exactly the meeting platforms the extension covers. It does not replace
+or require the native Windows provider; on Windows, a fresh browser signal
+takes priority over the native heuristic (higher confidence, and a real
+extension-reported title instead of a window-title guess), and the native
+heuristic resumes deciding once the browser signal ends or its heartbeat
+goes stale.

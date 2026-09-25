@@ -35,6 +35,17 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../browser-extension/manifest.json": "browser-extension/manifest.json",
+      "../browser-extension/manifest.firefox.json": "browser-extension/manifest.firefox.json",
+      "../browser-extension/background.js": "browser-extension/background.js",
+      "../browser-extension/content-logic.js": "browser-extension/content-logic.js",
+      "../browser-extension/content-runtime.js": "browser-extension/content-runtime.js",
+      "../browser-extension/content-meet.js": "browser-extension/content-meet.js",
+      "../browser-extension/content-teams.js": "browser-extension/content-teams.js",
+      "../browser-extension/content-zoom.js": "browser-extension/content-zoom.js",
+      "../browser-extension/tab-id.js": "browser-extension/tab-id.js"
+    }
   }
 }

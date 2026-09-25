@@ -121,6 +121,11 @@ the NVIDIA driver:
   sherpa-onnx-c-api.dll, sherpa-onnx-cxx-api.dll        (sherpa-onnx /
       onnxruntime, used for optional local speaker identification)
 
+Also bundled: a browser-extension\ folder (the optional, local-only Meet/
+Teams/Zoom detection helper -- see docs\browser-extension.md). It does
+nothing until you use Settings > Browser extension > Connect, then load it
+as an unpacked/temporary extension in your browser.
+
 Not truly portable
 -------------------
 This folder itself is portable (copy it anywhere, run it from a USB drive,
@@ -136,6 +141,16 @@ you trust the source you obtained this from.
 "@
 
 Set-Content -Path (Join-Path $outDir 'README-PORTABLE.txt') -Value $readme -Encoding utf8
+
+# The local-only browser-detection extension (see docs/browser-extension.md)
+# and its native-messaging host manifests, so "Open extension folder" in
+# Settings and "Connect browser extension" work from a portable install too.
+# The private signing key (browser-extension/key/extension-key.pem, if it
+# exists locally) and the node-test-only folders are deliberately excluded.
+$extensionSrc = Join-Path $projectRoot 'browser-extension'
+$extensionDest = Join-Path $outDir 'browser-extension'
+New-Item -ItemType Directory -Path $extensionDest | Out-Null
+Get-ChildItem -Path $extensionSrc -File | Copy-Item -Destination $extensionDest
 
 $zipPath = Join-Path $distRoot "$folderName.zip"
 if (Test-Path $zipPath) {

@@ -28,6 +28,7 @@ npm run build
 - Manual start/stop from the window or tray, recording timer and active tray indicator
 - Separate PCM16 WAV tracks, UUID recording IDs, SQLite metadata, and restart recovery
 - Local Windows meeting hints, configurable confirmation/end grace, and approval before each detected recording
+- Optional local-only browser extension (Chrome/Edge/Firefox) for Google Meet, Microsoft Teams web, and Zoom web detection, including background tabs, connected via native messaging (no network port) from Settings; extends meeting detection to Linux/macOS for the platforms it covers. Same ask-first approval as native detection; see [browser extension](docs/browser-extension.md)
 - Local Whisper model import (tiny/base/small/medium/large/**turbo**), serial background transcription, retry/progress UI, timestamped Markdown, and crash-safe transcript checkpoints. **large-v3-turbo is recommended**, especially quantized (e.g. `ggml-large-v3-turbo-q5_0.bin`, ~574 MB from the [whisper.cpp Hugging Face repo](https://huggingface.co/ggerganov/whisper.cpp)); import it in Settings, no in-app downloads. Waiting (not-yet-claimed) jobs follow the currently selected model size
 - Transcription language setting: detect automatically, or pin one of several supported languages
 - Silence skipping and anti-hallucination decode settings, reducing wasted decode time and repeated/hallucinated Whisper text on near-silent audio
@@ -46,8 +47,8 @@ See [audio device management](docs/audio-devices.md) for platform differences an
 
 ## Current limits
 
-- Native meeting detection is Windows-only and heuristic; macOS/Linux retain manual recording
-- Chrome/Firefox background-tab detection needs a later local-only browser extension
+- Native (non-browser) meeting detection is Windows-only and heuristic; macOS/Linux retain manual recording unless the browser extension is connected for a covered meeting platform
+- The browser extension covers Google Meet, Microsoft Teams web, and Zoom web only; it must be connected from Settings and then loaded unpacked/temporarily in the browser (unsigned Firefox add-ons don't persist across a Firefox restart -- see [browser extension limitations](docs/browser-extension.md#limitations))
 - Speaker identification is optional, runs only on remote (loopback) audio, and labels an uncertain turn "Remote" rather than guessing; it does not infer real names or merge identities across audio sources or recordings
 - Whisper and diarization models must be imported explicitly; native diarization inference has been verified on Windows against real recordings, but not yet on macOS/Linux
 - Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added. The Linux path is compile-checked and unit-tested in CI but not yet verified against a real PulseAudio/PipeWire session
@@ -88,7 +89,7 @@ This repo also supports a project-local Rust toolchain under `.tools` (Cargo, ru
 
 Both artifacts are unsigned, so Windows SmartScreen shows an unrecognized-publisher warning on first run ("More info" → "Run anyway"); this is expected without a code-signing certificate. The CUDA build only benefits NVIDIA GPUs — it silently falls back to the CPU path elsewhere (see above).
 
-`npm test` runs browser UI smoke tests (installed Microsoft Edge on Windows; Chromium elsewhere). For another browser, set `PW_CHANNEL`; install Chromium with `npx playwright install chromium` before selecting it. Browser preview via `npm run dev` is explicitly marked and disables desktop actions. It cannot record, persist settings, or open folders.
+`npm test` runs browser UI smoke tests (installed Microsoft Edge on Windows; Chromium elsewhere). For another browser, set `PW_CHANNEL`; install Chromium with `npx playwright install chromium` before selecting it. Browser preview via `npm run dev` is explicitly marked and disables desktop actions. It cannot record, persist settings, or open folders. `npm run test:extension` runs the browser extension's own dependency-free `node --test` suite (`browser-extension/test/`) against its pure detection/title/tab-id logic.
 
 The optional Windows scripts `scripts/native-smoke.mjs`, `scripts/native-audio-smoke.mjs`, and `scripts/native-lifecycle.mjs --audio` test the actual desktop executable using WebView2's local debugging port (9223). Launch only a development test instance with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`, `MEETING_RECORDER_DISABLE_AUTOMATION=1`, and `MEETING_RECORDER_DISABLE_TRANSCRIPTION=1`. The latter two inhibit automatic capture and all transcription job execution without changing saved preferences; scripts verify both safeguards before modifying settings. The lifecycle script sets them on restarted test processes. These scripts temporarily change preferences and the lifecycle test quits/restarts the app; they are not application startup behavior. Do not enable the debugging port for normal use. Audio checks enumerate hardware and save selections without opening streams.
 

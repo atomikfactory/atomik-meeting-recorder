@@ -1050,21 +1050,41 @@ fn disconnect_browser_extension(
     browser_registration::uninstall(&mut fs, &mut registry, &home)?;
     browser_extension_status(&app, &bridge)
 }
+/// Where the unpacked `browser-extension/` folder can be found for this run.
+/// In order: the installed/portable bundle's resources (see the `resources`
+/// map in `tauri.conf.json`), a copy placed beside the executable (the
+/// portable .zip package -- see `scripts/package-portable.ps1`), then --
+/// `cfg(debug_assertions)` only -- the checkout `npm run tauri -- dev` runs
+/// from. `CARGO_MANIFEST_DIR` is a *build-machine* path baked in at compile
+/// time, so it must never be used in a release build.
+fn browser_extension_folder(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Ok(dir) = app.path().resource_dir() {
+        let dir = dir.join("browser-extension");
+        if dir.exists() {
+            return Ok(dir);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().map(|p| p.join("browser-extension")) {
+            if dir.exists() {
+                return Ok(dir);
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("browser-extension");
+        if dev.exists() {
+            return Ok(dev);
+        }
+    }
+    Err("Could not find the browser-extension folder next to this build.".into())
+}
 #[tauri::command]
 fn open_browser_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(app_error)?
-        .join("browser-extension");
-    let dev_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("browser-extension");
-    open_folder(if resource_dir.exists() {
-        &resource_dir
-    } else {
-        &dev_fallback
-    })
+    open_folder(&browser_extension_folder(&app)?)
 }
 fn set_recordings_folder_inner(app: &tauri::AppHandle, raw: String) -> Result<Settings, String> {
     let canonical = validate_new_recordings_folder(app, &raw)?;
