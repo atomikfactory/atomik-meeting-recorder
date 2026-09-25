@@ -53,7 +53,21 @@ const MAX_WAV_CHANNELS: u16 = 8;
 // and to break each chunk into shorter, more focused decode windows.
 const VAD_FRAME_MS: u32 = 20;
 const VAD_HANGOVER_MS: u32 = 300;
-const VAD_MERGE_GAP_MS: u32 = 1_000;
+/// Raised from an original 1000 ms: echo cancellation reveals a mic track's
+/// *real* pauses (previously masked by continuous, falsely-"speech" loopback
+/// bleed-through filling every gap), which fragments what used to be one
+/// long region into many short ones -- and each extra region pays Whisper's
+/// large fixed per-window decode cost regardless of how little audio it
+/// contains, more than offsetting the (small) win from skipping a little
+/// more silence. 1200 ms recovers most of that on real two-track recordings
+/// without the failure mode a much larger gap has: bridging a genuinely
+/// silent multi-second stretch (a few short residual-noise blips within the
+/// gap, each just above `VAD_THRESHOLD_DB`, chain a region across it) into
+/// one mostly-silent window, which Whisper can hallucinate a stray word or
+/// punctuation mark onto with a wildly wrong timestamp span. Still far below
+/// the silence stretches (multi-second dead air on a one-sided track) this
+/// pre-pass exists to skip.
+const VAD_MERGE_GAP_MS: u32 = 1_200;
 const VAD_MIN_REGION_MS: u32 = 250;
 /// Frames at or below this percentile of the chunk's own RMS distribution set
 /// the adaptive noise floor; speech must exceed it by `VAD_THRESHOLD_DB`.
@@ -128,14 +142,20 @@ impl TranscriptionEngine for LocalWhisperEngine {
         // and an output (loopback) track -- the common two-track meeting
         // recorder setup where the user has speakers, not headphones, so
         // remote audio leaks into the mic and would otherwise be
-        // transcribed twice. `_aec_temp_files` exists only to keep its
-        // temporary WAVs alive (and clean them up on drop) until decoding
-        // below is done with them.
-        let (tracks, _aec_temp_files) = if request.echo_cancellation {
-            apply_echo_cancellation(&tracks, &mut warnings)?
-        } else {
-            (tracks, Vec::new())
-        };
+        // transcribed twice. It is CPU-bound and touches no Whisper state,
+        // so it runs on a background thread concurrently with the main
+        // thread creating the (possibly GPU) Whisper context and decoding
+        // whichever tracks AEC never substitutes (every "output" track);
+        // only the "input" tracks actually wait on its result below. This
+        // overlaps AEC's own cost (tens of x real time, but still real: see
+        // `echo_cancel::bench`) with GPU decode time instead of adding it on
+        // top, which otherwise made AEC'd recordings slower to transcribe
+        // end-to-end even when Whisper itself decoded the cleaned audio no
+        // slower than the original (see docs/transcription.md).
+        let aec_handle = request.echo_cancellation.then(|| {
+            let tracks_for_aec = tracks.clone();
+            std::thread::spawn(move || apply_echo_cancellation(&tracks_for_aec))
+        });
         // Redirect library diagnostics away from stdout/stderr when no application
         // logging backend is configured. This is process-global but idempotent.
         whisper_rs::install_logging_hooks();
@@ -148,11 +168,19 @@ impl TranscriptionEngine for LocalWhisperEngine {
         let mut directions: Vec<&'static str> = Vec::new();
         let mut languages_used = Vec::new();
         let total = tracks.len().max(1) as u32;
+        let mut processed: u32 = 0;
         progress(0);
-        for (track_index, (track, path)) in tracks.iter().enumerate() {
+        let mut run_track = |track: &Track,
+                              path: &Path,
+                              processed: &mut u32,
+                              segments: &mut Vec<TranscriptSegment>,
+                              directions: &mut Vec<&'static str>,
+                              languages_used: &mut Vec<String>,
+                              warnings: &mut Vec<String>|
+         -> Result<(), String> {
             check_cancelled(cancelled)?;
-            let start_progress = ((track_index as u32 * 100) / total) as u8;
-            let end_progress = (((track_index + 1) as u32 * 100) / total) as u8;
+            let start_progress = ((*processed * 100) / total) as u8;
+            let end_progress = ((( *processed + 1) * 100) / total) as u8;
             let before = segments.len();
             let (chunk_count, detected_language) = transcribe_track(
                 &context,
@@ -160,7 +188,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 path,
                 request.language.as_deref(),
                 cancelled,
-                &mut segments,
+                segments,
                 &mut |track_percent| {
                     let span = u16::from(end_progress.saturating_sub(start_progress));
                     progress(
@@ -182,7 +210,53 @@ impl TranscriptionEngine for LocalWhisperEngine {
                     languages_used.push(language);
                 }
             }
+            *processed += 1;
             progress(end_progress);
+            Ok(())
+        };
+        if let Some(handle) = aec_handle {
+            // AEC only ever substitutes "input" tracks (see
+            // `apply_echo_cancellation`); every other track's path is
+            // unaffected by its outcome, so decode those first, while AEC
+            // still runs in the background.
+            for (track, path) in tracks.iter().filter(|(track, _)| track.direction != "input") {
+                run_track(
+                    track,
+                    path,
+                    &mut processed,
+                    &mut segments,
+                    &mut directions,
+                    &mut languages_used,
+                    &mut warnings,
+                )?;
+            }
+            let (aec_tracks, _aec_temp_files, aec_warnings) = handle
+                .join()
+                .map_err(|_| "Echo cancellation thread panicked.".to_string())??;
+            warnings.extend(aec_warnings);
+            for (track, path) in aec_tracks.iter().filter(|(track, _)| track.direction == "input") {
+                run_track(
+                    track,
+                    path,
+                    &mut processed,
+                    &mut segments,
+                    &mut directions,
+                    &mut languages_used,
+                    &mut warnings,
+                )?;
+            }
+        } else {
+            for (track, path) in tracks.iter() {
+                run_track(
+                    track,
+                    path,
+                    &mut processed,
+                    &mut segments,
+                    &mut directions,
+                    &mut languages_used,
+                    &mut warnings,
+                )?;
+            }
         }
         // Sort `segments` and `directions` together (as one indirect key) so
         // they stay paired index-for-index.
@@ -886,21 +960,20 @@ impl TempWavGuard {
 /// recording with only one track direction, or where cancellation is
 /// skipped for a specific track (too long, decode failure, or a linear
 /// no-op such as a silent reference), costs nothing beyond the direction
-/// check. Returns the (possibly-substituted) track list and the temporary
-/// WAV guards backing any substituted input track, which must outlive the
-/// caller's use of those paths.
-/// A track list paired with the temporary WAV guards backing any
-/// AEC-substituted input tracks within it.
-type TracksWithGuards = (Vec<(Track, PathBuf)>, Vec<TempWavGuard>);
+/// check. Returns the (possibly-substituted) track list, the temporary WAV
+/// guards backing any substituted input track (which must outlive the
+/// caller's use of those paths), and any warnings generated -- returned
+/// rather than written through a `&mut` so this can run on a background
+/// thread (see its caller in `transcribe`) while the main thread keeps
+/// decoding tracks AEC never touches.
+type TracksWithGuards = (Vec<(Track, PathBuf)>, Vec<TempWavGuard>, Vec<String>);
 
-fn apply_echo_cancellation(
-    tracks: &[(Track, PathBuf)],
-    warnings: &mut Vec<String>,
-) -> Result<TracksWithGuards, String> {
+fn apply_echo_cancellation(tracks: &[(Track, PathBuf)]) -> Result<TracksWithGuards, String> {
+    let mut warnings = Vec::new();
     let output_tracks: Vec<&(Track, PathBuf)> =
         tracks.iter().filter(|(track, _)| track.direction == "output").collect();
     if output_tracks.is_empty() || !tracks.iter().any(|(track, _)| track.direction == "input") {
-        return Ok((tracks.to_vec(), Vec::new()));
+        return Ok((tracks.to_vec(), Vec::new(), warnings));
     }
     let mut result = Vec::with_capacity(tracks.len());
     let mut guards = Vec::new();
@@ -933,7 +1006,7 @@ fn apply_echo_cancellation(
             reference_names.join(", ")
         ));
     }
-    Ok((result, guards))
+    Ok((result, guards, warnings))
 }
 
 /// Cancels echo for one input track against the summed, rate-matched output
@@ -1251,8 +1324,7 @@ mod tests {
             (track("input", "Microphone", &input_path, sample_rate), input_path.clone()),
             (track("output", "Speakers", &output_path, sample_rate), output_path.clone()),
         ];
-        let mut warnings = Vec::new();
-        let (result, guards) = apply_echo_cancellation(&tracks, &mut warnings).unwrap();
+        let (result, guards, warnings) = apply_echo_cancellation(&tracks).unwrap();
         assert_eq!(result.len(), 2);
         let cleaned_input = &result.iter().find(|(t, _)| t.direction == "input").unwrap().1;
         assert_ne!(cleaned_input, &input_path, "input track should be substituted with a temp file");
@@ -1271,8 +1343,7 @@ mod tests {
         let input_path = dir.join("mic.wav");
         fs::write(&input_path, pcm16_wav(&tone_i16(1, sample_rate, 4_000), 1, sample_rate)).unwrap();
         let tracks = vec![(track("input", "Microphone", &input_path, sample_rate), input_path.clone())];
-        let mut warnings = Vec::new();
-        let (result, guards) = apply_echo_cancellation(&tracks, &mut warnings).unwrap();
+        let (result, guards, warnings) = apply_echo_cancellation(&tracks).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1, tracks[0].1);
         assert!(guards.is_empty());
@@ -1292,8 +1363,7 @@ mod tests {
             (track("input", "Microphone", &input_path, sample_rate), input_path.clone()),
             (track("output", "Speakers", &output_path, sample_rate), output_path.clone()),
         ];
-        let mut warnings = Vec::new();
-        let (result, guards) = apply_echo_cancellation(&tracks, &mut warnings).unwrap();
+        let (result, guards, _warnings) = apply_echo_cancellation(&tracks).unwrap();
         let input_result = &result.iter().find(|(t, _)| t.direction == "input").unwrap().1;
         assert_eq!(input_result, &input_path, "a silent reference must leave the mic track untouched");
         assert!(guards.is_empty());
