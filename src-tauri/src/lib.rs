@@ -1,3 +1,10 @@
+mod appflowy;
+mod appflowy_blocks;
+mod appflowy_client;
+mod appflowy_credentials;
+#[cfg(test)]
+mod appflowy_fake_server;
+mod appflowy_store;
 mod audio_compress;
 mod audio_compress_store;
 mod audio_devices;
@@ -50,6 +57,11 @@ mod transcription_engine;
 mod transcription_store;
 mod transcription_types;
 
+use appflowy::{AppFlowyService, AppFlowySettings, AppFlowyState};
+use appflowy_client::Workspace as AppFlowyWorkspace;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use appflowy_credentials::OsCredentialStore;
+use appflowy_credentials::SharedCredentialStore;
 use audio_devices::{
     AudioDeviceDirection, AudioDeviceInventory, AudioInventorySnapshot, CpalAudioDeviceInventory,
 };
@@ -860,6 +872,54 @@ async fn open_summary(recording_id: String, app: tauri::AppHandle) -> Result<(),
     .map_err(app_error)?
 }
 #[tauri::command]
+async fn get_appflowy_state(app: tauri::AppHandle) -> Result<AppFlowyState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().state())
+        .await
+        .map_err(app_error)
+}
+#[tauri::command]
+async fn appflowy_request_otp(email: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().request_otp(&email))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_verify_otp(email: String, code: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().verify_otp(&email, &code))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_sign_out(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().sign_out())
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_list_workspaces(app: tauri::AppHandle) -> Result<Vec<AppFlowyWorkspace>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().list_workspaces())
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_export_now(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().export_now(&recording_id))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_export_again(recording_id: String, confirm: bool, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().export_again(&recording_id, confirm))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_retry(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().retry(&recording_id))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
 async fn get_compression_state(
     app: tauri::AppHandle,
 ) -> Result<audio_compress::CompressionState, String> {
@@ -1254,6 +1314,7 @@ fn request_exit(app: &tauri::AppHandle, service: RecordingService, gate: &ExitGa
             .and_then(|()| app.state::<TranscriptionService>().shutdown())
             .and_then(|()| app.state::<DiarizationService>().shutdown())
             .and_then(|()| app.state::<SummaryService>().shutdown())
+            .and_then(|()| app.state::<AppFlowyService>().shutdown())
             .and_then(|()| app.state::<CompressionService>().shutdown());
         app.state::<SearchService>().shutdown();
         match result {
@@ -1452,6 +1513,23 @@ pub fn run() {
         let settings = summary_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
         Ok(SummarySettings { enabled: settings.summary_enabled, ollama_url: settings.ollama_url, model: settings.summary_model, extra_library_roots: extra_library_roots(&summary_app) })
     }), Arc::new(summary_engine::OllamaSummaryEngine::new())));
+    let appflowy_app = app.handle().clone();
+    let appflowy_credentials: SharedCredentialStore = Arc::new(OsCredentialStore);
+    app.manage(AppFlowyService::new(recording_dir.clone(), Arc::new(move || {
+        let settings = appflowy_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        Ok(AppFlowySettings {
+            enabled: settings.appflowy_enabled,
+            auto_export: settings.appflowy_auto_export,
+            base_url: settings.appflowy_base_url,
+            use_native_block: settings.appflowy_use_native_block,
+            workspace_id: settings.appflowy_workspace_id,
+            parent_view_id: settings.appflowy_parent_view_id,
+            diarization_enabled: settings.diarization_enabled,
+            summary_enabled: settings.summary_enabled,
+            local_speaker_name: settings.local_speaker_name,
+            extra_library_roots: extra_library_roots(&appflowy_app),
+        })
+    }), appflowy_credentials));
     let compress_app = app.handle().clone();
     app.manage(CompressionService::new(recording_dir.clone(), Arc::new(move || {
         let settings = compress_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
@@ -1486,7 +1564,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

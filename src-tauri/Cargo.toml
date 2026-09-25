@@ -36,9 +36,10 @@ rustfft = "6.4"
 whisper-rs = "0.16.0"
 tauri-plugin-dialog = "2"
 # Local meeting summaries call a local Ollama server only (see
-# ollama_client.rs); default-features off drops the TLS stack we do not need
-# for loopback-only http:// requests.
-ureq = { version = "2", default-features = false, features = ["json"] }
+# ollama_client.rs) over plain http://; the AppFlowy Cloud client
+# (appflowy_client.rs) is the only user of the "tls" feature below, since it
+# is the only module allowed to make a non-loopback https:// request.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 flacenc = "0.5.1"
 claxon = "0.4.3"
 
@@ -64,9 +65,15 @@ windows = { version = "0.61.3", features = [
   "Win32_System_Variant",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# AppFlowy Cloud refresh/access tokens (see appflowy_credentials.rs) live in
+# the Windows Credential Manager, never in SQLite/settings/logs.
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(not(windows))'.dependencies]
 sherpa-onnx = "=1.13.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # System-output ("what the speakers play") capture on Linux. PulseAudio's
@@ -77,6 +84,10 @@ sherpa-onnx = "=1.13.8"
 # libpulse.so.0, which both sound servers ship. See docs/audio-devices.md.
 libpulse-binding = "2"
 libpulse-simple-binding = "2"
+# AppFlowy Cloud refresh/access tokens live in the Secret Service (GNOME
+# Keyring/KWallet), never in SQLite/settings/logs; "vendored" statically
+# links libdbus so this does not add a new runtime dependency.
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }
 
 # Dependency debug info dominates target/ size (whisper.cpp, sherpa-onnx, tauri).
 # Keep full debug info for this crate only.

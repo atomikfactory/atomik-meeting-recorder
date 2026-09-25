@@ -82,6 +82,43 @@ pub struct Settings {
     /// `record_previous_library_root`. Not directly user-editable.
     #[serde(default)]
     pub legacy_library_roots: Vec<String>,
+    /// Export completed meetings to an AppFlowy Cloud workspace (see
+    /// `appflowy.rs`/`docs/appflowy.md`). Off by default -- nothing about a
+    /// recording leaves this device until the user explicitly turns this on
+    /// and signs in. Missing/legacy payloads default to disabled.
+    #[serde(default)]
+    pub appflowy_enabled: bool,
+    /// Automatically export every eligible meeting once it is ready. Off by
+    /// default even after `appflowy_enabled` is turned on -- an explicit
+    /// second opt-in, separate from enabling the feature at all. A manual
+    /// per-meeting "Export to AppFlowy" button works regardless of this
+    /// setting. Missing/legacy payloads default to disabled.
+    #[serde(default)]
+    pub appflowy_auto_export: bool,
+    /// AppFlowy Cloud deployment to export to; https:// required except for
+    /// a loopback test server. Missing/legacy payloads default to the
+    /// official cloud.
+    #[serde(default = "default_appflowy_base_url")]
+    pub appflowy_base_url: String,
+    /// `true` sends the native AppFlowy Web "AI Meeting Notes" block
+    /// (`ai_meeting`/...); `false` sends the standard-blocks fallback (a
+    /// heading and two toggle lists) for a client that does not yet render
+    /// the native block. Missing/legacy payloads default to native.
+    #[serde(default = "enabled_by_default")]
+    pub appflowy_use_native_block: bool,
+    /// The signed-in user's chosen destination workspace. `None` until the
+    /// user picks one in Settings; export cannot run without it.
+    #[serde(default)]
+    pub appflowy_workspace_id: Option<String>,
+    /// The workspace `FolderView` under which "My daily meetings" is found
+    /// or created. `None` means the workspace's own top level (a workspace
+    /// is itself a valid `root_view_id` for the folder API) rather than a
+    /// named space inside it.
+    #[serde(default)]
+    pub appflowy_parent_view_id: Option<String>,
+}
+fn default_appflowy_base_url() -> String {
+    "https://beta.appflowy.cloud".into()
 }
 /// Longest accepted `legacy_library_roots` list -- generous for anyone who
 /// changes folders occasionally, bounded so the settings payload cannot grow
@@ -151,6 +188,12 @@ impl Default for Settings {
             local_speaker_name: default_local_speaker_name(),
             recordings_folder: None,
             legacy_library_roots: Vec::new(),
+            appflowy_enabled: false,
+            appflowy_auto_export: false,
+            appflowy_base_url: default_appflowy_base_url(),
+            appflowy_use_native_block: enabled_by_default(),
+            appflowy_workspace_id: None,
+            appflowy_parent_view_id: None,
         }
     }
 }
@@ -211,6 +254,8 @@ impl Settings {
                 "Too many previous recordings folders are recorded.".into(),
             ));
         }
+        crate::appflowy_client::validate_base_url(&self.appflowy_base_url)
+            .map_err(StoreError::Validation)?;
         Ok(())
     }
 }
@@ -333,6 +378,12 @@ mod tests {
                 .join("old-recordings")
                 .display()
                 .to_string()],
+            appflowy_enabled: true,
+            appflowy_auto_export: true,
+            appflowy_base_url: "https://example.appflowy.test".into(),
+            appflowy_use_native_block: false,
+            appflowy_workspace_id: Some("workspace-1".into()),
+            appflowy_parent_view_id: Some("space-1".into()),
         };
         store.save(expected.clone()).unwrap();
         drop(store);
