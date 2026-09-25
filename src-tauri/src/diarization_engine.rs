@@ -7,6 +7,7 @@
 
 use crate::{
     diarization_types::{DiarizationOutput, DiarizationRequest, SpeakerTurn},
+    recording::Track,
     recording_paths::resolved_recording_directory,
     transcription_engine::{hash_model, load_wav_16k_mono, validated_recording_tracks},
 };
@@ -313,8 +314,9 @@ pub fn run_worker(request_path: &Path, result_path: &Path) -> Result<(), String>
         return Err("Diarization worker request or result path is invalid.".into());
     }
     let tracks = validated_recording_tracks(&request.recording, &request.recordings_root)?;
+    let (output_tracks, mut warnings) = select_diarizable_tracks(tracks);
     let mut turns = Vec::new();
-    for (track, path) in tracks {
+    for (track, path) in output_tracks {
         let samples = load_wav_16k_mono(&path, MAX_SOURCE_SECONDS)?;
         if samples.is_empty() {
             continue;
@@ -345,7 +347,7 @@ pub fn run_worker(request_path: &Path, result_path: &Path) -> Result<(), String>
                 start_ms,
                 end_ms,
                 speaker: segment.speaker as u32,
-                confidence: segment.confidence.is_finite().then_some(segment.confidence),
+                confidence: normalize_confidence(segment.confidence),
             });
         }
     }
@@ -357,20 +359,58 @@ pub fn run_worker(request_path: &Path, result_path: &Path) -> Result<(), String>
             turn.speaker,
         )
     });
+    warnings.push(
+        "Speaker numbers are local to each recorded source and are not person identities."
+            .to_string(),
+    );
     write_json(
         result_path,
         &DiarizationOutput {
             recording_id: request.recording.recording_id,
             turns,
-            warnings: vec![
-                "Speaker numbers are local to each recorded source and are not person identities."
-                    .into(),
-            ],
+            warnings,
         },
     )
 }
 
-fn create_diarizer(
+/// sherpa-onnx returns a sentinel (observed on real audio: -2.0) rather than a
+/// real score when a confidence cannot be computed -- e.g. only one
+/// cluster/speaker was found in the whole track, so there is no
+/// second-nearest cluster to compare against. Treating that as "no
+/// confidence" (rather than passing the sentinel through) matters twice
+/// over: `validate_output` rejects anything outside 0.0..=1.0 as a malformed
+/// result (which would otherwise fail every single-speaker recording), and
+/// `align_speakers` already treats an absent confidence as "uncertain",
+/// which is exactly right for a turn whose confidence could not be computed.
+fn normalize_confidence(value: f32) -> Option<f32> {
+    value.is_finite().then_some(value).filter(|c| (0.0..=1.0).contains(c))
+}
+
+/// Only output (loopback) tracks are diarized: remote participants. The input
+/// (microphone) track is the local user, and after AEC should contain only
+/// them, so running the clustering model on it would waste time and risks
+/// splitting one person into spurious "speakers" (see `DiarizationService`'s
+/// module doc and docs/diarization.md). Pure and separately tested because
+/// the rest of `run_worker` requires real native models to exercise.
+fn select_diarizable_tracks(tracks: Vec<(Track, PathBuf)>) -> (Vec<(Track, PathBuf)>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let output_tracks: Vec<_> = tracks
+        .into_iter()
+        .filter(|(track, _)| track.direction == "output")
+        .collect();
+    if output_tracks.is_empty() {
+        warnings.push(
+            "No output (loopback) track was available for speaker identification.".to_string(),
+        );
+    }
+    (output_tracks, warnings)
+}
+
+/// `pub(crate)` (rather than private) solely so the ignored, env-gated real-model
+/// verification test in `diarization_real_tests.rs` can exercise the exact
+/// native configuration `run_worker` uses, without needing a full recording
+/// database and managed-model directory layout.
+pub(crate) fn create_diarizer(
     segmentation_model: &Path,
     embedding_model: &Path,
 ) -> Result<OfflineSpeakerDiarization, String> {
@@ -521,5 +561,47 @@ mod tests {
             warnings: vec![],
         };
         assert!(validate_output(output, &request).is_err());
+    }
+
+    #[test]
+    fn normalize_confidence_rejects_the_observed_sentinel_and_nan() {
+        assert_eq!(normalize_confidence(-2.0), None);
+        assert_eq!(normalize_confidence(f32::NAN), None);
+        assert_eq!(normalize_confidence(1.5), None);
+        assert_eq!(normalize_confidence(0.0), Some(0.0));
+        assert_eq!(normalize_confidence(0.83), Some(0.83));
+        assert_eq!(normalize_confidence(1.0), Some(1.0));
+    }
+    fn track(source_id: &str, direction: &str) -> Track {
+        Track {
+            source_id: source_id.into(),
+            name: source_id.into(),
+            direction: direction.into(),
+            sample_rate: 16_000,
+            channels: 1,
+            file_path: "unused.wav".into(),
+            frames_written: 0,
+            dropped_samples: 0,
+            error: None,
+        }
+    }
+    #[test]
+    fn only_output_tracks_are_selected_for_diarization() {
+        let tracks = vec![
+            (track("mic", "input"), PathBuf::from("mic.wav")),
+            (track("loopback", "output"), PathBuf::from("loopback.wav")),
+        ];
+        let (selected, warnings) = select_diarizable_tracks(tracks);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.source_id, "loopback");
+        assert!(warnings.is_empty());
+    }
+    #[test]
+    fn missing_output_track_warns_and_selects_nothing() {
+        let tracks = vec![(track("mic", "input"), PathBuf::from("mic.wav"))];
+        let (selected, warnings) = select_diarizable_tracks(tracks);
+        assert!(selected.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("No output"));
     }
 }

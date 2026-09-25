@@ -2,6 +2,53 @@ fn main() {
     tauri_build::build();
     #[cfg(all(windows, feature = "cuda"))]
     copy_cuda_redistributables();
+    #[cfg(windows)]
+    copy_native_dlls_beside_test_binaries();
+}
+
+/// sherpa-onnx-sys's build script (a build-order dependency, so it always runs
+/// before this one) copies its shared DLLs -- notably `onnxruntime.dll` --
+/// beside the compiled *application* executable at `target/<profile>/`. That is
+/// exactly right for the shipped app, whose own exe lives there and so wins
+/// Windows's "search the executable's own directory first" rule even against a
+/// same-named DLL elsewhere (e.g. `System32`). `cargo test` binaries, though,
+/// live one level down at `target/<profile>/deps/`, which is outside that
+/// search path; implicit DLL dependencies resolve at process image load, before
+/// any of the test binary's own code runs, so a copy attempted from inside a
+/// test is always too late once the wrong DLL has already been mapped in. This
+/// was observed concretely on a real machine: it has an unrelated, older
+/// `onnxruntime.dll` in `System32` (apparently from a Windows ML/Copilot
+/// Runtime component), and without this fixup, sherpa-onnx's native diarization
+/// calls immediately crash with an ONNX Runtime API-version mismatch
+/// (`STATUS_ACCESS_VIOLATION`) when run via `cargo test`. Copying the correct
+/// DLLs into `deps/` here, during this build script (which cargo always runs
+/// before it runs any test binary in the same invocation), fixes that for good.
+#[cfg(windows)]
+fn copy_native_dlls_beside_test_binaries() {
+    use std::path::PathBuf;
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
+    let Some(profile_dir) = out_dir.ancestors().nth(3) else {
+        return;
+    };
+    let deps_dir = profile_dir.join("deps");
+    if let Err(err) = std::fs::create_dir_all(&deps_dir) {
+        println!("cargo:warning=Could not create {}: {err}", deps_dir.display());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(profile_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("dll") {
+            continue;
+        }
+        let dest = deps_dir.join(path.file_name().expect("dll path has a file name"));
+        // Best-effort: a locked destination (e.g. a running test binary that
+        // has this DLL loaded) must never fail the whole build.
+        let _ = std::fs::copy(&path, &dest);
+    }
 }
 
 /// The `cuda` feature links whisper.cpp's ggml-cuda backend against the CUDA

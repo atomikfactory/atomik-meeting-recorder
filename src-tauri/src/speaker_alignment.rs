@@ -96,6 +96,7 @@ mod tests {
             model_hash: "h".into(),
             warnings: vec![],
             languages_used: vec![],
+            local_speaker_name: Some("You".into()),
             segments: vec![seg(0, 100, "a"), seg(100, 200, "a"), seg(200, 300, "a")],
         }
     }
