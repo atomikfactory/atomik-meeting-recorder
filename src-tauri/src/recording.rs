@@ -150,35 +150,39 @@ impl RecordingService {
     }
 }
 #[derive(Clone, Copy)]
-struct CaptureFormat {
-    sample_rate: u32,
-    channels: u16,
+pub(crate) struct CaptureFormat {
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
 }
 trait AudioCapture {
     fn resolve(&self, source: &AudioSourceSelection) -> Result<Box<dyn CaptureDevice>, String>;
 }
-trait CaptureDevice {
+/// `pub(crate)`: implemented outside this module by the Linux PulseAudio/
+/// PipeWire monitor backend (`linux_pulse.rs`), which feeds the same
+/// downstream pipeline (WAV writer, capture meter, frame timeline) as the
+/// CPAL-backed `NativeDevice`/`cpal::Stream` implementations below.
+pub(crate) trait CaptureDevice {
     fn format(&self) -> CaptureFormat;
     fn build(&self, sink: CaptureSink) -> Result<Box<dyn CaptureStream>, String>;
 }
-trait CaptureStream {
+pub(crate) trait CaptureStream {
     fn play(&self) -> Result<(), String>;
 }
-struct CaptureSink {
-    sender: mpsc::SyncSender<AudioPacket>,
-    errors: mpsc::SyncSender<String>,
-    dropped: Arc<AtomicU64>,
-    gaps: Arc<AtomicU64>,
-    timestamp_adjustments: Arc<AtomicU64>,
-    last_buffer_ms: Arc<AtomicU64>,
-    meter: Arc<CaptureMeter>,
-    source_name: String,
-    started: Instant,
+pub(crate) struct CaptureSink {
+    pub(crate) sender: mpsc::SyncSender<AudioPacket>,
+    pub(crate) errors: mpsc::SyncSender<String>,
+    pub(crate) dropped: Arc<AtomicU64>,
+    pub(crate) gaps: Arc<AtomicU64>,
+    pub(crate) timestamp_adjustments: Arc<AtomicU64>,
+    pub(crate) last_buffer_ms: Arc<AtomicU64>,
+    pub(crate) meter: Arc<CaptureMeter>,
+    pub(crate) source_name: String,
+    pub(crate) started: Instant,
     /// Flips to true once the frame timeline has observed a packet that
     /// needed no correction, i.e. capture has caught up with real time.
     /// `route_stream_error` uses it to treat driver-reported discontinuities
     /// from the start-up window the same way the timeline itself does.
-    settled: Arc<AtomicBool>,
+    pub(crate) settled: Arc<AtomicBool>,
 }
 struct Active {
     rec: Recording,
@@ -648,6 +652,16 @@ struct NativeDevice {
 }
 impl AudioCapture for NativeCapture {
     fn resolve(&self, source: &AudioSourceSelection) -> Result<Box<dyn CaptureDevice>, String> {
+        // A Linux system-output source is a PulseAudio/PipeWire monitor, not a
+        // CPAL device at all: its id never carries the CPAL `:input`/`:output`
+        // suffix stripped below. Recognize and dispatch it before that parse.
+        #[cfg(target_os = "linux")]
+        if matches!(source.direction, AudioSourceDirection::Output) {
+            if let Some(sink_name) = crate::system_output::parse_pulse_monitor_id(&source.id) {
+                return crate::linux_pulse::PulseMonitorDevice::resolve(sink_name)
+                    .map(|device| Box::new(device) as Box<dyn CaptureDevice>);
+            }
+        }
         let suffix = match source.direction {
             AudioSourceDirection::Input => ":input",
             AudioSourceDirection::Output => ":output",
@@ -659,7 +673,8 @@ impl AudioCapture for NativeCapture {
         if matches!(source.direction, AudioSourceDirection::Output) && !cfg!(target_os = "windows")
         {
             return Err(
-                "Native system output capture is currently supported only on Windows".into(),
+                "Native system output capture is currently supported only on Windows and Linux (via PulseAudio/PipeWire monitors)"
+                    .into(),
             );
         }
         for device in cpal::default_host().devices().map_err(|e| e.to_string())? {
@@ -893,8 +908,12 @@ const SETTLE_GRACE_PACKETS: u32 = 5;
 /// The emitted packet order is the durable clock. CPAL timestamps are used to
 /// retain substantive forward gaps, but callback wake-up jitter or a device
 /// timestamp reset must never create a WAV overlap or discard captured audio.
+/// `pub(crate)`: reused as-is by the Linux PulseAudio/PipeWire monitor
+/// capture loop (`linux_pulse.rs`) so system-output tracks get the same
+/// start-up grace and gap/adjustment accounting as CPAL-backed tracks,
+/// instead of a second bespoke implementation of the same policy.
 #[derive(Default)]
-struct FrameTimeline {
+pub(crate) struct FrameTimeline {
     next: u64,
     last_measured: Option<u64>,
     rebase_frames: u64,
@@ -907,7 +926,7 @@ struct FrameTimeline {
     packets: u32,
 }
 impl FrameTimeline {
-    fn is_settled(&self) -> bool {
+    pub(crate) fn is_settled(&self) -> bool {
         self.settled
     }
 
@@ -916,7 +935,7 @@ impl FrameTimeline {
         self.rebase_frames = 0;
     }
 
-    fn offset(
+    pub(crate) fn offset(
         &mut self,
         measured: Option<u64>,
         rate: u32,
