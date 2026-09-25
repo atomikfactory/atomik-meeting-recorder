@@ -115,7 +115,7 @@ test("dashboard renders capability truth and screenshots", async ({ page }) => {
   ).toBeVisible();
   await expect(page.locator(".capabilities").getByText("Local transcription", { exact: true })).toBeVisible();
   await expect(
-    page.locator(".capabilities").getByText("Disconnected", { exact: true }),
+    page.locator(".capabilities").getByText("Off", { exact: true }),
   ).toBeVisible();
   await page.screenshot({
     path: "test-results/dashboard-1080x760.png",

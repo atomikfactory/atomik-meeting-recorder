@@ -21,6 +21,11 @@ type Settings = {
   compress_audio?: boolean;
   local_speaker_name?: string;
   recordings_folder?: string | null;
+  appflowy_enabled?: boolean;
+  appflowy_auto_export?: boolean;
+  appflowy_base_url?: string;
+  appflowy_use_native_block?: boolean;
+  appflowy_workspace_id?: string | null;
 };
 type BrowserExtensionStatus = { connected: boolean; last_message_seconds_ago: number | null; registered: boolean; browsers: string[] };
 type MoveResult = { recording_id: string; moved: boolean; error: string | null };
@@ -78,6 +83,9 @@ type CompressionJob = { recording_id:string; status:string; progress:number; err
 type CompressionState = { enabled:boolean; inhibited:boolean; jobs:CompressionJob[]; error:string|null };
 type RecordingAudioStorage = { recording_id:string; bytes:number; original_bytes:number; format:"wav"|"flac"|"mixed"|"none" };
 type AudioStorageSummary = { total_bytes:number; total_original_bytes:number; recordings:RecordingAudioStorage[] };
+type AppFlowyJob = { recording_id:string; status:string; error:string|null; export_index:number };
+type AppFlowyState = { enabled:boolean; auto_export:boolean; connected:boolean; email:string|null; base_url:string; jobs:AppFlowyJob[]; inhibited:boolean; error:string|null };
+type AppFlowyWorkspace = { workspace_id:string; workspace_name:string|null };
 type SearchHit = { kind: string; seq: number; start_ms: number | null; end_ms: number | null; speaker: string | null; snippet_html: string };
 type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
 type SearchResults = { meetings: SearchMeeting[]; took_ms: number };
@@ -108,6 +116,11 @@ let settings: Settings = {
   summary_model: "qwen3:8b",
   compress_audio: true,
   local_speaker_name: "You",
+  appflowy_enabled: false,
+  appflowy_auto_export: false,
+  appflowy_base_url: "https://beta.appflowy.cloud",
+  appflowy_use_native_block: true,
+  appflowy_workspace_id: null,
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -125,6 +138,9 @@ let lastIdleRecordingPoll = 0;
 let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base",available:false}, jobs:[], imported_models:[], error:null, backend:"cpu (AVX2)" };
 let diarizationState:DiarizationState={enabled:true,inhibited:false,models:[],jobs:[],error:null}; let diarizationPoll=false;
 let summaryState:SummaryState={enabled:true,inhibited:false,jobs:[],error:null}; let summaryPoll=false;
+let appflowyState:AppFlowyState={enabled:false,auto_export:false,connected:false,email:null,base_url:"https://beta.appflowy.cloud",jobs:[],inhibited:false,error:null}; let appflowyPoll=false;
+let appflowyWorkspaces:AppFlowyWorkspace[]=[]; let appflowyOtpEmail=""; let appflowyOtpSent=false; let appflowyAuthBusy=false; let appflowyAuthError:string|null=null;
+const appflowyActionInFlight = new Set<string>();
 let compressionState:CompressionState={enabled:true,inhibited:false,jobs:[],error:null}; let compressionPoll=false;
 let browserExtensionState:BrowserExtensionStatus={connected:false,last_message_seconds_ago:null,registered:false,browsers:[]}; let browserExtensionPoll=false; let browserExtensionActionInFlight=false;
 let audioStorage:AudioStorageSummary={total_bytes:0,total_original_bytes:0,recordings:[]}; let audioStoragePoll=false;
@@ -363,6 +379,71 @@ function summarySummary(recordingId: string) {
   return job.status.replaceAll("_", " ");
 }
 async function refreshSummaryState(){if(preview||!backendReady||document.hidden||summaryPoll)return;summaryPoll=true;try{summaryState=await invoke<SummaryState>("get_summary_state")}catch(error){summaryState={...summaryState,error:`Could not check local summaries: ${String(error)}`}}finally{summaryPoll=false;updateRecordingUI()}}
+function appflowyJob(id:string) { return appflowyState.jobs.find((job)=>job.recording_id===id); }
+function appflowySummary(recordingId: string) {
+  if (!appflowyState.enabled) return "AppFlowy export off";
+  const job = appflowyJob(recordingId);
+  if (!job) return appflowyState.connected ? (appflowyState.auto_export ? "Export queued" : "Not exported") : "Sign in to export";
+  if (job.status === "exporting") return "Exporting to AppFlowy…";
+  if (job.status === "completed") return job.export_index > 1 ? `Exported to AppFlowy (${job.export_index})` : "Exported to AppFlowy";
+  if (job.status === "queued") return "Export queued";
+  return "AppFlowy export failed";
+}
+async function refreshAppFlowyState(){if(preview||!backendReady||document.hidden||appflowyPoll)return;appflowyPoll=true;try{appflowyState=await invoke<AppFlowyState>("get_appflowy_state")}catch(error){appflowyState={...appflowyState,error:`Could not check AppFlowy export: ${String(error)}`}}finally{appflowyPoll=false;updateRecordingUI();updateAppFlowySettingsUI()}}
+async function refreshAppFlowyWorkspaces() {
+  if (preview || !backendReady || !appflowyState.connected) return;
+  try { appflowyWorkspaces = await invoke<AppFlowyWorkspace[]>("appflowy_list_workspaces"); } catch { appflowyWorkspaces = []; }
+  updateAppFlowySettingsUI();
+}
+/// The AppFlowy Settings section's markup depends on three mutually exclusive
+/// states (signed out, code sent, signed in); rendered as its own function so
+/// `updateAppFlowySettingsUI` can replace just this section in place after an
+/// auth action, rather than a full `render()` -- which would also reset the
+/// visible page back to the dashboard (page switching here is plain DOM
+/// show/hide, not state-driven).
+function appflowySettingsSectionHtml(): string {
+  return `<b id="appflowy-heading">AppFlowy export</b>
+    <label class="toggle"><input type="checkbox" name="appflowy_enabled" ${settings.appflowy_enabled ? "checked" : ""} ${disabled()}/><span><b>Export meetings to AppFlowy</b><small>Sends only the transcript and summary text (never audio) to your chosen AppFlowy Cloud workspace, under "My daily meetings" › a page per date › a page per meeting. Off by default.</small></span></label>
+    <label class="toggle"><input type="checkbox" name="appflowy_auto_export" ${settings.appflowy_auto_export ? "checked" : ""} ${disabled() || !settings.appflowy_enabled ? "disabled" : ""}/><span><b>Export automatically</b><small>Off by default even once export is enabled -- otherwise use the "Export to AppFlowy" button on each meeting.</small></span></label>
+    <label>AppFlowy server<input type="text" name="appflowy_base_url" value="${escapeAttr(settings.appflowy_base_url ?? "https://beta.appflowy.cloud")}" ${disabled()}/><small>https:// required (self-hosted supported); the official cloud is the default.</small></label>
+    <label class="toggle"><input type="checkbox" name="appflowy_use_native_block" ${settings.appflowy_use_native_block !== false ? "checked" : ""} ${disabled()}/><span><b>Use the native AI Meeting Notes block</b><small>Unchecking sends a plain heading + toggle-list fallback instead, for a client that renders the native block blank.</small></span></label>
+    <p id="appflowy-auth-status">${escapeHtml(appflowyAuthError ?? (appflowyState.connected ? `Signed in as ${appflowyState.email ?? "unknown"}.` : appflowyOtpSent ? `Code sent to ${appflowyOtpEmail}. Enter it below.` : "Not signed in."))}</p>
+    ${appflowyState.connected ? `<div><button type="button" class="secondary" id="appflowy-sign-out" ${disabled()}>Sign out</button></div>
+    <label>Workspace<select name="appflowy_workspace_id" ${disabled()}>${appflowyWorkspaces.map((w) => `<option value="${escapeAttr(w.workspace_id)}" ${w.workspace_id === (settings.appflowy_workspace_id ?? "") ? "selected" : ""}>${escapeHtml(w.workspace_name ?? w.workspace_id)}</option>`).join("") || `<option value="">No workspaces found</option>`}</select></label>` : `
+    <label>Email<input type="email" id="appflowy-email" value="${escapeAttr(appflowyOtpEmail)}" ${disabled()}/></label>
+    <div><button type="button" class="secondary" id="appflowy-send-code" ${disabled() || appflowyAuthBusy ? "disabled" : ""}>Send sign-in code</button></div>
+    ${appflowyOtpSent ? `<label>Code from email<input type="text" id="appflowy-code" inputmode="numeric" ${disabled()}/></label>
+    <div><button type="button" class="secondary" id="appflowy-verify-code" ${disabled() || appflowyAuthBusy ? "disabled" : ""}>Verify code</button></div>` : ""}`}`;
+}
+function wireAppFlowySettingsSection() {
+  document.querySelector("#appflowy-send-code")?.addEventListener("click", async () => {
+    const email = (document.querySelector<HTMLInputElement>("#appflowy-email")?.value ?? "").trim();
+    if (!email) return;
+    appflowyAuthBusy = true; appflowyAuthError = null; updateAppFlowySettingsUI();
+    try { await invoke("appflowy_request_otp", { email }); appflowyOtpEmail = email; appflowyOtpSent = true; }
+    catch (error) { appflowyAuthError = `Could not send sign-in code: ${String(error)}`; }
+    finally { appflowyAuthBusy = false; updateAppFlowySettingsUI(); }
+  });
+  document.querySelector("#appflowy-verify-code")?.addEventListener("click", async () => {
+    const code = (document.querySelector<HTMLInputElement>("#appflowy-code")?.value ?? "").trim();
+    if (!code) return;
+    appflowyAuthBusy = true; appflowyAuthError = null; updateAppFlowySettingsUI();
+    try { await invoke("appflowy_verify_otp", { email: appflowyOtpEmail, code }); appflowyOtpSent = false; await refreshAppFlowyState(); await refreshAppFlowyWorkspaces(); }
+    catch (error) { appflowyAuthError = `Could not verify code: ${String(error)}`; }
+    finally { appflowyAuthBusy = false; updateAppFlowySettingsUI(); }
+  });
+  document.querySelector("#appflowy-sign-out")?.addEventListener("click", async () => {
+    try { await invoke("appflowy_sign_out"); appflowyOtpSent = false; appflowyOtpEmail = ""; await refreshAppFlowyState(); }
+    catch (error) { notice(`Could not sign out of AppFlowy: ${String(error)}`, "error"); }
+    finally { updateAppFlowySettingsUI(); }
+  });
+}
+function updateAppFlowySettingsUI() {
+  const section = document.querySelector("#appflowy-settings-section");
+  if (!section) return;
+  section.innerHTML = appflowySettingsSectionHtml();
+  wireAppFlowySettingsSection();
+}
 async function refreshCompressionState(){if(preview||!backendReady||document.hidden||compressionPoll)return;compressionPoll=true;try{compressionState=await invoke<CompressionState>("get_compression_state")}catch(error){compressionState={...compressionState,error:`Could not check audio compression: ${String(error)}`}}finally{compressionPoll=false;updateRecordingUI()}}
 async function refreshAudioStorage(){if(preview||!backendReady||document.hidden||audioStoragePoll)return;audioStoragePoll=true;try{audioStorage=await invoke<AudioStorageSummary>("audio_storage_summary")}catch{/* best-effort only */}finally{audioStoragePoll=false;updateRecordingUI()}}
 async function refreshBrowserExtensionState(){if(preview||!backendReady||document.hidden||browserExtensionPoll)return;browserExtensionPoll=true;try{browserExtensionState=await invoke<BrowserExtensionStatus>("get_browser_extension_status")}catch{/* best-effort only */}finally{browserExtensionPoll=false;updateBrowserExtensionUI()}}
@@ -459,6 +540,7 @@ async function loadDesktop() {
     refreshCompressionState();
     refreshAudioStorage();
     refreshBrowserExtensionState();
+    refreshAppFlowyState().then(refreshAppFlowyWorkspaces);
     refreshSummaryModels(settings.ollama_url ?? "http://127.0.0.1:11434");
   } catch (error) {
     backendReady = false;
@@ -613,7 +695,7 @@ function wireTranscriptSearch() {
   };
 }
 function recentRecordings() {
-  if (!recordingState.recent.length) return `<div class="empty"><div class="empty-wave">~~~</div><h3>Your recordings will appear here</h3><p>Audio and transcripts stay on this device. Import a local Whisper model in Settings to begin transcription. AppFlowy export is coming later.</p></div>`;
+  if (!recordingState.recent.length) return `<div class="empty"><div class="empty-wave">~~~</div><h3>Your recordings will appear here</h3><p>Audio and transcripts stay on this device. Import a local Whisper model in Settings to begin transcription. AppFlowy export is off by default; enable it in Settings.</p></div>`;
   const query=historyQuery.toLocaleLowerCase(); const visible=recordingState.recent.filter(r=>!query||`${r.meeting_title??"Meeting"} ${new Date(r.started_at).toLocaleString()}`.toLocaleLowerCase().includes(query));
   return `<p class="history-scope">Searching the 25 most recent recordings. Older recordings stay in their original folders; use Open folder on a recording.</p><div class="recording-list">${visible.map((recording) => {
     const issues = recordingIssues(recording);
@@ -624,7 +706,10 @@ function recentRecordings() {
     const summaryActions=summary?.status==="completed"?`<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Regenerate summary</button>${summary.title&&summary.title!==(recording.meeting_title??"Meeting")?`<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy?"disabled":""}>Use suggested title: ${escapeHtml(summary.title)}</button>`:""}`:summary?.status==="failed"?`<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Retry summary</button>`:"";
     const manage=`<button class="secondary" data-rename="${escapeAttr(recording.recording_id)}">Rename</button><button class="secondary" data-delete="${escapeAttr(recording.recording_id)}">Remove</button>${["completed","failed","waiting_model"].includes(job?.status??"")?`<button class="secondary" data-restart="${escapeAttr(recording.recording_id)}">Restart transcription</button>`:""}`;
     const storageLine = audioStorageLine(recording.recording_id); const compressionLine = compressionSummary(recording.recording_id);
-    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}</article>`;
+    const appflowyBusy=appflowyActionInFlight.has(recording.recording_id);
+    const appflowyJobFor=appflowyJob(recording.recording_id);
+    const appflowyActions=!appflowyState.enabled?"":appflowyJobFor?.status==="completed"?`<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy?"disabled":""}>Export to AppFlowy again</button>`:appflowyJobFor?.status==="failed"?`<button class="secondary" data-appflowy-retry="${escapeAttr(recording.recording_id)}" ${appflowyBusy?"disabled":""}>Retry AppFlowy export</button>`:!appflowyJobFor&&appflowyState.connected?`<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy?"disabled":""}>Export to AppFlowy</button>`:"";
+    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}</article>`;
   }).join("")}</div>`;
 }
 function updateRecordingUI() {
@@ -684,6 +769,14 @@ function updateRecordingUI() {
   const runSummaryAction=async(id:string,command:string)=>{if(summaryActionInFlight.has(id))return;summaryActionInFlight.add(id);updateRecordingUI();try{await invoke(command,{recordingId:id});await refreshSummaryState();}catch(error){notice(`Could not update summary: ${String(error)}`,"error");}finally{summaryActionInFlight.delete(id);updateRecordingUI();}};
   document.querySelectorAll<HTMLButtonElement>("[data-retry-summary]").forEach(button=>button.onclick=()=>runSummaryAction(button.dataset.retrySummary!,"retry_summary"));
   document.querySelectorAll<HTMLButtonElement>("[data-regenerate-summary]").forEach(button=>button.onclick=()=>runSummaryAction(button.dataset.regenerateSummary!,"regenerate_summary"));
+  const runAppFlowyAction=async(id:string,command:string,args:Record<string,unknown> = {})=>{if(appflowyActionInFlight.has(id))return;appflowyActionInFlight.add(id);updateRecordingUI();try{await invoke(command,{recordingId:id,...args});await refreshAppFlowyState();}catch(error){notice(`Could not update AppFlowy export: ${String(error)}`,"error");}finally{appflowyActionInFlight.delete(id);updateRecordingUI();}};
+  document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export]").forEach(button=>button.onclick=()=>runAppFlowyAction(button.dataset.appflowyExport!,"appflowy_export_now"));
+  document.querySelectorAll<HTMLButtonElement>("[data-appflowy-retry]").forEach(button=>button.onclick=()=>runAppFlowyAction(button.dataset.appflowyRetry!,"appflowy_retry"));
+  document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export-again]").forEach(button=>button.onclick=()=>{
+    const id=button.dataset.appflowyExportAgain!;
+    if (!window.confirm("Export again? This creates a new page in AppFlowy alongside the existing one -- the earlier export is never modified.")) return;
+    runAppFlowyAction(id,"appflowy_export_again",{confirm:true});
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-use-suggested-title]").forEach(button=>button.onclick=async()=>{const id=button.dataset.useSuggestedTitle!;const title=button.dataset.title!;try{await invoke("rename_recording",{recordingId:id,title});await refreshRecordingState(true);}catch(error){notice(`Could not use the suggested title: ${String(error)}`,"error");}});
   const dialog=document.querySelector<HTMLDialogElement>("#management-dialog"); const open=(kind:"rename"|"delete"|"restart",id:string)=>{if(managementBusy)return;management={kind,id,title:""};const record=recordingState.recent.find(item=>item.recording_id===id);const input=document.querySelector<HTMLInputElement>("#management-name")!;input.value=record?.meeting_title??"Meeting";input.closest("label")!.toggleAttribute("hidden",kind!=="rename");document.querySelector("#management-detail")!.textContent=kind==="delete"?"Remove from this list? Audio remains recoverable on disk.":kind==="restart"?"Archive previous transcript output and queue a new transcript with "+settings.whisper_model+"?":"Change the meeting title.";document.querySelector("#management-error")!.textContent="";if(!dialog?.open)dialog?.showModal();if(kind==="rename")input.focus()};
   document.querySelectorAll<HTMLButtonElement>("[data-rename]").forEach(button=>button.onclick=()=>open("rename",button.dataset.rename!));document.querySelectorAll<HTMLButtonElement>("[data-delete]").forEach(button=>button.onclick=()=>open("delete",button.dataset.delete!));document.querySelectorAll<HTMLButtonElement>("[data-restart]").forEach(button=>button.onclick=()=>open("restart",button.dataset.restart!));
@@ -781,10 +874,10 @@ function render() {
               >
             </article>
             <article>
-              <span class="cap-dot warn"></span>
+              <span class="cap-dot ${appflowyState.connected ? "ok" : "warn"}"></span>
               <p>AppFlowy</p>
-              <b>Disconnected</b
-              ><small>Connection and export are not available yet.</small>
+              <b>${appflowyState.enabled ? (appflowyState.connected ? "Connected" : "Signed out") : "Off"}</b
+              ><small>${escapeHtml(appflowyState.enabled ? (appflowyState.connected ? `Exporting to ${appflowyState.email ?? "your workspace"}.` : "Sign in under Settings to export.") : "Export is off; enable it in Settings to send meetings to AppFlowy.")}</small>
             </article>
           </div>
           <section class="recording-panel" aria-labelledby="recording-heading">
@@ -908,6 +1001,7 @@ function render() {
               <p id="summary-models-status">${escapeHtml(summaryModelsError ?? "Refresh to list models installed in Ollama.")}</p>
               <div><button type="button" class="secondary" id="refresh-summary-models" ${disabled()}>Refresh models</button> <button type="button" class="secondary" id="test-ollama-connection" ${disabled()}>Test connection</button></div>
             </section>
+            <section id="appflowy-settings-section" class="model-settings" aria-labelledby="appflowy-heading">${appflowySettingsSectionHtml()}</section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="compress_audio" ${settings.compress_audio !== false ? "checked" : ""} ${disabled()}/><span><b>Compress finished recordings to FLAC</b><small>Once transcription (and speaker identification, if enabled) has finished with a recording's audio, losslessly compresses each WAV track to FLAC and verifies it decodes back to the exact original samples before removing the WAV. Never runs on an active recording.</small></span></label>
               <p id="audio-storage-total">${escapeHtml(audioStorageSummaryText())}</p>
             </section>
@@ -943,8 +1037,8 @@ function render() {
               <small>After connecting: in Chrome/Edge, open chrome://extensions (or edge://extensions), enable Developer mode, and "Load unpacked" the opened folder. In Firefox, open about:debugging#/runtime/this-firefox and "Load Temporary Add-on…", selecting manifest.firefox.json's folder. See docs/browser-extension.md.</small>
             </section>
             <div class="integration">
-              <b>AppFlowy</b><span>Disconnected</span
-              ><small>Connection and exports are not available yet.</small>
+              <b>AppFlowy</b><span>${appflowyState.enabled ? (appflowyState.connected ? "Connected" : "Signed out") : "Off"}</span
+              ><small>${escapeHtml(appflowyState.enabled ? (appflowyState.connected ? `Exporting to ${appflowyState.email ?? "your workspace"}; see the AppFlowy export section below.` : "Enabled, but not signed in yet; see the AppFlowy export section below.") : "Off by default; enable it in the AppFlowy export section below.")}</small>
             </div>
             <button class="primary" type="submit" ${disabled()}>
               Save preferences
@@ -1096,6 +1190,11 @@ function render() {
       summary_model: String(form.get("summary_model") ?? "qwen3:8b"),
       compress_audio: form.get("compress_audio") === "on",
       local_speaker_name: String(form.get("local_speaker_name") ?? "You").trim() || "You",
+      appflowy_enabled: form.get("appflowy_enabled") === "on",
+      appflowy_auto_export: form.get("appflowy_auto_export") === "on",
+      appflowy_base_url: String(form.get("appflowy_base_url") ?? "https://beta.appflowy.cloud").trim(),
+      appflowy_use_native_block: form.get("appflowy_use_native_block") === "on",
+      appflowy_workspace_id: (form.get("appflowy_workspace_id") as string) || settings.appflowy_workspace_id || null,
       audio_sources: settings.audio_sources,
     };
     try {
@@ -1106,10 +1205,12 @@ function render() {
       refreshTranscriptionState();
       refreshDiarizationState();
       refreshSummaryState();
+      refreshAppFlowyState();
     } catch (error) {
       notice(`Could not save preferences: ${String(error)}`, "error");
     }
   };
+  wireAppFlowySettingsSection();
   document.querySelector("#refresh-summary-models")?.addEventListener("click", () => {
     const url = document.querySelector<HTMLInputElement>('input[name="ollama_url"]')?.value ?? settings.ollama_url ?? "http://127.0.0.1:11434";
     refreshSummaryModels(url);
@@ -1261,8 +1362,9 @@ if (!preview) {
   window.setInterval(refreshAudioStorage, 5000);
   window.setInterval(refreshDetectionState, 1000);
   window.setInterval(refreshBrowserExtensionState, 5000);
+  window.setInterval(refreshAppFlowyState, 2000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); } });
 } else render();
