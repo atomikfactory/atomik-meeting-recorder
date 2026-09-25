@@ -1,3 +1,4 @@
+use crate::system_output;
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::Serialize;
 
@@ -43,7 +44,39 @@ impl AudioDeviceInventory for CpalAudioDeviceInventory {
             ..Default::default()
         };
         collect(&host, &mut snapshot);
+        #[cfg(target_os = "linux")]
+        collect_pulse_monitors(&mut snapshot);
         snapshot
+    }
+}
+
+/// System-output ("what the speakers play") sources on Linux: each sink's
+/// monitor is listed as a selectable output device, alongside (not replacing)
+/// CPAL's ALSA input inventory above. A Pulse enumeration failure (no
+/// pipewire-pulse/pulseaudio running) is surfaced as an inventory error, not
+/// a hard failure of the whole snapshot -- ALSA inputs remain usable.
+#[cfg(target_os = "linux")]
+fn collect_pulse_monitors(snapshot: &mut AudioInventorySnapshot) {
+    match crate::linux_pulse::enumerate_sinks() {
+        Ok(sinks) => {
+            for sink in sinks {
+                snapshot.devices.push(AudioDevice {
+                    id: Some(system_output::pulse_monitor_id(&sink.sink_name)),
+                    name: format!("{} (monitor)", sink.description),
+                    direction: AudioDeviceDirection::Output,
+                    is_default: sink.is_default,
+                    default_format: Some(format!(
+                        "{} channels · {} Hz",
+                        sink.channels, sink.sample_rate
+                    )),
+                    selectable: true,
+                    unavailable_reason: None,
+                });
+            }
+        }
+        Err(error) => snapshot
+            .errors
+            .push(format!("Could not list PulseAudio/PipeWire sinks: {error}")),
     }
 }
 
@@ -87,6 +120,14 @@ fn collect(host: &cpal::Host, snapshot: &mut AudioInventorySnapshot) {
             continue;
         }
         let name = description.name().to_string();
+        // ALSA's "default"/"pulse"/"sysdefault"/"pipewire" pseudo-devices just
+        // redirect to whichever real device the sound server currently
+        // considers default; listing them next to that same hardware (and,
+        // for output, next to its Pulse monitor below) is confusing
+        // duplication rather than a distinct capture source.
+        if cfg!(target_os = "linux") && system_output::is_alsa_routing_alias(&name) {
+            continue;
+        }
         // DeviceId is supplied by CPAL's backend and is intentionally not derived
         // from a mutable display name or enumeration index.
         let native_id = device.id().ok().map(|id| id.to_string());
@@ -124,7 +165,26 @@ fn collect(host: &cpal::Host, snapshot: &mut AudioInventorySnapshot) {
                 } else {
                     format_error
                 };
-                let (selectable, unavailable_reason) = match direction { AudioDeviceDirection::Input => (id.is_some() && base_reason.is_none(), base_reason), AudioDeviceDirection::Output if cfg!(target_os = "windows") => (id.is_some() && base_reason.is_none(), base_reason), AudioDeviceDirection::Output => (false, Some(if cfg!(target_os = "macos") { "System-audio capture is not available here yet. Choose a virtual input until ScreenCaptureKit support is added." } else { "System-audio capture is not available here yet. Choose a monitor or virtual input exposed by your Linux audio adapter." }.into())) };
+                let (selectable, unavailable_reason) = match direction {
+                    AudioDeviceDirection::Input => (id.is_some() && base_reason.is_none(), base_reason),
+                    AudioDeviceDirection::Output if cfg!(target_os = "windows") => {
+                        (id.is_some() && base_reason.is_none(), base_reason)
+                    }
+                    AudioDeviceDirection::Output if cfg!(target_os = "linux") => (
+                        false,
+                        Some(
+                            "This ALSA output endpoint is not itself a loopback source. Select this device's \"(monitor)\" entry, listed separately via PulseAudio/PipeWire, to record system output."
+                                .into(),
+                        ),
+                    ),
+                    AudioDeviceDirection::Output => (
+                        false,
+                        Some(
+                            "System-audio capture is not available here yet. Choose a virtual input until ScreenCaptureKit support is added."
+                                .into(),
+                        ),
+                    ),
+                };
                 let is_default = native_id.is_some()
                     && match direction {
                         AudioDeviceDirection::Input => {
