@@ -261,6 +261,7 @@ impl SummaryService {
 /// detect staleness without re-reading the file on every reconcile tick.
 pub(crate) fn read_completed_summary(
     root: &Path,
+    extra_roots: &[PathBuf],
     recording_id: &str,
 ) -> Option<(String, SummaryOutput)> {
     let store = SummaryStore::open(&root.join("summary.sqlite3")).ok()?;
@@ -270,10 +271,8 @@ pub(crate) fn read_completed_summary(
     if job.status != "completed" {
         return None;
     }
-    // Best-effort only (see doc comment above): a recording under a custom
-    // library folder is not resolved here, so this simply returns `None`.
     let (recording, transcript, directory) =
-        load_parent(root, &[], &registry, &recordings, &job).ok()?;
+        load_parent(root, extra_roots, &registry, &recordings, &job).ok()?;
     let json = output_path(&directory, "summary.json").ok()?;
     let bytes = read_checkpoint(&json).ok()?;
     let hash = checksum(&bytes);
@@ -501,6 +500,7 @@ fn tick(
                     .unwrap_or_else(|| "You".into()),
                 remote_speaker_labels: crate::diarization::read_completed_speaker_labels(
                     root,
+                    &settings.extra_library_roots,
                     &recording,
                     &transcript,
                 ),

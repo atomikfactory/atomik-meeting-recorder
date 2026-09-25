@@ -373,6 +373,12 @@ fn reconcile_store(root: &Path, extra_roots: &[PathBuf], store: &SearchStore) {
 pub(crate) fn reconcile_for_test(root: &Path, store: &SearchStore) {
     reconcile_store(root, &[], store);
 }
+/// As `reconcile_for_test`, but with extra known library roots -- for tests
+/// that index a recording living under a custom (non-default) folder.
+#[cfg(test)]
+pub(crate) fn reconcile_for_test_with_roots(root: &Path, extra_roots: &[PathBuf], store: &SearchStore) {
+    reconcile_store(root, extra_roots, store);
+}
 
 fn index_one(
     root: &Path,
@@ -421,7 +427,7 @@ fn gather_index_data(
 
     if let Some(transcript) = completed_transcript(root, extra_roots, recording) {
         state.transcript_checksum = Some(transcript.0.clone());
-        let labels = read_completed_speaker_labels(root, recording, &transcript.1);
+        let labels = read_completed_speaker_labels(root, extra_roots, recording, &transcript.1);
         let local_speaker_name = transcript.1.local_speaker_name.as_deref().unwrap_or("You");
         for (i, segment) in transcript.1.segments.iter().enumerate() {
             let remote_speaker = labels.as_ref().and_then(|l| l.get(i).copied().flatten());
@@ -437,7 +443,7 @@ fn gather_index_data(
         }
     }
 
-    if let Some((hash, summary)) = read_completed_summary(root, &recording.recording_id) {
+    if let Some((hash, summary)) = read_completed_summary(root, extra_roots, &recording.recording_id) {
         state.summary_checksum = Some(hash);
         if !summary.summary.trim().is_empty() {
             rows.push(IndexRow {

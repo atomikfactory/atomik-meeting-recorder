@@ -482,6 +482,7 @@ fn speaker_markdown(
 /// summary rerun is an expensive Ollama call better left to explicit intent.
 pub(crate) fn read_completed_speaker_labels(
     root: &Path,
+    extra_roots: &[PathBuf],
     recording: &Recording,
     transcript: &Transcript,
 ) -> Option<Vec<Option<u32>>> {
@@ -490,10 +491,7 @@ pub(crate) fn read_completed_speaker_labels(
     if job.status != "completed" {
         return None;
     }
-    // Best-effort only (see doc comment above): a recording under a custom
-    // library folder is not resolved here, so this simply returns `None`
-    // rather than threading settings through this free function.
-    let directory = recording_directory(root, &[], &recording.recording_id).ok()?;
+    let directory = recording_directory(root, extra_roots, &recording.recording_id).ok()?;
     let json = output_path(&directory, "speakers.json").ok()?;
     let bytes = read_checkpoint(&json).ok()?;
     if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {

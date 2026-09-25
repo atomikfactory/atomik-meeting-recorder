@@ -3,9 +3,12 @@
 //! tokenizer/diacritics, ranking, and snippet rendering are unit-tested next
 //! to the code they cover (`search.rs`, `search_store.rs`).
 use crate::{
+    diarization_store::{DiarizationStore, ModelPair},
+    diarization_types::{DiarizationOutput, SpeakerTurn},
     recording::{Recording, Track},
+    recording_paths::create_recording_directory,
     recording_store::RecordingStore,
-    search::reconcile_for_test,
+    search::{reconcile_for_test, reconcile_for_test_with_roots},
     search_store::{IndexRow, RecordingIndexState, SearchStore},
     summary::SummaryCheckpoint,
     summary_store::SummaryStore,
@@ -355,4 +358,168 @@ fn probe_index_size_per_hour_of_meeting() {
         twenty_meetings_bytes as f64 / 1024.0,
         marginal_per_hour / 1024.0
     );
+}
+
+/// A recording that lives under a *custom* library root (not the default
+/// `default_root` that also holds the databases) must still have its
+/// transcript, summary, and speaker labels indexed and searchable -- the
+/// same as any other recording. This exercises the "known library roots"
+/// plumbing all the way through `search.rs`'s own lookups
+/// (`completed_transcript`/`recording_directory`) and the two enrichment
+/// helpers it calls into, `summary::read_completed_summary` and
+/// `diarization::read_completed_speaker_labels`.
+#[test]
+fn reconcile_indexes_summary_and_speaker_labels_for_a_recording_under_a_custom_library_root() {
+    let default_root = test_root("custom-root-default");
+    let custom_root = test_root("custom-root-library");
+    let recordings = RecordingStore::open(&default_root).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut recording = Recording {
+        recording_id: id.clone(),
+        started_at: 10,
+        ended_at: Some(2000),
+        duration_ms: 2000,
+        status: "recorded".into(),
+        meeting_title: Some("Weekly sync".into()),
+        storage_path: None,
+        library_root: None,
+        auto_transcribe: true,
+        error: None,
+        transcription_status: "pending".into(),
+        appflowy_status: "pending".into(),
+        tracks: vec![Track {
+            // A loopback/output track: only remote (output) segments get
+            // numbered "Speaker N" -- see `transcription::presentation_label`.
+            source_id: "loop".into(),
+            name: "Zoom".into(),
+            direction: "output".into(),
+            sample_rate: 16000,
+            channels: 1,
+            file_path: String::new(),
+            frames_written: 32000,
+            dropped_samples: 0,
+            error: None,
+        }],
+    };
+    // Places the recording's folder under `custom_root`, not `default_root`,
+    // and records that in `recording.library_root`.
+    let directory = create_recording_directory(&custom_root, &mut recording).unwrap();
+    recording.tracks[0].file_path = directory.join("track-00.wav").display().to_string();
+    recordings.save(&recording).unwrap();
+
+    // Transcript: one segment on the output track.
+    let transcript = Transcript {
+        recording_id: id.clone(),
+        model_key: "base".into(),
+        model_hash: "a".repeat(64),
+        warnings: vec![],
+        languages_used: vec!["en".into()],
+        local_speaker_name: Some("You".into()),
+        segments: vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: 1000,
+            text: "Let's talk about the northbound roadmap.".into(),
+            source_id: "loop".into(),
+            source_name: "Zoom".into(),
+        }],
+    };
+    let transcript_bytes = serde_json::to_vec_pretty(&transcript).unwrap();
+    fs::write(directory.join("transcript.json"), &transcript_bytes).unwrap();
+    let transcript_checksum = checksum(&transcript_bytes);
+    let registry = TranscriptionStore::open(&default_root.join("transcription.sqlite3")).unwrap();
+    registry.enqueue(&id, "base", &transcript.model_hash).unwrap();
+    assert!(registry.claim(&id, "unused", &transcript.model_hash).unwrap());
+    registry
+        .complete(
+            &id,
+            &directory.join("transcript.json").display().to_string(),
+            &directory.join("transcript.md").display().to_string(),
+            &transcript_checksum,
+        )
+        .unwrap();
+
+    // Speaker identification: one turn spanning the whole segment, high
+    // confidence, single speaker -- `align_speakers` renumbers by first
+    // appearance starting at 1, so this labels the segment `Some(1)`
+    // ("Speaker 1").
+    let models = ModelPair {
+        segmentation_path: "seg".into(),
+        segmentation_hash: "a".repeat(64),
+        embedding_path: "emb".into(),
+        embedding_hash: "b".repeat(64),
+    };
+    let output = DiarizationOutput {
+        recording_id: id.clone(),
+        turns: vec![SpeakerTurn {
+            source_id: "loop".into(),
+            start_ms: 0,
+            end_ms: 1000,
+            speaker: 0,
+            confidence: Some(0.99),
+        }],
+        warnings: vec![],
+    };
+    // `diarization::SpeakerCheckpoint` is private to that module; its JSON
+    // shape (checked by `diarization::validate_checkpoint`) is reproduced
+    // here directly rather than reaching into a private type.
+    let checkpoint_bytes = serde_json::to_vec(&serde_json::json!({
+        "recording_id": id,
+        "parent_checksum": transcript_checksum,
+        "models": models,
+        "output": output,
+        "labels": [1],
+    }))
+    .unwrap();
+    fs::write(directory.join("speakers.json"), &checkpoint_bytes).unwrap();
+    let checkpoint_checksum = checksum(&checkpoint_bytes);
+    let speakers = DiarizationStore::open(&default_root.join("diarization.sqlite3")).unwrap();
+    speakers.enqueue(&id, &transcript_checksum).unwrap();
+    assert!(speakers.claim(&id, &models).unwrap());
+    speakers.complete(&id, &checkpoint_checksum, 1).unwrap();
+
+    // Summary.
+    let summary_checkpoint = SummaryCheckpoint {
+        recording_id: id.clone(),
+        parent_checksum: transcript_checksum.clone(),
+        model: "qwen3:8b".into(),
+        output: SummaryOutput {
+            title: "Weekly sync".into(),
+            summary: "The team aligned on the northbound roadmap for next quarter.".into(),
+            key_points: vec!["Next quarter starts in January.".into()],
+            decisions: vec![],
+            action_items: vec![],
+            open_questions: vec![],
+            language: "en".into(),
+        },
+    };
+    let summary_bytes = serde_json::to_vec_pretty(&summary_checkpoint).unwrap();
+    fs::write(directory.join("summary.json"), &summary_bytes).unwrap();
+    let summary_checksum = checksum(&summary_bytes);
+    let summaries = SummaryStore::open(&default_root.join("summary.sqlite3")).unwrap();
+    summaries.enqueue(&id, &transcript_checksum).unwrap();
+    assert!(summaries.claim(&id, "qwen3:8b").unwrap());
+    summaries.complete(&id, &summary_checksum, "Weekly sync").unwrap();
+
+    let index = SearchStore::open_in_memory().unwrap();
+    // Only listing `custom_root` as a known extra root makes it resolvable
+    // at all; without it, reconcile would silently skip every part of this
+    // recording -- proving the reconcile pass here actually depends on it,
+    // not merely tolerates its absence.
+    reconcile_for_test(&default_root, &index);
+    assert!(index.search("\"roadmap\"", 10, 3).unwrap().is_empty());
+    assert!(index.search("\"aligned\"", 10, 3).unwrap().is_empty());
+
+    reconcile_for_test_with_roots(&default_root, std::slice::from_ref(&custom_root), &index);
+
+    let transcript_hits = index.search("\"roadmap\"", 10, 3).unwrap();
+    assert_eq!(transcript_hits.len(), 1);
+    assert_eq!(transcript_hits[0].recording_id, id);
+    assert!(transcript_hits[0]
+        .hits
+        .iter()
+        .any(|h| h.kind == "segment" && h.speaker.as_deref() == Some("Speaker 1")));
+
+    let summary_hits = index.search("\"aligned\"", 10, 3).unwrap();
+    assert_eq!(summary_hits.len(), 1);
+    assert!(summary_hits[0].hits.iter().any(|h| h.kind == "summary"));
 }
