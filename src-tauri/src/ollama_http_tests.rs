@@ -6,33 +6,68 @@
 use super::*;
 use std::{
     io::{Read as _, Write as _},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     thread,
 };
 
-/// Serves exactly `bodies.len()` requests on 127.0.0.1 in order, each with a
-/// canned 200 response, then stops. Real Ollama would reject a fabricated
-/// response as easily as this fake serves one; this test only exercises this
-/// codebase's client -- request construction and response parsing over an
-/// actual socket -- not Ollama's own server behavior.
+/// Reads a full HTTP/1.1 request (headers, then `Content-Length` bytes of
+/// body, if any) off `stream`. A POST's body can arrive in a separate TCP
+/// segment from its headers; responding and closing the socket before every
+/// byte the client wrote has been read from the kernel's receive buffer can
+/// make the OS send RST instead of a clean close, which the client-side HTTP
+/// library sees as a transport error indistinguishable from "server down" --
+/// so this fake must fully drain the request before it replies.
+fn read_full_request(stream: &mut TcpStream) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        let Some(header_end) = find_header_end(&buffer) else {
+            continue;
+        };
+        let content_length = content_length_of(&buffer[..header_end]);
+        if buffer.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+}
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+fn content_length_of(headers: &[u8]) -> usize {
+    String::from_utf8_lossy(headers)
+        .lines()
+        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+fn respond(stream: &mut TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+/// Serves exactly `bodies.len()` requests on 127.0.0.1 in order, each fully
+/// drained then answered with a canned 200 response, then stops. Real Ollama
+/// would reject a fabricated response as easily as this fake serves one; this
+/// test only exercises this codebase's client -- request construction and
+/// response parsing over an actual socket -- not Ollama's own server behavior.
 fn spawn_fake_ollama(bodies: Vec<String>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
         for body in bodies {
             let (mut stream, _) = listener.accept().expect("accept loopback connection");
-            let mut buffer = [0u8; 8192];
-            // A full read isn't required for this fixed script of fake
-            // requests: ureq sends the whole request before waiting for a
-            // response, and this stream is closed right after replying.
-            let _ = stream.read(&mut buffer);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
+            read_full_request(&mut stream);
+            respond(&mut stream, "200 OK", &body);
         }
     });
     format!("http://{addr}")
@@ -77,16 +112,8 @@ fn model_not_found_returns_a_pull_hint() {
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept loopback connection");
-        let mut buffer = [0u8; 8192];
-        let _ = stream.read(&mut buffer);
-        let body = r#"{"error":"model not found"}"#;
-        let response = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+        read_full_request(&mut stream);
+        respond(&mut stream, "404 Not Found", r#"{"error":"model not found"}"#);
     });
     let client = OllamaClient::new(&format!("http://{addr}")).unwrap();
     let error = client

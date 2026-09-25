@@ -15,6 +15,9 @@ type Settings = {
   transcription_language?: Language;
   echo_cancellation?: boolean;
   dedupe_echo_segments?: boolean;
+  summary_enabled?: boolean;
+  ollama_url?: string;
+  summary_model?: string;
 };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
@@ -63,6 +66,8 @@ type RecordingState = {
 type TranscriptionJob = { recording_id:string; status:"queued"|"waiting_model"|"transcribing"|"completed"|"failed"; progress:number; error:string|null; markdown_path:string|null; model_key?:string|null };
 type TranscriptionState = { inhibited:boolean; model:{key:string;available:boolean;path?:string|null;error?:string|null};jobs:TranscriptionJob[];imported_models?:string[];error:string|null;backend:string };
 type DiarizationState = { enabled:boolean; inhibited:boolean; models:{kind:"segmentation"|"embedding";available:boolean;error:string|null}[];jobs:{recording_id:string;status:string;progress:number;error:string|null;speaker_count:number|null}[];error:string|null };
+type SummaryJob = { recording_id:string; status:string; progress:number; error:string|null; title:string|null };
+type SummaryState = { enabled:boolean; inhibited:boolean; jobs:SummaryJob[]; error:string|null };
 type DetectionState = {
   supported: boolean;
   enabled: boolean;
@@ -85,6 +90,9 @@ let settings: Settings = {
   transcription_language: "auto",
   echo_cancellation: true,
   dedupe_echo_segments: true,
+  summary_enabled: true,
+  ollama_url: "http://127.0.0.1:11434",
+  summary_model: "qwen3:8b",
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -101,6 +109,9 @@ let recordingEpoch = 0;
 let lastIdleRecordingPoll = 0;
 let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base",available:false}, jobs:[], imported_models:[], error:null, backend:"cpu (AVX2)" };
 let diarizationState:DiarizationState={enabled:true,inhibited:false,models:[],jobs:[],error:null}; let diarizationPoll=false;
+let summaryState:SummaryState={enabled:true,inhibited:false,jobs:[],error:null}; let summaryPoll=false;
+let summaryModels:string[]=[]; let summaryModelsError:string|null=null; let summaryModelsLoading=false;
+const summaryActionInFlight = new Set<string>();
 let transcriptionPollInFlight = false;
 let renderedRecentRecordings: string | null = null;
 let historyQuery = "";
@@ -287,6 +298,39 @@ function diarizationSummary(recordingId: string) {
 }
 async function refreshTranscriptionState() { if(preview||!backendReady||document.hidden||transcriptionPollInFlight)return; transcriptionPollInFlight=true; try { transcriptionState=await invoke<TranscriptionState>("get_transcription_state"); } catch (error) { transcriptionState={...transcriptionState,error:`Could not check local transcription: ${String(error)}`}; } finally {transcriptionPollInFlight=false; updateTranscriptionUI();} }
 async function refreshDiarizationState(){if(preview||!backendReady||document.hidden||diarizationPoll)return;diarizationPoll=true;try{diarizationState=await invoke<DiarizationState>("get_diarization_state")}catch(error){diarizationState={...diarizationState,error:`Could not check speaker identification: ${String(error)}`}}finally{diarizationPoll=false;updateDiarizationUI()}}
+function summaryJob(id:string) { return summaryState.jobs.find((job)=>job.recording_id===id); }
+function summarySummary(recordingId: string) {
+  const job = summaryJob(recordingId);
+  if (!job) return summaryState.enabled ? "Summary queued" : "Local summary off";
+  if (job.status === "summarizing") return `Summarizing ${Math.round(job.progress)}%`;
+  if (job.status === "completed") return "Summary ready";
+  if (job.status === "waiting_ollama") return "Waiting for Ollama";
+  return job.status.replaceAll("_", " ");
+}
+async function refreshSummaryState(){if(preview||!backendReady||document.hidden||summaryPoll)return;summaryPoll=true;try{summaryState=await invoke<SummaryState>("get_summary_state")}catch(error){summaryState={...summaryState,error:`Could not check local summaries: ${String(error)}`}}finally{summaryPoll=false;updateRecordingUI()}}
+async function refreshSummaryModels(url: string) {
+  if (preview || !backendReady || summaryModelsLoading) return;
+  summaryModelsLoading = true;
+  summaryModelsError = null;
+  try {
+    summaryModels = await invoke<string[]>("list_summary_models", { ollamaUrl: url });
+  } catch (error) {
+    summaryModels = [];
+    summaryModelsError = "Ollama not reachable. Start Ollama and try again.";
+  } finally {
+    summaryModelsLoading = false;
+    updateSummarySettingsUI();
+  }
+}
+function updateSummarySettingsUI() {
+  const select = document.querySelector<HTMLSelectElement>('select[name="summary_model"]');
+  if (select) {
+    const current = select.value || settings.summary_model || "qwen3:8b";
+    const options = new Set([...summaryModels, current]);
+    select.innerHTML = [...options].map((name) => `<option value="${escapeAttr(name)}" ${name === current ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
+  }
+  setTextIfChanged(document.querySelector("#summary-models-status"), summaryModelsError ?? (summaryModelsLoading ? "Checking Ollama…" : summaryModels.length ? `${summaryModels.length} model(s) found on Ollama.` : "Refresh to list models installed in Ollama."));
+}
 function updateDiarizationUI(){const node=document.querySelector<HTMLElement>("#diarization-status");const segmentation=diarizationState.models.find(m=>m.kind==="segmentation");const embedding=diarizationState.models.find(m=>m.kind==="embedding");const modelError=[segmentation,embedding].flatMap(m=>m?.error?[m.error]:[]).join(" ");if(node)node.textContent=diarizationState.error??(diarizationState.inhibited?"Speaker identification is temporarily inhibited.":modelError||(segmentation?.available&&embedding?.available?"Local speaker identification ready.":"Choose both local models to identify speakers. Transcription remains available."));updateRecordingUI()}
 function updateTranscriptionUI() {
   setTextIfChanged(document.querySelector("#model-status"), transcriptionState.model.available
@@ -322,6 +366,8 @@ async function loadDesktop() {
     refreshDetectionState();
     refreshTranscriptionState();
     refreshDiarizationState();
+    refreshSummaryState();
+    refreshSummaryModels(settings.ollama_url ?? "http://127.0.0.1:11434");
   } catch (error) {
     backendReady = false;
     render();
@@ -391,9 +437,11 @@ function recentRecordings() {
     const issues = recordingIssues(recording);
     const shortId = recording.recording_id.slice(0, 8);
     const started = new Date(recording.started_at).toLocaleString();
-    const job=transcriptionJob(recording.recording_id); const diarization=diarizationState.jobs.find((item)=>item.recording_id===recording.recording_id); const folder=`<button class="secondary" data-open-folder="${escapeAttr(recording.recording_id)}">Open folder</button>`; const action=job?.status==="completed"?`<button class="secondary" data-open-transcript="${escapeAttr(recording.recording_id)}">Open transcript</button>`:job?.status==="failed"?`<button class="secondary" data-retry-transcript="${escapeAttr(recording.recording_id)}">Retry transcription</button>`:job?.status==="waiting_model"?`<button class="secondary" data-choose-model>Choose Whisper model${job.model_key?`: ${escapeHtml(job.model_key)}`:""}</button>`:!job&&["recorded","interrupted","failed"].includes(recording.status)&&recording.tracks.some(t=>t.frames_written>0)?`<button class="secondary" data-transcribe="${escapeAttr(recording.recording_id)}" ${transcribeInFlight.has(recording.recording_id)?"disabled":""}>Transcribe</button>`:""; const retry=diarization?.status==="failed"?`<button class="secondary" data-retry-diarization="${escapeAttr(recording.recording_id)}">Retry speaker identification</button>`:"";
+    const job=transcriptionJob(recording.recording_id); const diarization=diarizationState.jobs.find((item)=>item.recording_id===recording.recording_id); const summary=summaryJob(recording.recording_id); const folder=`<button class="secondary" data-open-folder="${escapeAttr(recording.recording_id)}">Open folder</button>`; const action=job?.status==="completed"?`<button class="secondary" data-open-transcript="${escapeAttr(recording.recording_id)}">Open transcript</button>`:job?.status==="failed"?`<button class="secondary" data-retry-transcript="${escapeAttr(recording.recording_id)}">Retry transcription</button>`:job?.status==="waiting_model"?`<button class="secondary" data-choose-model>Choose Whisper model${job.model_key?`: ${escapeHtml(job.model_key)}`:""}</button>`:!job&&["recorded","interrupted","failed"].includes(recording.status)&&recording.tracks.some(t=>t.frames_written>0)?`<button class="secondary" data-transcribe="${escapeAttr(recording.recording_id)}" ${transcribeInFlight.has(recording.recording_id)?"disabled":""}>Transcribe</button>`:""; const retry=diarization?.status==="failed"?`<button class="secondary" data-retry-diarization="${escapeAttr(recording.recording_id)}">Retry speaker identification</button>`:"";
+    const summaryBusy=summaryActionInFlight.has(recording.recording_id);
+    const summaryActions=summary?.status==="completed"?`<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Regenerate summary</button>${summary.title&&summary.title!==(recording.meeting_title??"Meeting")?`<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy?"disabled":""}>Use suggested title: ${escapeHtml(summary.title)}</button>`:""}`:summary?.status==="failed"?`<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Retry summary</button>`:"";
     const manage=`<button class="secondary" data-rename="${escapeAttr(recording.recording_id)}">Rename</button><button class="secondary" data-delete="${escapeAttr(recording.recording_id)}">Remove</button>${["completed","failed","waiting_model"].includes(job?.status??"")?`<button class="secondary" data-restart="${escapeAttr(recording.recording_id)}">Restart transcription</button>`:""}`;
-    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}</article>`;
+    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}</article>`;
   }).join("")}</div>`;
 }
 function updateRecordingUI() {
@@ -449,6 +497,11 @@ function updateRecordingUI() {
   const search=document.querySelector<HTMLInputElement>("#history-search"); if(search) search.oninput=event=>{historyQuery=(event.target as HTMLInputElement).value;renderedRecentRecordings=null;updateRecordingUI();};
   document.querySelectorAll<HTMLButtonElement>("[data-retry-transcript]").forEach(button=>button.onclick=async()=>{try{await invoke("retry_transcription",{recordingId:button.dataset.retryTranscript});await refreshTranscriptionState();}catch(error){notice(`Could not retry transcription: ${String(error)}`,"error");}});
   document.querySelectorAll<HTMLButtonElement>("[data-retry-diarization]").forEach(button=>button.onclick=async()=>{try{await invoke("retry_diarization",{recordingId:button.dataset.retryDiarization});await refreshDiarizationState();}catch(error){notice(`Could not retry speaker identification: ${String(error)}`,"error");}});
+  document.querySelectorAll<HTMLButtonElement>("[data-open-summary]").forEach(button=>button.onclick=()=>invoke("open_summary",{recordingId:button.dataset.openSummary}).catch(error=>notice(String(error),"error")));
+  const runSummaryAction=async(id:string,command:string)=>{if(summaryActionInFlight.has(id))return;summaryActionInFlight.add(id);updateRecordingUI();try{await invoke(command,{recordingId:id});await refreshSummaryState();}catch(error){notice(`Could not update summary: ${String(error)}`,"error");}finally{summaryActionInFlight.delete(id);updateRecordingUI();}};
+  document.querySelectorAll<HTMLButtonElement>("[data-retry-summary]").forEach(button=>button.onclick=()=>runSummaryAction(button.dataset.retrySummary!,"retry_summary"));
+  document.querySelectorAll<HTMLButtonElement>("[data-regenerate-summary]").forEach(button=>button.onclick=()=>runSummaryAction(button.dataset.regenerateSummary!,"regenerate_summary"));
+  document.querySelectorAll<HTMLButtonElement>("[data-use-suggested-title]").forEach(button=>button.onclick=async()=>{const id=button.dataset.useSuggestedTitle!;const title=button.dataset.title!;try{await invoke("rename_recording",{recordingId:id,title});await refreshRecordingState(true);}catch(error){notice(`Could not use the suggested title: ${String(error)}`,"error");}});
   const dialog=document.querySelector<HTMLDialogElement>("#management-dialog"); const open=(kind:"rename"|"delete"|"restart",id:string)=>{if(managementBusy)return;management={kind,id,title:""};const record=recordingState.recent.find(item=>item.recording_id===id);const input=document.querySelector<HTMLInputElement>("#management-name")!;input.value=record?.meeting_title??"Meeting";input.closest("label")!.toggleAttribute("hidden",kind!=="rename");document.querySelector("#management-detail")!.textContent=kind==="delete"?"Remove from this list? Audio remains recoverable on disk.":kind==="restart"?"Archive previous transcript output and queue a new transcript with "+settings.whisper_model+"?":"Change the meeting title.";document.querySelector("#management-error")!.textContent="";if(!dialog?.open)dialog?.showModal();if(kind==="rename")input.focus()};
   document.querySelectorAll<HTMLButtonElement>("[data-rename]").forEach(button=>button.onclick=()=>open("rename",button.dataset.rename!));document.querySelectorAll<HTMLButtonElement>("[data-delete]").forEach(button=>button.onclick=()=>open("delete",button.dataset.delete!));document.querySelectorAll<HTMLButtonElement>("[data-restart]").forEach(button=>button.onclick=()=>open("restart",button.dataset.restart!));
   const cancel=document.querySelector<HTMLButtonElement>("#management-cancel")!;cancel.onclick=event=>{event.preventDefault();if(managementBusy)return;management=null;dialog?.close()};if(dialog)dialog.oncancel=event=>{if(managementBusy)event.preventDefault();else management=null};
@@ -652,6 +705,12 @@ function render() {
             >
             <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Labels uncertain turns as unknown. Speaker labels are kept within each audio source and never infer people’s names.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
+            <section class="model-settings"><label class="toggle"><input type="checkbox" name="summary_enabled" ${settings.summary_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Summarize meetings locally with Ollama</b><small>Sends the finished transcript to a local Ollama server only (never the internet) for a title, summary, key points, decisions, action items, and open questions. Harmless when Ollama isn't running — summaries simply wait.</small></span></label>
+              <label>Ollama URL<input type="text" name="ollama_url" value="${escapeAttr(settings.ollama_url ?? "http://127.0.0.1:11434")}" ${disabled()}/><small>Must be loopback (localhost/127.0.0.1/[::1]) so summaries can never leave this device.</small></label>
+              <label>Summary model<select name="summary_model" ${disabled()}>${[...new Set([...summaryModels, settings.summary_model ?? "qwen3:8b"])].map((name) => `<option value="${escapeAttr(name)}" ${(settings.summary_model ?? "qwen3:8b") === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
+              <p id="summary-models-status">${escapeHtml(summaryModelsError ?? "Refresh to list models installed in Ollama.")}</p>
+              <div><button type="button" class="secondary" id="refresh-summary-models" ${disabled()}>Refresh models</button> <button type="button" class="secondary" id="test-ollama-connection" ${disabled()}>Test connection</button></div>
+            </section>
             <section class="audio-settings" aria-labelledby="audio-sources-heading">
               <div class="audio-head"><div><b id="audio-sources-heading">Audio sources</b><small>Select one or more inputs for local capture.</small></div><button type="button" id="refresh-devices" class="secondary" ${disabled()}>Refresh</button></div>
               <p id="capture-next" class="capture-next">Select one or more sources for your next local recording.</p>
@@ -772,6 +831,7 @@ function render() {
   refreshDeviceSection();
   updateDetectionUI();
   updateTranscriptionUI();
+  updateSummarySettingsUI();
   document.querySelector("#choose-model")?.addEventListener("click", async () => {
     const button = document.querySelector<HTMLButtonElement>("#choose-model");
     if (button) button.disabled = true;
@@ -805,6 +865,9 @@ function render() {
       transcription_language: String(form.get("transcription_language") ?? "auto") as Language,
       echo_cancellation: form.get("echo_cancellation") === "on",
       dedupe_echo_segments: form.get("dedupe_echo_segments") === "on",
+      summary_enabled: form.get("summary_enabled") === "on",
+      ollama_url: String(form.get("ollama_url") ?? "http://127.0.0.1:11434").trim(),
+      summary_model: String(form.get("summary_model") ?? "qwen3:8b"),
       audio_sources: settings.audio_sources,
     };
     try {
@@ -814,10 +877,28 @@ function render() {
       refreshDetectionState();
       refreshTranscriptionState();
       refreshDiarizationState();
+      refreshSummaryState();
     } catch (error) {
       notice(`Could not save preferences: ${String(error)}`, "error");
     }
   };
+  document.querySelector("#refresh-summary-models")?.addEventListener("click", () => {
+    const url = document.querySelector<HTMLInputElement>('input[name="ollama_url"]')?.value ?? settings.ollama_url ?? "http://127.0.0.1:11434";
+    refreshSummaryModels(url);
+  });
+  document.querySelector("#test-ollama-connection")?.addEventListener("click", async () => {
+    const button = document.querySelector<HTMLButtonElement>("#test-ollama-connection")!;
+    const url = document.querySelector<HTMLInputElement>('input[name="ollama_url"]')?.value ?? settings.ollama_url ?? "http://127.0.0.1:11434";
+    button.disabled = true;
+    try {
+      await invoke("test_ollama_connection", { ollamaUrl: url });
+      notice("Connected to Ollama.");
+    } catch (error) {
+      notice(`Could not connect to Ollama: ${String(error)}`, "error");
+    } finally {
+      button.disabled = preview || !backendReady;
+    }
+  });
   document.querySelector("#save-audio-sources")?.addEventListener("click", async () => {
     if (audioSaveInFlight) return;
     audioSaveInFlight = true;
@@ -867,9 +948,10 @@ if (!preview) {
   recordingPoll = window.setInterval(()=>refreshRecordingState(), 100);
   window.setInterval(refreshTranscriptionState, 1000);
   window.setInterval(refreshDiarizationState, 1000);
+  window.setInterval(refreshSummaryState, 1000);
   window.setInterval(refreshDetectionState, 1000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); } });
 } else render();

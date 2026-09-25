@@ -7,9 +7,12 @@ use crate::transcription_types::TranscriptSegment;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Ollama's read timeout needs to cover a slow CPU-bound local decode of a long
-/// transcript; 10 minutes matches the brief's stated budget per call.
+/// A refused connection (Ollama not running) returns immediately regardless of
+/// this value; it only bounds how long a genuinely slow/busy local machine is
+/// given before the job moves to "waiting" and is retried with backoff.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Needs to cover a slow CPU-bound local decode of a long transcript; 10
+/// minutes matches the brief's stated budget per call.
 const READ_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Overlap kept between adjacent chunks so a decision or action item is not
 /// severed at a chunk boundary and lost from every summary.
