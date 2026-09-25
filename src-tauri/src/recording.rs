@@ -1,6 +1,5 @@
 use crate::{
     capture_meter::{CaptureMeter, SourceLevel},
-    meeting_title::best_effort_title,
     recording_paths::create_recording_directory,
     recording_store::RecordingStore,
     recording_wav::{spawn_writer, AudioPacket, WavWriterHandle},
@@ -30,6 +29,11 @@ pub type CurrentLibraryRoot = Arc<dyn Fn() -> Result<PathBuf, String> + Send + S
 /// any folder it replaced. Used only to resolve/recover recordings already
 /// on disk; never as a fallback for where a new recording is created.
 pub type KnownLibraryRoots = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
+/// Best-effort meeting title captured once, at recording start. The default
+/// (`best_effort_title`) reads a window-title heuristic; `lib.rs` wraps it to
+/// prefer a title reported by the browser extension over the connected
+/// meeting's tab, when one is fresh (see `browser_bridge::BrowserBridgeState`).
+pub type TitleProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
@@ -110,8 +114,9 @@ impl RecordingService {
         dir: PathBuf,
         current: CurrentLibraryRoot,
         known: KnownLibraryRoots,
+        title_provider: TitleProvider,
     ) -> Self {
-        Self::with_backend_and_title(dir, current, known, || Box::new(NativeCapture), best_effort_title)
+        Self::with_backend_and_title(dir, current, known, || Box::new(NativeCapture), title_provider)
     }
     #[cfg(test)]
     fn with_backend(
@@ -124,7 +129,7 @@ impl RecordingService {
             Arc::new(move || Ok(default_dir.clone())),
             Arc::new(Vec::new),
             factory,
-            || None,
+            Arc::new(|| None),
         )
     }
     fn with_backend_and_title(
@@ -132,7 +137,7 @@ impl RecordingService {
         current_library_root: CurrentLibraryRoot,
         known_library_roots: KnownLibraryRoots,
         factory: impl FnOnce() -> Box<dyn AudioCapture> + Send + 'static,
-        title_provider: fn() -> Option<String>,
+        title_provider: TitleProvider,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let state = Arc::new(Mutex::new(RecordingState {
@@ -247,7 +252,7 @@ struct Engine {
     active: Option<Active>,
     pending_save: Option<Recording>,
     state: SharedState,
-    title_provider: fn() -> Option<String>,
+    title_provider: TitleProvider,
 }
 const MAX_WAV_DATA: u64 = 0xf000_0000;
 fn now() -> u64 {
@@ -269,7 +274,7 @@ fn run(
     backend: Box<dyn AudioCapture>,
     rx: mpsc::Receiver<Command>,
     state: SharedState,
-    title_provider: fn() -> Option<String>,
+    title_provider: TitleProvider,
 ) {
     let store = RecordingStore::open(&dir).and_then(|mut store| {
         store.set_extra_roots(known_library_roots());

@@ -428,3 +428,66 @@ fn start_failure_is_latched_without_hot_retry() {
     assert_eq!(*r.attempts.lock().unwrap(), 1);
     assert!(c.persisted_latch);
 }
+
+// --- Browser-extension signal source (see lib.rs::NativeDetectorAdapter) --
+//
+// The adapter that merges the browser extension's observations into a
+// `SignalSnapshot` lives in lib.rs (it needs `browser_bridge`, which this
+// module doesn't depend on), but the resulting snapshot shape -- a
+// `browser_meet`/`browser_teams`/`browser_zoom` provider key, `supported:
+// true`, and a detail string carrying the extension's title -- flows through
+// this same `Core` state machine as any other provider. This test exercises
+// that flow end-to-end: approval is still required, and an "ended"
+// observation (what the adapter reports once the extension's heartbeat goes
+// stale or it sends state: "ended") starts the end grace rather than
+// stopping immediately.
+fn browser_meeting() -> SignalSnapshot {
+    SignalSnapshot {
+        supported: true,
+        meeting: Some("browser_meet".into()),
+        detail: "The browser extension reports an active meet call: \"Standup\".".into(),
+        error: None,
+    }
+}
+fn browser_no_meeting() -> SignalSnapshot {
+    SignalSnapshot {
+        supported: true,
+        meeting: None,
+        detail: "No supported meeting hint from the browser extension.".into(),
+        error: None,
+    }
+}
+#[test]
+fn browser_signal_requires_approval_and_never_auto_records() {
+    let r = Fake::default();
+    let mut c = Core::new(&path("browser-signal"), false);
+    assert!(!c.step(Duration::from_secs(0), browser_meeting(), set(), &r));
+    let prompted = c.step(Duration::from_secs(2), browser_meeting(), set(), &r);
+    assert!(prompted, "a fresh in-call browser signal must prompt for approval");
+    assert_eq!(*r.starts.lock().unwrap(), 0, "no recording before approval");
+    let id = c.state.approval_id.clone().unwrap();
+    // Further samples without approval never start a recording.
+    c.step(Duration::from_secs(3), browser_meeting(), set(), &r);
+    assert_eq!(*r.starts.lock().unwrap(), 0);
+    c.approve(&id).unwrap();
+    c.step(Duration::from_secs(4), browser_meeting(), set(), &r);
+    assert_eq!(*r.starts.lock().unwrap(), 1, "approval + a fresh signal starts recording");
+}
+#[test]
+fn browser_signal_ending_starts_end_grace_then_stops() {
+    let r = Fake::default();
+    let mut c = Core::new(&path("browser-signal-grace"), false);
+    c.step(Duration::from_secs(0), browser_meeting(), set(), &r);
+    c.step(Duration::from_secs(2), browser_meeting(), set(), &r);
+    let id = c.state.approval_id.clone().unwrap();
+    c.approve(&id).unwrap();
+    c.step(Duration::from_secs(3), browser_meeting(), set(), &r);
+    assert_eq!(*r.starts.lock().unwrap(), 1);
+    // The browser reports no more meeting: end grace, not an immediate stop.
+    c.step(Duration::from_secs(4), browser_no_meeting(), set(), &r);
+    assert_eq!(c.state.phase, "grace");
+    assert_eq!(*r.stops.lock().unwrap(), 0, "recording continues through end grace");
+    // After the grace period (5s) elapses, the recording stops.
+    c.step(Duration::from_secs(10), browser_no_meeting(), set(), &r);
+    assert_eq!(*r.stops.lock().unwrap(), 1, "recording stops once end grace elapses");
+}

@@ -12,7 +12,7 @@ fn levels_are_source_mapped_independent_and_cleared_on_stop() {
         active: None,
         pending_save: None,
         state: state.clone(),
-        title_provider: || None,
+        title_provider: Arc::new(|| None),
     };
     engine.start(vec![source("a"), source("b")]).unwrap();
     let active = engine.active.as_ref().unwrap();
@@ -42,7 +42,7 @@ fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
         active: None,
         pending_save: None,
         state: state.clone(),
-        title_provider: || None,
+        title_provider: Arc::new(|| None),
     };
     engine.start(vec![source("a")]).unwrap();
     let (faults, fault_rx) = mpsc::sync_channel(1);

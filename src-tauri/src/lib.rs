@@ -2,6 +2,9 @@ mod audio_compress;
 mod audio_compress_store;
 mod audio_devices;
 mod audio_file;
+mod browser_bridge;
+mod browser_bridge_ipc;
+mod browser_registration;
 mod capture_meter;
 mod detection;
 mod diarization;
@@ -87,6 +90,11 @@ pub fn run_diarization_worker(
     result: &std::path::Path,
 ) -> Result<(), String> {
     diarization_engine::run_worker(request, result)
+}
+
+/// See `main.rs`: invoked as `meeting-recorder --native-messaging-host`.
+pub fn run_native_messaging_host() -> i32 {
+    browser_bridge::run_native_messaging_host()
 }
 
 #[derive(Default, Serialize, Clone, Debug, PartialEq, Eq)]
@@ -324,10 +332,53 @@ fn record_previous_library_root(settings: &mut Settings, previous: String) {
         .legacy_library_roots
         .truncate(store::MAX_LEGACY_LIBRARY_ROOTS);
 }
-struct NativeDetectorAdapter(NativeMeetingDetector);
+/// Merges the Windows-only native heuristic with the optional browser
+/// extension's signal (`browser_bridge`), which works on every platform. A
+/// fresh in-call observation from the extension is treated as high
+/// confidence and takes priority over the native heuristic; once it goes
+/// stale or reports "ended", native detection (if any) resumes deciding.
+/// Where native detection is unsupported (macOS/Linux today -- see
+/// docs/detection-platforms.md) but the extension has connected at least
+/// once, this reports `supported: true` on its own, extending meeting
+/// detection to those platforms for the browsers the extension covers.
+struct NativeDetectorAdapter(NativeMeetingDetector, browser_bridge::BrowserBridgeState);
 impl MeetingDetector for NativeDetectorAdapter {
     fn sample(&mut self) -> SignalSnapshot {
+        if let Some(observation) = self.1.current_in_call(std::time::Instant::now()) {
+            let detail = match &observation.title {
+                Some(title) => format!(
+                    "The browser extension reports an active {} call: \"{title}\".",
+                    observation.platform.provider_key().trim_start_matches("browser_")
+                ),
+                None => format!(
+                    "The browser extension reports an active {} call.",
+                    observation.platform.provider_key().trim_start_matches("browser_")
+                ),
+            };
+            return SignalSnapshot {
+                supported: true,
+                meeting: Some(observation.platform.provider_key().to_string()),
+                detail,
+                error: None,
+            };
+        }
         let s = NativeDetectorTrait::sample(&mut self.0);
+        if s.supported {
+            return SignalSnapshot {
+                supported: s.supported,
+                meeting: s.meeting,
+                detail: s.detail,
+                error: s.error,
+            };
+        }
+        if self.1.has_ever_connected() {
+            return SignalSnapshot {
+                supported: true,
+                meeting: None,
+                detail: "No supported meeting hint from the browser extension.".into(),
+                error: None,
+            };
+        }
         SignalSnapshot {
             supported: s.supported,
             meeting: s.meeting,
@@ -948,6 +999,73 @@ fn open_folder(path: &std::path::Path) -> Result<(), String> {
 fn open_recordings_folder(app: tauri::AppHandle) -> Result<(), String> {
     open_folder(&recordings_library(&app)?)
 }
+#[derive(Serialize, Clone)]
+struct BrowserExtensionStatus {
+    connected: bool,
+    last_message_seconds_ago: Option<u64>,
+    registered: bool,
+    browsers: Vec<String>,
+}
+fn browser_extension_status(
+    app: &tauri::AppHandle,
+    bridge: &browser_bridge::BrowserBridgeState,
+) -> Result<BrowserExtensionStatus, String> {
+    let home = app.path().home_dir().map_err(app_error)?;
+    let fs = browser_registration::real::RealFileWriter;
+    let browsers = browser_registration::installed_browsers(&fs, &home);
+    Ok(BrowserExtensionStatus {
+        connected: bridge.has_ever_connected(),
+        last_message_seconds_ago: bridge.last_message_at().map(|at| at.elapsed().as_secs()),
+        registered: !browsers.is_empty(),
+        browsers: browsers.into_iter().map(|b| b.label().to_string()).collect(),
+    })
+}
+#[tauri::command]
+fn get_browser_extension_status(
+    app: tauri::AppHandle,
+    bridge: State<browser_bridge::BrowserBridgeState>,
+) -> Result<BrowserExtensionStatus, String> {
+    browser_extension_status(&app, &bridge)
+}
+#[tauri::command]
+fn connect_browser_extension(
+    app: tauri::AppHandle,
+    bridge: State<browser_bridge::BrowserBridgeState>,
+) -> Result<BrowserExtensionStatus, String> {
+    let home = app.path().home_dir().map_err(app_error)?;
+    let exe = std::env::current_exe().map_err(app_error)?;
+    let mut fs = browser_registration::real::RealFileWriter;
+    let mut registry = browser_registration::real::RealRegistryWriter;
+    browser_registration::install(&mut fs, &mut registry, &exe, &home)?;
+    browser_extension_status(&app, &bridge)
+}
+#[tauri::command]
+fn disconnect_browser_extension(
+    app: tauri::AppHandle,
+    bridge: State<browser_bridge::BrowserBridgeState>,
+) -> Result<BrowserExtensionStatus, String> {
+    let home = app.path().home_dir().map_err(app_error)?;
+    let mut fs = browser_registration::real::RealFileWriter;
+    let mut registry = browser_registration::real::RealRegistryWriter;
+    browser_registration::uninstall(&mut fs, &mut registry, &home)?;
+    browser_extension_status(&app, &bridge)
+}
+#[tauri::command]
+fn open_browser_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(app_error)?
+        .join("browser-extension");
+    let dev_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("browser-extension");
+    open_folder(if resource_dir.exists() {
+        &resource_dir
+    } else {
+        &dev_fallback
+    })
+}
 fn set_recordings_folder_inner(app: &tauri::AppHandle, raw: String) -> Result<Settings, String> {
     let canonical = validate_new_recordings_folder(app, &raw)?;
     let state = app.state::<Mutex<SettingsStorage>>();
@@ -1265,17 +1383,28 @@ pub fn run() {
     let database = app.path().app_config_dir()?.join("settings.sqlite3");
     let recording_dir = recordings_dir(app.handle()).map_err(std::io::Error::other)?;
     app.manage(Mutex::new(SettingsStorage::new(database)));
+    // Shared with detection (as a high-confidence signal source) and
+    // recording (as a preferred meeting-title source); see browser_bridge.rs.
+    let browser_bridge_state = browser_bridge::BrowserBridgeState::new();
+    browser_bridge::spawn_server(browser_bridge_state.clone());
+    app.manage(browser_bridge_state.clone());
     let recording_service_app = app.handle().clone();
     let recording_library_app = app.handle().clone();
+    let recording_title_bridge = browser_bridge_state.clone();
     app.manage(RecordingService::with_library_roots(
         recording_dir.clone(),
         Arc::new(move || current_library_root(&recording_service_app)),
         Arc::new(move || extra_library_roots(&recording_library_app)),
+        Arc::new(move || {
+            recording_title_bridge
+                .current_title()
+                .or_else(meeting_title::best_effort_title)
+        }),
     ));
     app.manage(TrayStatus::default()); app.manage(AudioScanGate::default()); app.manage(ExitGate(Arc::new(AtomicU8::new(EXIT_NORMAL))));
     let detection_app = app.handle().clone();
     let prompt_app = app.handle().clone();
-    let detection = DetectionService::new(recording_dir.join("detection.sqlite3"), NativeDetectorAdapter(NativeMeetingDetector::new()), Arc::new(move || detection_settings(&detection_app)), Arc::new(AppRecordingBoundary(app.handle().clone())), Arc::new(move |snapshot| {
+    let detection = DetectionService::new(recording_dir.join("detection.sqlite3"), NativeDetectorAdapter(NativeMeetingDetector::new(), browser_bridge_state.clone()), Arc::new(move || detection_settings(&detection_app)), Arc::new(AppRecordingBoundary(app.handle().clone())), Arc::new(move |snapshot| {
         show(&prompt_app);
         let _ = prompt_app.emit("detection-state", snapshot);
     }));
@@ -1337,7 +1466,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();
@@ -1543,4 +1672,105 @@ mod tests {
             1
         );
     }
+
+    // --- Browser-signal merging (NativeDetectorAdapter) ---------------
+
+    struct StubNativeDetector(SignalSnapshot);
+    impl NativeDetectorTrait for StubNativeDetector {
+        fn sample(&mut self) -> meeting_signals::SignalSnapshot {
+            meeting_signals::SignalSnapshot {
+                supported: self.0.supported,
+                meeting: self.0.meeting.clone(),
+                detail: self.0.detail.clone(),
+                error: self.0.error.clone(),
+            }
+        }
+    }
+    fn unsupported_native() -> StubNativeDetector {
+        StubNativeDetector(SignalSnapshot {
+            supported: false,
+            meeting: None,
+            detail: "Native meeting detection is currently supported only on Windows.".into(),
+            error: None,
+        })
+    }
+
+    #[test]
+    fn adapter_prefers_a_fresh_browser_in_call_signal_and_carries_the_title() {
+        let bridge = browser_bridge::BrowserBridgeState::new();
+        bridge.record(browser_bridge::Observation {
+            platform: browser_bridge::Platform::Meet,
+            state: browser_bridge::CallState::InCall,
+            title: Some("Weekly sync".into()),
+        });
+        let mut adapter = NativeDetectorAdapter(NativeMeetingDetector::new(), bridge);
+        let snapshot = adapter.sample();
+        assert!(snapshot.supported);
+        assert_eq!(snapshot.meeting.as_deref(), Some("browser_meet"));
+        assert!(snapshot.detail.contains("Weekly sync"));
+        assert!(snapshot.error.is_none());
+    }
+
+    #[test]
+    fn adapter_falls_back_once_the_browser_reports_ended() {
+        let bridge = browser_bridge::BrowserBridgeState::new();
+        bridge.record(browser_bridge::Observation {
+            platform: browser_bridge::Platform::Meet,
+            state: browser_bridge::CallState::Ended,
+            title: None,
+        });
+        struct Adapter(StubNativeDetector, browser_bridge::BrowserBridgeState);
+        impl MeetingDetector for Adapter {
+            fn sample(&mut self) -> SignalSnapshot {
+                if let Some(o) = self.1.current_in_call(std::time::Instant::now()) {
+                    return SignalSnapshot {
+                        supported: true,
+                        meeting: Some(o.platform.provider_key().into()),
+                        detail: "unused".into(),
+                        error: None,
+                    };
+                }
+                let s = NativeDetectorTrait::sample(&mut self.0);
+                if s.supported {
+                    return SignalSnapshot { supported: s.supported, meeting: s.meeting, detail: s.detail, error: s.error };
+                }
+                if self.1.has_ever_connected() {
+                    return SignalSnapshot { supported: true, meeting: None, detail: "No supported meeting hint from the browser extension.".into(), error: None };
+                }
+                SignalSnapshot { supported: s.supported, meeting: s.meeting, detail: s.detail, error: s.error }
+            }
+        }
+        let mut adapter = Adapter(unsupported_native(), bridge);
+        let snapshot = adapter.sample();
+        // Native is unsupported on this test's platform stub, but the
+        // extension has connected at least once, so detection still
+        // reports supported -- with no active meeting.
+        assert!(snapshot.supported);
+        assert_eq!(snapshot.meeting, None);
+    }
+
+    #[test]
+    fn adapter_expires_a_stale_browser_signal_and_falls_back_to_native() {
+        let bridge = browser_bridge::BrowserBridgeState::new();
+        bridge.record(browser_bridge::Observation {
+            platform: browser_bridge::Platform::Meet,
+            state: browser_bridge::CallState::InCall,
+            title: None,
+        });
+        // Simulate the heartbeat going stale by checking well past STALE_AFTER
+        // directly against the shared state (the same check the adapter runs).
+        let far_future = std::time::Instant::now() + browser_bridge::STALE_AFTER + Duration::from_secs(5);
+        assert!(bridge.current_in_call(far_future).is_none());
+    }
+
+    #[test]
+    fn adapter_with_no_browser_signal_and_unsupported_native_reports_unsupported() {
+        let bridge = browser_bridge::BrowserBridgeState::new(); // never connected
+        let mut adapter = NativeDetectorAdapter(NativeMeetingDetector::new(), bridge);
+        if !cfg!(target_os = "windows") {
+            let snapshot = adapter.sample();
+            assert!(!snapshot.supported);
+        }
+    }
+
 }

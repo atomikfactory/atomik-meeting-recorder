@@ -4,6 +4,14 @@ fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args
         .first()
+        .is_some_and(|arg| arg == "--native-messaging-host")
+    {
+        // Invoked by the browser per the registered host manifest (see
+        // browser_registration.rs); never launches the Tauri app itself.
+        std::process::exit(meeting_recorder_lib::run_native_messaging_host());
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == "--diarization-worker")
     {
         let code = match args.as_slice() {
