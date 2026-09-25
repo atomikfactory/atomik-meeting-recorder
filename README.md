@@ -37,6 +37,7 @@ npm run build
 - Transcript Markdown and summaries label your own microphone lines with a name you choose in Settings (default "You") and remote lines "Speaker N"/"Remote", instead of raw device names; see [speaker labels](docs/transcription.md#speaker-labels)
 - Optional local meeting summaries (title, key points, decisions, action items, open questions) via a local [Ollama](https://ollama.com) server, loopback-only so summaries never leave this device, with section headings localized to the summary's language (English/French so far); see [local summaries](docs/summary.md)
 - Optional lossless FLAC compression of a finished recording's WAV tracks once transcription and speaker identification no longer need the raw audio, verified bit-exact before the WAV is ever removed; see [recording behavior](docs/recording.md#storage-lossless-flac-compression-of-finished-audio)
+- Search across every recorded meeting's transcript and summary at once, from a search box at the top of the library, backed by a local SQLite FTS5 index (diacritic-insensitive, as-you-type prefix matching, highlighted snippets); see [search](docs/search.md)
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
 

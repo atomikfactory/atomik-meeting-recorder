@@ -78,6 +78,10 @@ JSON is flushed and renamed first, then Markdown, then the completion transactio
 
 The application is not a backup system. Keep backups of the recordings directory; native filesystem durability across sudden power loss still requires platform testing.
 
+## Searching transcripts
+
+Every completed transcript (and its summary, once one exists) is indexed into a local SQLite FTS5 full-text index for the library's search box, kept up to date independently of the states above -- see [search](search.md).
+
 ## Build and verification
 
 Whisper requires a C++ toolchain, CMake, and libclang at build time; no Python interpreter or libclang is shipped as an application runtime dependency. `LIBCLANG_PATH` must point to the directory containing the appropriate libclang shared library. Do **not** set `WHISPER_DONT_GENERATE_BINDINGS=1` on Windows: this locked sys crate's bundled bindings contain Linux-specific types.
