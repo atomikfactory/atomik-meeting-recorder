@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "target/release/cudart64_13.dll": ".",
+      "target/release/cublas64_13.dll": ".",
+      "target/release/cublasLt64_13.dll": "."
+    }
+  }
+}
