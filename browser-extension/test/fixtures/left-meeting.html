@@ -1,0 +1,12 @@
+<!-- Google Meet post-call screen: "You've left the meeting" text is present,
+     and a stale "Leave call" control may still linger in the DOM briefly --
+     the "ended" text must win. Mirrors content-logic.test.mjs's ended case. -->
+<!doctype html>
+<html>
+  <head><title>Meet - abc-defg-hij</title></head>
+  <body>
+    <div>You've left the meeting</div>
+    <button aria-label="Rejoin">Rejoin</button>
+    <button aria-label="Return to home screen">Return to home screen</button>
+  </body>
+</html>

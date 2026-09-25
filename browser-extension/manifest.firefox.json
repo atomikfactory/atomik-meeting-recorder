@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Meeting Recorder detection helper",
+  "version": "1.0.0",
+  "description": "Local-only: tells the Meeting Recorder desktop app when a supported browser meeting tab is active, so it can ask before recording. Sends only platform, call state, meeting title, and an opaque tab id over native messaging -- never page content, URLs, or participant data.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{e9fd5ec2-42a5-4212-8ed9-d2d3a1c43e43}",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["nativeMessaging", "storage"],
+  "host_permissions": [
+    "https://meet.google.com/*",
+    "https://teams.microsoft.com/*",
+    "https://teams.live.com/*",
+    "https://app.zoom.us/wc/*"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["content-meet.js"],
+      "run_at": "document_idle",
+      "type": "module"
+    },
+    {
+      "matches": ["https://teams.microsoft.com/*", "https://teams.live.com/*"],
+      "js": ["content-teams.js"],
+      "run_at": "document_idle",
+      "type": "module"
+    },
+    {
+      "matches": ["https://app.zoom.us/wc/*"],
+      "js": ["content-zoom.js"],
+      "run_at": "document_idle",
+      "type": "module"
+    }
+  ]
+}
