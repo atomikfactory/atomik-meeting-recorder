@@ -30,6 +30,8 @@ pub struct TranscriptionSettings {
     pub model_key: String,
     /// "auto" or a lowercase ISO 639-1 code; see `store::Settings::transcription_language`.
     pub language: String,
+    /// See `store::Settings::echo_cancellation`.
+    pub echo_cancellation: bool,
 }
 impl TranscriptionSettings {
     /// Convenience for tests and fixtures that only care about the model size.
@@ -37,6 +39,7 @@ impl TranscriptionSettings {
         Self {
             model_key: model_key.into(),
             language: "auto".into(),
+            echo_cancellation: true,
         }
     }
 }
@@ -755,6 +758,7 @@ fn tick(
                 // language tag, so it is not forwarded to Whisper as one.
                 language: (current_settings.language != "auto")
                     .then(|| current_settings.language.clone()),
+                echo_cancellation: current_settings.echo_cancellation,
             };
             let mut progress_error = None;
             let mut progress = |value: u8| {

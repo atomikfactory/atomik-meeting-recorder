@@ -31,6 +31,8 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 hound = "3.5"
 rubato = "5.0"
+realfft = "3.5"
+rustfft = "6.4"
 whisper-rs = "0.16.0"
 tauri-plugin-dialog = "2"
 

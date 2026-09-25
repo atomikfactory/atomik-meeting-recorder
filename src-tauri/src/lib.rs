@@ -2,6 +2,7 @@ mod audio_devices;
 mod capture_meter;
 mod detection;
 mod diarization;
+mod echo_cancel;
 mod diarization_engine;
 mod diarization_store;
 mod diarization_types;
@@ -837,6 +838,7 @@ pub fn run() {
         Ok(TranscriptionSettings {
             model_key: whisper_model_key(&settings.whisper_model).into(),
             language: settings.transcription_language.clone(),
+            echo_cancellation: settings.echo_cancellation,
         })
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();

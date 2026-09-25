@@ -19,6 +19,15 @@ pub struct Settings {
     /// such as "en". Missing/legacy payloads default to "auto".
     #[serde(default = "default_language")]
     pub transcription_language: String,
+    /// Acoustic echo cancellation (see `echo_cancel.rs`) for recordings that
+    /// have both an input (microphone) and an output (loopback) track --
+    /// the common case where the user has speakers rather than headphones,
+    /// so remote participants' audio leaks into the mic and is otherwise
+    /// transcribed twice. A no-op for recordings missing either track
+    /// direction, so this only needs one setting rather than a per-track
+    /// toggle. Missing/legacy payloads default to enabled.
+    #[serde(default = "enabled_by_default")]
+    pub echo_cancellation: bool,
 }
 fn enabled_by_default() -> bool {
     true
@@ -63,6 +72,7 @@ impl Default for Settings {
             diarization_enabled: true,
             audio_sources: vec![],
             transcription_language: default_language(),
+            echo_cancellation: enabled_by_default(),
         }
     }
 }
@@ -191,6 +201,7 @@ mod tests {
             diarization_enabled: false,
             audio_sources: vec![],
             transcription_language: "fr".into(),
+            echo_cancellation: false,
         };
         store.save(expected.clone()).unwrap();
         drop(store);
