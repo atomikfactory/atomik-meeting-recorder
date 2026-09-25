@@ -1,5 +1,24 @@
 use crate::{diarization_types::DiarizationOutput, transcription_types::Transcript};
 use std::collections::{BTreeMap, HashMap};
+
+/// A Whisper segment is labelled with the speaker whose diarization turns
+/// cover the largest share of it once that share reaches this fraction.
+/// Chosen (per docs/diarization.md) to match Whisper's segment granularity --
+/// a segment can straddle a turn boundary by a word or two even when it is
+/// unambiguously one speaker's line -- rather than the much stricter 80%
+/// "near-total coverage" this used to require, which left most segments on a
+/// track with more than one detected speaker unlabeled (falling back to
+/// "Remote") even when one speaker plainly dominated.
+const MIN_COVERAGE_SHARE: u64 = 50;
+/// A turn confidence at or below this is treated as "genuinely low" and
+/// blocks labeling its speaker even if it otherwise has majority coverage.
+/// sherpa-onnx's real per-turn confidences on multi-speaker audio run well
+/// above this; only a real misassignment risk (as opposed to the sentinel
+/// "confidence unavailable" case -- see `normalize_confidence` in
+/// `diarization_engine.rs`, which is already reported as `None` and is
+/// deliberately *not* treated as low here) scores this low.
+const LOW_CONFIDENCE_REJECT: f32 = 0.3;
+
 pub fn align_speakers(t: &Transcript, d: &DiarizationOutput) -> Result<Vec<Option<u32>>, String> {
     if t.recording_id != d.recording_id {
         return Err("Transcript and diarization recording IDs differ.".into());
@@ -21,31 +40,36 @@ pub fn align_speakers(t: &Transcript, d: &DiarizationOutput) -> Result<Vec<Optio
         if n == 0 {
             continue;
         }
-        let mut m: BTreeMap<u32, Vec<(u64, u64, bool)>> = BTreeMap::new();
+        // Per-speaker overlap intervals with this segment, plus whether any
+        // contributing turn has a confidence explicitly known to be low. A
+        // turn with *no* confidence (the sherpa-onnx single-speaker-cluster
+        // sentinel, already normalized to `None`) is treated as "uncertain
+        // but not disqualifying" -- otherwise every segment on a
+        // single-speaker track would stay unlabeled forever, since a lone
+        // speaker never gets a real confidence score at all.
+        let mut m: BTreeMap<u32, Vec<(u64, u64)>> = BTreeMap::new();
+        let mut low_confidence: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for x in d.turns.iter().filter(|x| x.source_id == s.source_id) {
             let (a, b) = (s.start_ms.max(x.start_ms), s.end_ms.min(x.end_ms));
             if b > a {
-                m.entry(x.speaker).or_default().push((
-                    a,
-                    b,
-                    x.confidence.is_some_and(|c| c >= 0.65),
-                ))
+                m.entry(x.speaker).or_default().push((a, b));
+                if x.confidence.is_some_and(|c| c <= LOW_CONFIDENCE_REJECT) {
+                    low_confidence.insert(x.speaker);
+                }
             }
         }
-        let good: Vec<_> = m
-            .iter()
-            .filter(|(_, v)| {
-                let (c, g) = u(v);
-                c * 100 >= n * 80 && g
-            })
-            .collect();
-        if good.len() == 1
-            && !m
-                .iter()
-                .filter(|(k, _)| *k != good[0].0)
-                .any(|(_, v)| u(v).0 * 100 > n * 10)
-        {
-            raw[i] = Some((s.source_id.clone(), *good[0].0, s.start_ms))
+        if m.is_empty() {
+            continue;
+        }
+        let mut coverage: Vec<(u32, u64)> =
+            m.iter().map(|(speaker, v)| (*speaker, merged_coverage_ms(v))).collect();
+        coverage.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let (winner, winner_ms) = coverage[0];
+        let runner_up_ms = coverage.get(1).map(|(_, ms)| *ms).unwrap_or(0);
+        let has_majority = winner_ms * 100 >= n * MIN_COVERAGE_SHARE;
+        let unambiguous = winner_ms > runner_up_ms;
+        if has_majority && unambiguous && !low_confidence.contains(&winner) {
+            raw[i] = Some((s.source_id.clone(), winner, s.start_ms))
         }
     }
     let mut keys: Vec<_> = raw.iter().flatten().cloned().collect();
@@ -60,26 +84,28 @@ pub fn align_speakers(t: &Transcript, d: &DiarizationOutput) -> Result<Vec<Optio
         .map(|x| x.map(|(s, p, _)| map[&(s, p)]))
         .collect())
 }
-fn u(v: &[(u64, u64, bool)]) -> (u64, bool) {
+
+/// Total milliseconds covered by `v` (a speaker's overlap intervals with one
+/// transcript segment) after merging overlapping/adjacent ranges, so a
+/// speaker whose turns were split into several short diarization turns is
+/// not penalized relative to one long turn covering the same span.
+fn merged_coverage_ms(v: &[(u64, u64)]) -> u64 {
     let mut x = v.to_vec();
     x.sort();
-    let (mut a, mut b, mut n, mut g) = (0, 0, 0, true);
-    for (l, r, q) in x {
+    let (mut a, mut b, mut total) = (0u64, 0u64, 0u64);
+    for (l, r) in x {
         if a == b {
             a = l;
             b = r;
-            g &= q
         } else if l <= b {
             b = b.max(r);
-            g &= q
         } else {
-            n += b - a;
+            total += b - a;
             a = l;
             b = r;
-            g &= q
         }
     }
-    (n + b.saturating_sub(a), g)
+    total + b.saturating_sub(a)
 }
 
 #[cfg(test)]
@@ -138,19 +164,61 @@ mod tests {
     }
     #[test]
     fn duplicate_union_not_inflated() {
+        // Two identical, fully-overlapping 40ms turns for the same speaker
+        // must merge to 40ms of coverage (40% of the 100ms segment), not
+        // double-count to 80ms -- so this stays below the 50% labeling
+        // threshold and the segment is left unlabeled.
         assert_eq!(
-            align_speakers(&t(), &d(vec![turn(0, 50, 1), turn(0, 50, 1)])).unwrap()[0],
+            align_speakers(&t(), &d(vec![turn(0, 40, 1), turn(0, 40, 1)])).unwrap()[0],
             None
         )
     }
     #[test]
-    fn confidence_and_competition_unknown() {
+    fn unknown_confidence_does_not_block_a_majority_label() {
+        // The sherpa-onnx sentinel for "confidence unavailable" (e.g. only
+        // one speaker cluster was ever found on this track) is already
+        // normalized to `None` upstream; a turn with unknown confidence must
+        // still be labeled when it otherwise has clear majority coverage --
+        // otherwise every segment on a single-speaker track stays "Remote"
+        // forever, which was the observed real-world bug.
         let mut x = turn(0, 100, 1);
         x.confidence = None;
+        assert_eq!(align_speakers(&t(), &d(vec![x])).unwrap()[0], Some(1));
+    }
+    #[test]
+    fn a_real_low_confidence_turn_still_blocks_labeling() {
+        let mut x = turn(0, 100, 1);
+        x.confidence = Some(0.1);
         assert_eq!(align_speakers(&t(), &d(vec![x])).unwrap()[0], None);
+    }
+    #[test]
+    fn a_small_competing_turn_no_longer_blocks_the_clear_majority() {
+        // Speaker 1 covers the whole 100ms segment; speaker 2 only overlaps
+        // an 11ms sliver. The old rule rejected the label outright whenever
+        // *any* other speaker exceeded 10% coverage; the fix instead picks
+        // whichever speaker has the largest (here, overwhelming) share.
         assert_eq!(
             align_speakers(&t(), &d(vec![turn(0, 100, 1), turn(0, 11, 2)])).unwrap()[0],
+            Some(1)
+        )
+    }
+    #[test]
+    fn a_near_even_split_between_two_speakers_stays_unlabeled() {
+        // Neither speaker reaches a clear majority (each covers half), so
+        // the segment is genuinely ambiguous and must fall back to unlabeled
+        // ("Remote") rather than guessing.
+        assert_eq!(
+            align_speakers(&t(), &d(vec![turn(0, 50, 1), turn(50, 100, 2)])).unwrap()[0],
             None
+        )
+    }
+    #[test]
+    fn fifty_percent_coverage_is_enough_to_label() {
+        // Exactly half the segment covered by one speaker, with no
+        // competitor at all, meets the documented "~50%" bar.
+        assert_eq!(
+            align_speakers(&t(), &d(vec![turn(0, 50, 1)])).unwrap()[0],
+            Some(1)
         )
     }
     #[test]
@@ -166,6 +234,21 @@ mod tests {
         assert_eq!(
             align_speakers(&t(), &d(vec![turn(0, 100, 1), extra])).unwrap()[0],
             Some(1)
+        );
+    }
+    #[test]
+    fn single_speaker_track_labels_every_segment_speaker_one() {
+        // Reproduces the reported bug: a track where diarization only ever
+        // found one speaker (so every turn's confidence is the sherpa-onnx
+        // sentinel, normalized to `None`) used to leave every segment
+        // unlabeled ("Remote" fallback) instead of consistently "Speaker 1".
+        let mut turns = vec![turn(0, 100, 3), turn(100, 200, 3), turn(200, 300, 3)];
+        for turn in &mut turns {
+            turn.confidence = None;
+        }
+        assert_eq!(
+            align_speakers(&t(), &d(turns)).unwrap(),
+            vec![Some(1), Some(1), Some(1)]
         );
     }
 }
