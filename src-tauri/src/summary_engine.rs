@@ -4,7 +4,7 @@
 use crate::{
     ollama_client::{self, chunk_schema, summary_schema, OllamaClient},
     recording::Recording,
-    summary_types::SummaryOutput,
+    summary_types::{OwnerContext, SummaryOutput},
     transcription_types::Transcript,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,12 +77,17 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
-fn parse_summary(raw: &str) -> Result<SummaryOutput, String> {
-    let output: SummaryOutput = serde_json::from_str(raw)
+fn parse_summary(raw: &str, owner_context: &OwnerContext<'_>) -> Result<SummaryOutput, String> {
+    let mut output: SummaryOutput = serde_json::from_str(raw)
         .map_err(|e| format!("Ollama returned a summary that did not match the expected shape: {e}"))?;
     if !output.is_meaningful() {
         return Err("Ollama returned an empty summary.".into());
     }
+    // Belt-and-suspenders against the prompt instruction being ignored: an
+    // owner that is not a real speaker label or a name literally present in
+    // the transcript (e.g. "Remote", "Participants") is dropped rather than
+    // surfaced -- see `summary_types::OwnerContext`.
+    output.sanitize_owners(owner_context);
     Ok(output)
 }
 
@@ -131,13 +136,15 @@ impl SummaryEngine for OllamaSummaryEngine {
         );
         let num_ctx = choose_num_ctx(full_text.len());
         let chunks = ollama_client::plan_chunks(&request.transcript.segments, num_ctx);
+        let device_names: Vec<String> = request.recording.tracks.iter().map(|t| t.name.clone()).collect();
+        let owner_context = OwnerContext::new(&request.local_speaker_name, &device_names, &full_text);
         progress(0);
         if chunks.len() <= 1 {
             let system = ollama_client::prompts(language.as_deref(), false);
             let raw = client.chat(&request.model, &system, &full_text, summary_schema(), num_ctx)?;
             check_cancelled(cancelled)?;
             progress(100);
-            return parse_summary(&raw);
+            return parse_summary(&raw, &owner_context);
         }
         // Map: one narrative-notes call per chunk.
         let mut notes = Vec::with_capacity(chunks.len());
@@ -169,7 +176,7 @@ impl SummaryEngine for OllamaSummaryEngine {
         let raw = client.chat(&request.model, &merge_system, &merged_input, summary_schema(), merge_ctx)?;
         check_cancelled(cancelled)?;
         progress(100);
-        parse_summary(&raw)
+        parse_summary(&raw, &owner_context)
     }
     fn list_models(&self, ollama_url: &str) -> Result<Vec<String>, String> {
         OllamaClient::new(ollama_url)?.list_models()
@@ -206,20 +213,39 @@ mod tests {
         t.languages_used = vec![];
         assert_eq!(language_hint(&t), None);
     }
+    fn no_owner_context() -> OwnerContext<'static> {
+        OwnerContext::new("You", &[], "")
+    }
     #[test]
     fn parse_summary_rejects_empty_content() {
         let empty = serde_json::to_string(&SummaryOutput::default()).unwrap();
-        assert!(parse_summary(&empty).is_err());
+        assert!(parse_summary(&empty, &no_owner_context()).is_err());
         let filled = SummaryOutput {
             title: "Weekly sync".into(),
             summary: "Discussed the roadmap.".into(),
             key_points: vec!["Roadmap reviewed".into()],
             ..Default::default()
         };
-        assert!(parse_summary(&serde_json::to_string(&filled).unwrap()).is_ok());
+        assert!(parse_summary(&serde_json::to_string(&filled).unwrap(), &no_owner_context()).is_ok());
     }
     #[test]
     fn parse_summary_rejects_malformed_json() {
-        assert!(parse_summary("not json").is_err());
+        assert!(parse_summary("not json", &no_owner_context()).is_err());
+    }
+    #[test]
+    fn parse_summary_drops_a_remote_owner() {
+        let filled = SummaryOutput {
+            title: "Sync".into(),
+            summary: "Discussed the plan.".into(),
+            key_points: vec!["Roadmap reviewed".into()],
+            action_items: vec![crate::summary_types::ActionItem {
+                task: "Confirm the spreadsheet details".into(),
+                owner: Some("Remote".into()),
+                due: None,
+            }],
+            ..Default::default()
+        };
+        let output = parse_summary(&serde_json::to_string(&filled).unwrap(), &no_owner_context()).unwrap();
+        assert_eq!(output.action_items[0].owner, None);
     }
 }
