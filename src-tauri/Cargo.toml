@@ -39,6 +39,8 @@ tauri-plugin-dialog = "2"
 # ollama_client.rs); default-features off drops the TLS stack we do not need
 # for loopback-only http:// requests.
 ureq = { version = "2", default-features = false, features = ["json"] }
+flacenc = "0.5.1"
+claxon = "0.4.3"
 
 [target.'cfg(windows)'.dependencies]
 # The upstream 1.13.8 static Windows archive is built with /MT, while

@@ -1,4 +1,7 @@
+mod audio_compress;
+mod audio_compress_store;
 mod audio_devices;
+mod audio_file;
 mod capture_meter;
 mod detection;
 mod diarization;
@@ -9,6 +12,8 @@ mod diarization_store;
 mod diarization_types;
 #[cfg(target_os = "linux")]
 mod linux_pulse;
+#[cfg(test)]
+mod flac_transcription_parity_tests;
 #[cfg(test)]
 mod meeting_management_tests;
 #[cfg(test)]
@@ -38,6 +43,7 @@ use audio_devices::{
 use detection::{
     DetectionService, DetectionSettings, MeetingDetector, RecordingBoundary, SignalSnapshot,
 };
+use audio_compress::{CompressionService, CompressionSettings};
 use diarization::DiarizationService;
 use diarization_store::DiarizationStore;
 use meeting_signals::{MeetingDetector as NativeDetectorTrait, NativeMeetingDetector};
@@ -655,6 +661,91 @@ async fn open_summary(recording_id: String, app: tauri::AppHandle) -> Result<(),
     .map_err(app_error)?
 }
 #[tauri::command]
+async fn get_compression_state(
+    app: tauri::AppHandle,
+) -> Result<audio_compress::CompressionState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<CompressionService>().state())
+        .await
+        .map_err(app_error)
+}
+#[tauri::command]
+async fn retry_compression(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<CompressionService>().retry(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[derive(Serialize)]
+struct RecordingAudioStorage {
+    recording_id: String,
+    bytes: u64,
+    original_bytes: u64,
+    format: &'static str,
+}
+#[derive(Serialize)]
+struct AudioStorageSummary {
+    total_bytes: u64,
+    total_original_bytes: u64,
+    recordings: Vec<RecordingAudioStorage>,
+}
+/// A best-effort size/format snapshot for the UI (see the library card and
+/// dashboard total). Reads only file sizes and durable track metadata --
+/// never audio content -- so it is cheap enough to poll alongside the other
+/// state commands.
+#[tauri::command]
+async fn audio_storage_summary(app: tauri::AppHandle) -> Result<AudioStorageSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app).map_err(app_error)?;
+        let recordings = RecordingStore::open(&root)?;
+        let mut recordings_summary = Vec::new();
+        let mut total_bytes = 0u64;
+        let mut total_original_bytes = 0u64;
+        for recording in recordings.finalized_eligible()? {
+            let mut bytes = 0u64;
+            let mut original_bytes = 0u64;
+            let mut any_flac = false;
+            let mut any_wav = false;
+            for track in &recording.tracks {
+                original_bytes = original_bytes.saturating_add(
+                    track
+                        .frames_written
+                        .saturating_mul(u64::from(track.channels))
+                        .saturating_mul(2),
+                );
+                if let Ok(metadata) = std::fs::metadata(&track.file_path) {
+                    bytes = bytes.saturating_add(metadata.len());
+                }
+                if audio_file::is_flac_path(std::path::Path::new(&track.file_path)) {
+                    any_flac = true;
+                } else {
+                    any_wav = true;
+                }
+            }
+            total_bytes = total_bytes.saturating_add(bytes);
+            total_original_bytes = total_original_bytes.saturating_add(original_bytes);
+            recordings_summary.push(RecordingAudioStorage {
+                recording_id: recording.recording_id,
+                bytes,
+                original_bytes,
+                format: match (any_flac, any_wav) {
+                    (true, false) => "flac",
+                    (false, true) => "wav",
+                    (true, true) => "mixed",
+                    (false, false) => "none",
+                },
+            });
+        }
+        Ok(AudioStorageSummary {
+            total_bytes,
+            total_original_bytes,
+            recordings: recordings_summary,
+        })
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
 async fn start_recording(
     app: tauri::AppHandle,
     recording: State<'_, RecordingService>,
@@ -750,7 +841,8 @@ fn request_exit(app: &tauri::AppHandle, service: RecordingService, gate: &ExitGa
             .shutdown()
             .and_then(|()| app.state::<TranscriptionService>().shutdown())
             .and_then(|()| app.state::<DiarizationService>().shutdown())
-            .and_then(|()| app.state::<SummaryService>().shutdown());
+            .and_then(|()| app.state::<SummaryService>().shutdown())
+            .and_then(|()| app.state::<CompressionService>().shutdown());
         match result {
             Ok(()) => {
                 gate.0.store(EXIT_ALLOWED, Ordering::Release);
@@ -925,6 +1017,11 @@ pub fn run() {
         let settings = summary_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
         Ok(SummarySettings { enabled: settings.summary_enabled, ollama_url: settings.ollama_url, model: settings.summary_model })
     }), Arc::new(summary_engine::OllamaSummaryEngine::new())));
+    let compress_app = app.handle().clone();
+    app.manage(CompressionService::new(recording_dir.clone(), Arc::new(move || {
+        let settings = compress_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        Ok(CompressionSettings { enabled: settings.compress_audio })
+    })));
     let availability = match install_tray(app) {
         Ok(controls) => {
             app.manage(controls);
@@ -952,7 +1049,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

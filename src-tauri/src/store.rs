@@ -51,6 +51,12 @@ pub struct Settings {
     /// the recommended local model.
     #[serde(default = "default_summary_model")]
     pub summary_model: String,
+    /// Lossless FLAC compression of a finished recording's WAV tracks once no
+    /// pipeline stage still needs the raw audio (see `audio_compress.rs`).
+    /// Missing/legacy payloads default to enabled -- it only ever runs after
+    /// a verified bit-exact round trip, so it is safe to default on.
+    #[serde(default = "enabled_by_default")]
+    pub compress_audio: bool,
 }
 fn enabled_by_default() -> bool {
     true
@@ -106,6 +112,7 @@ impl Default for Settings {
             summary_enabled: enabled_by_default(),
             ollama_url: default_ollama_url(),
             summary_model: default_summary_model(),
+            compress_audio: enabled_by_default(),
         }
     }
 }
@@ -246,6 +253,7 @@ mod tests {
             summary_enabled: false,
             ollama_url: "http://localhost:11434".into(),
             summary_model: "qwen2.5:7b-instruct".into(),
+            compress_audio: false,
         };
         store.save(expected.clone()).unwrap();
         drop(store);

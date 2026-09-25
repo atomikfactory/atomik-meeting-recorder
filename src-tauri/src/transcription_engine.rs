@@ -362,6 +362,9 @@ impl LocalWhisperEngine {
 fn decode_track_16k(path: &Path) -> Result<Vec<f32>, String> {
     #[cfg(test)]
     DECODE_TRACK_16K_CALLS.fetch_add(1, Ordering::Relaxed);
+    if crate::audio_file::is_flac_path(path) {
+        return decode_flac_track_16k(path);
+    }
     let header = validate_wav(path)?;
     if header.channels == 0 || header.sample_rate == 0 {
         return Err("WAV has an invalid channel count or sample rate.".into());
@@ -387,6 +390,26 @@ fn decode_track_16k(path: &Path) -> Result<Vec<f32>, String> {
             break;
         }
         pcm16k.extend(resample_16k(mono, spec.sample_rate)?);
+    }
+    Ok(pcm16k)
+}
+
+/// As `decode_track_16k`, for a track that `audio_compress.rs` has already
+/// losslessly re-encoded to FLAC (see `audio_file.rs`). Same chunked
+/// mono-averaging and resampling; only the sample source differs.
+fn decode_flac_track_16k(path: &Path) -> Result<Vec<f32>, String> {
+    let (info, mut cursor) = crate::audio_file::FlacSampleCursor::open(path)?;
+    if info.channels == 0 || info.sample_rate == 0 {
+        return Err("FLAC has an invalid channel count or sample rate.".into());
+    }
+    let chunk_frames = (u64::from(info.sample_rate) * u64::from(MAX_CHUNK_SECONDS)).max(1) as usize;
+    let mut pcm16k = Vec::new();
+    loop {
+        let mono = cursor.read_mono_chunk(info.channels, chunk_frames)?;
+        if mono.is_empty() {
+            break;
+        }
+        pcm16k.extend(resample_16k(mono, info.sample_rate)?);
     }
     Ok(pcm16k)
 }
@@ -871,6 +894,9 @@ pub(crate) fn load_wav_16k_mono(
     path: &Path,
     max_duration_seconds: u64,
 ) -> Result<Vec<f32>, String> {
+    if crate::audio_file::is_flac_path(path) {
+        return load_flac_16k_mono(path, max_duration_seconds);
+    }
     let header = validate_wav(path)?;
     let max_frames = max_duration_seconds
         .checked_mul(u64::from(header.sample_rate))
@@ -911,6 +937,48 @@ pub(crate) fn load_wav_16k_mono(
             break;
         }
         let resampled = resample_16k(mono, spec.sample_rate)?;
+        if output.len().saturating_add(resampled.len()) > output_limit {
+            return Err(format!(
+                "Recorded source exceeds the {} minute diarization limit.",
+                max_duration_seconds / 60
+            ));
+        }
+        output.extend(resampled);
+    }
+    Ok(output)
+}
+
+/// As `load_wav_16k_mono`, for a FLAC track (see `audio_file.rs`). The
+/// per-loop `output_limit` check is authoritative for the duration cap in
+/// either format; the upfront check here is only possible when the FLAC
+/// stream recorded its total sample count (our own encoder always does).
+fn load_flac_16k_mono(path: &Path, max_duration_seconds: u64) -> Result<Vec<f32>, String> {
+    let (info, mut cursor) = crate::audio_file::FlacSampleCursor::open(path)?;
+    let max_frames = max_duration_seconds
+        .checked_mul(u64::from(info.sample_rate))
+        .ok_or_else(|| "FLAC duration limit overflowed.".to_string())?;
+    if let Some(frames) = info.frames {
+        if frames > max_frames {
+            return Err(format!(
+                "Recorded source exceeds the {} minute diarization limit.",
+                max_duration_seconds / 60
+            ));
+        }
+    }
+    let output_limit = usize::try_from(
+        max_duration_seconds
+            .checked_mul(u64::from(TARGET_RATE))
+            .ok_or_else(|| "FLAC duration limit overflowed.".to_string())?,
+    )
+    .map_err(|_| "FLAC duration limit is too large for this platform.".to_string())?;
+    let chunk_frames = (u64::from(info.sample_rate) * u64::from(MAX_CHUNK_SECONDS)).max(1) as usize;
+    let mut output = Vec::new();
+    loop {
+        let mono = cursor.read_mono_chunk(info.channels, chunk_frames)?;
+        if mono.is_empty() {
+            break;
+        }
+        let resampled = resample_16k(mono, info.sample_rate)?;
         if output.len().saturating_add(resampled.len()) > output_limit {
             return Err(format!(
                 "Recorded source exceeds the {} minute diarization limit.",
