@@ -142,6 +142,54 @@ approval, end grace, the SQLite duplicate-episode latch, and "never record
 without approval" (see [detection.md](detection.md)). The extension only ever
 supplies a *signal*; it has no path to start or stop a recording directly.
 
+## Testing
+
+Three layers, from fastest/narrowest to slowest/broadest:
+
+- **Pure logic** (`npm run test:extension`, `node --test
+  browser-extension/test/*.test.mjs`): `content-logic.js`'s `decideState`/
+  `cleanTitle` and `tab-id.js`'s `opaqueTabId`, exercised directly with
+  hand-derived signal snapshots. No browser involved.
+- **Settings UI** (`npm test`, `tests/browser-extension.spec.ts`): the app's
+  own Settings page (Connect/Disconnect, status, folder button), driven
+  through a mocked `__TAURI_INTERNALS__.invoke` -- the extension itself is
+  never loaded.
+- **Real-browser runtime** (`npm run test:extension:browser`,
+  `tests-extension/runtime.spec.ts`): loads the actual, unpacked extension
+  into a real Chromium via Playwright's `launchPersistentContext` with
+  `--load-extension`, against small local Meet fixture pages (`browser-extension/test/fixtures/*.html`,
+  served from a throwaway local HTTP server -- never the real
+  meet.google.com). This is the only layer that exercises
+  `content-runtime.js`'s DOM polling/heartbeat timers and `background.js`'s
+  message relay in a real page/service-worker environment, and it caught a
+  real bug: content scripts silently loaded as classic (non-module) scripts
+  despite `"type": "module"` in `content_scripts` (not a real manifest key),
+  so `content-meet.js`/`content-teams.js`/`content-zoom.js`'s static `import`
+  threw at runtime in an actual browser. The fix (dynamic `import()` via
+  `chrome.runtime.getURL`, plus the now-required `web_accessible_resources`
+  entry) is what's shipped in `manifest.json`/`manifest.firefox.json` today.
+
+  This test never touches the real native-messaging host or a real browser
+  profile: `scripts/build-extension-test.mjs` copies `browser-extension/`
+  into a gitignored `test-results/extension-under-test/` and, only in that
+  copy, (1) adds one match pattern scoped to `http://127.0.0.1:<port>/` --
+  the port the test's own fixture server is listening on -- to
+  `host_permissions`/`content_scripts`/`web_accessible_resources`, (2)
+  prepends a test-only shim that stubs `chrome.runtime.connectNative` and
+  captures every message the extension would have sent into
+  `chrome.storage.session` (read back by the test via the extension's
+  service worker), and (3) shortens `content-runtime.js`'s poll/heartbeat
+  intervals so the test doesn't wait out the real 15s cadence. The shipped
+  manifests and `background.js`/`content-runtime.js` are never modified.
+
+  Requires Chromium (`npx playwright install chromium`; the rest of this
+  repo's Playwright tests use the `msedge`/system-`chromium` channel, which
+  doesn't support `--load-extension`). The test skips itself with a clear
+  message, rather than failing, if Chromium isn't installed or a persistent
+  context with an extension can't be launched. It isn't part of `npm test`
+  for the same reason: it needs its own browser binary and is slower, so
+  it's run separately (and, in CI, only where that binary is available).
+
 ## Limitations
 
 - **Selector fragility**: the in-call/lobby/ended heuristics

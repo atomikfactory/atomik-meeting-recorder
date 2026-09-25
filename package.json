@@ -11,7 +11,8 @@
     "tauri:build:cuda": "tauri build --features cuda --config src-tauri/tauri.cuda.conf.json",
     "test": "playwright test",
     "test:ui": "playwright test",
-    "test:extension": "node --test browser-extension/test/*.test.mjs"
+    "test:extension": "node --test browser-extension/test/*.test.mjs",
+    "test:extension:browser": "playwright test --config=playwright.extension.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

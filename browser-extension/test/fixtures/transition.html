@@ -1,0 +1,50 @@
+<!-- Scripted lobby -> in-call -> left-meeting walkthrough for the real-browser
+     extension runtime test (tests-extension/runtime.spec.ts). Reuses the same
+     aria-labels/title/body text as the static lobby.html / in-call.html /
+     left-meeting.html fixtures (kept in sync by hand) so the same
+     content-logic.js decisions apply, but wires the "Join now" and
+     "Leave call" controls to actually flip the visible state, so the test
+     can drive it with real clicks instead of only mutating the DOM from the
+     test harness. -->
+<!doctype html>
+<html>
+  <head><title>Meet - abc-defg-hij</title></head>
+  <body>
+    <div id="stage"></div>
+    <script>
+      const PHASES = {
+        lobby: {
+          title: "Meet - abc-defg-hij",
+          html:
+            '<div>Ready to join?</div>' +
+            '<button aria-label="Turn on microphone">Mic</button>' +
+            '<button aria-label="Turn on camera">Cam</button>' +
+            '<button aria-label="Join now" onclick="setPhase(\'in_call\')">Join now</button>',
+        },
+        in_call: {
+          title: "Meet - Weekly sync",
+          html:
+            '<div>Weekly sync</div>' +
+            '<button aria-label="Turn off microphone">Mic</button>' +
+            '<button aria-label="Chat with everyone">Chat</button>' +
+            '<button aria-label="Leave call" onclick="setPhase(\'ended\')">Leave call</button>',
+        },
+        ended: {
+          title: "Meet - abc-defg-hij",
+          html:
+            "<div>You've left the meeting</div>" +
+            '<button aria-label="Rejoin">Rejoin</button>' +
+            '<button aria-label="Return to home screen">Return to home screen</button>',
+        },
+      };
+
+      function setPhase(phase) {
+        document.title = PHASES[phase].title;
+        document.getElementById("stage").innerHTML = PHASES[phase].html;
+      }
+
+      window.setPhase = setPhase;
+      setPhase("lobby");
+    </script>
+  </body>
+</html>
