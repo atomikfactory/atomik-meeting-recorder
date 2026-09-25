@@ -36,12 +36,33 @@ pub struct Settings {
     /// one. Missing/legacy payloads default to enabled.
     #[serde(default = "enabled_by_default")]
     pub dedupe_echo_segments: bool,
+    /// Local meeting summaries via a local Ollama server (see `summary.rs`).
+    /// Missing/legacy payloads default to enabled; it is harmless when Ollama is
+    /// absent -- jobs simply wait with a clear message. Missing/legacy payloads
+    /// default to enabled.
+    #[serde(default = "enabled_by_default")]
+    pub summary_enabled: bool,
+    /// Loopback-only (see `ollama_client::validate_loopback_url`) so summaries
+    /// can never leave this device, matching the app's "no cloud requests"
+    /// guarantee. Missing/legacy payloads default to the standard local port.
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    /// An Ollama model tag, e.g. "qwen3:8b". Missing/legacy payloads default to
+    /// the recommended local model.
+    #[serde(default = "default_summary_model")]
+    pub summary_model: String,
 }
 fn enabled_by_default() -> bool {
     true
 }
 fn default_language() -> String {
     "auto".into()
+}
+fn default_ollama_url() -> String {
+    "http://127.0.0.1:11434".into()
+}
+fn default_summary_model() -> String {
+    "qwen3:8b".into()
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AudioSourceSelection {
@@ -82,6 +103,9 @@ impl Default for Settings {
             transcription_language: default_language(),
             echo_cancellation: enabled_by_default(),
             dedupe_echo_segments: enabled_by_default(),
+            summary_enabled: enabled_by_default(),
+            ollama_url: default_ollama_url(),
+            summary_model: default_summary_model(),
         }
     }
 }
@@ -100,6 +124,13 @@ impl Settings {
         if !is_valid_language(&self.transcription_language) {
             return Err(StoreError::Validation(
                 "Transcription language must be \"auto\" or a lowercase ISO 639-1 code.".into(),
+            ));
+        }
+        crate::ollama_client::validate_loopback_url(&self.ollama_url)
+            .map_err(StoreError::Validation)?;
+        if self.summary_model.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "Summary model must not be empty.".into(),
             ));
         }
         Ok(())
@@ -212,6 +243,9 @@ mod tests {
             transcription_language: "fr".into(),
             echo_cancellation: false,
             dedupe_echo_segments: false,
+            summary_enabled: false,
+            ollama_url: "http://localhost:11434".into(),
+            summary_model: "qwen2.5:7b-instruct".into(),
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -286,6 +320,51 @@ mod tests {
         let parsed: Settings = serde_json::from_str(r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"turbo","transcription_language":"fr"}"#).unwrap();
         assert_eq!(parsed.whisper_model, WhisperModel::Turbo);
         assert_eq!(parsed.transcription_language, "fr");
+    }
+    #[test]
+    fn legacy_json_migrates_with_summary_defaults() {
+        let parsed: Settings = serde_json::from_str(r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#).unwrap();
+        assert!(parsed.summary_enabled);
+        assert_eq!(parsed.ollama_url, "http://127.0.0.1:11434");
+        assert_eq!(parsed.summary_model, "qwen3:8b");
+    }
+    #[test]
+    fn non_loopback_ollama_url_does_not_replace_saved_value() {
+        let p = path("ollama-url.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                ollama_url: "http://example.com:11434".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert!(store
+            .save(Settings {
+                ollama_url: "http://192.168.1.5:11434".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert!(store
+            .save(Settings {
+                ollama_url: "http://localhost:11434".into(),
+                ..good.clone()
+            })
+            .is_ok());
+        assert_eq!(store.get().unwrap().ollama_url, "http://localhost:11434");
+    }
+    #[test]
+    fn empty_summary_model_does_not_replace_saved_value() {
+        let p = path("summary-model.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                summary_model: "".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
     }
     #[test]
     fn invalid_language_does_not_replace_saved_value() {

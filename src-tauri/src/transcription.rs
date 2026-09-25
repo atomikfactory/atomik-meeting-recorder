@@ -4,6 +4,7 @@ use crate::{
     recording::Recording,
     recording_paths::resolved_recording_directory,
     recording_store::RecordingStore,
+    summary_store::SummaryStore,
     transcription_engine::{hash_model, inspect_model, TranscriptionEngine},
     transcription_store::{StoredJob, TranscriptionStore},
     transcription_types::{ModelInfo, Transcript, TranscriptionRequest},
@@ -417,6 +418,7 @@ impl TranscriptionService {
             &intent.archive_id,
         )?;
         DiarizationStore::open(&self.root.join("diarization.sqlite3"))?.remove_if_idle(id)?;
+        SummaryStore::open(&self.root.join("summary.sqlite3"))?.remove_if_idle(id)?;
         store.finish_restart(id, &intent.model_key, &intent.model_hash)
     }
     pub fn transcript_path(&self, id: &str) -> Result<PathBuf, String> {
@@ -545,6 +547,8 @@ fn archive_outputs(directory: &Path, id: &str, archive_id: &str) -> Result<(), S
         "transcript.md",
         "speakers.json",
         "transcript-speakers.md",
+        "summary.json",
+        "summary.md",
     ] {
         let source = output_path(directory, name)?;
         let destination = archive.join(name);
@@ -587,6 +591,7 @@ fn recover_restart_intents(
         )?;
         DiarizationStore::open(&root.join("diarization.sqlite3"))?
             .remove_if_idle(&intent.recording_id)?;
+        SummaryStore::open(&root.join("summary.sqlite3"))?.remove_if_idle(&intent.recording_id)?;
         store.finish_restart(&intent.recording_id, &intent.model_key, &intent.model_hash)?;
     }
     Ok(())

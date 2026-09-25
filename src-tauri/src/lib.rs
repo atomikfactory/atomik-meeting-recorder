@@ -13,12 +13,17 @@ mod linux_pulse;
 mod meeting_management_tests;
 mod meeting_signals;
 mod meeting_title;
+mod ollama_client;
 mod recording;
 mod recording_paths;
 mod recording_store;
 mod recording_wav;
 mod speaker_alignment;
 mod store;
+mod summary;
+mod summary_engine;
+mod summary_store;
+mod summary_types;
 mod system_output;
 mod transcription;
 mod transcription_engine;
@@ -47,6 +52,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use store::{AudioSourceDirection, AudioSourceSelection, Settings, SettingsStorage};
+use summary::{SummaryService, SummarySettings};
+use summary_engine::SummaryEngine;
+use summary_store::SummaryStore;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder};
 use tauri::{Emitter, Manager, State};
@@ -240,17 +248,20 @@ fn get_settings(store: State<'_, Mutex<SettingsStorage>>) -> Result<Settings, St
 fn save_settings(
     settings: Settings,
     store: State<'_, Mutex<SettingsStorage>>,
+    summary: State<'_, SummaryService>,
 ) -> Result<Settings, String> {
     // General preferences must not be an escape hatch around validated source
     // selection. Keep the persisted selection until the dedicated command runs.
     let mut storage = store.lock().map_err(app_error)?;
     let existing = storage.load().map_err(app_error)?;
-    storage
-        .save(Settings {
-            audio_sources: existing.audio_sources,
-            ..settings
-        })
-        .map_err(app_error)
+    let saved = storage.save(Settings {
+        audio_sources: existing.audio_sources,
+        ..settings
+    }).map_err(app_error)?;
+    // A user who just enabled summaries, or fixed the URL/model, expects a
+    // waiting job to resume immediately rather than sit out its backoff.
+    let _ = summary.wake_waiting();
+    Ok(saved)
 }
 #[tauri::command]
 async fn get_audio_devices(
@@ -456,9 +467,17 @@ async fn restart_transcription(recording_id: String, app: tauri::AppHandle) -> R
         {
             return Err("Speaker identification is in progress; wait for it to finish before restarting transcription.".into());
         }
+        let summaries = SummaryStore::open(&root.join("summary.sqlite3"))?;
+        if summaries
+            .get(&recording_id)?
+            .is_some_and(|job| job.status == "summarizing")
+        {
+            return Err("Summarizing is in progress; wait for it to finish before restarting transcription.".into());
+        }
         app.state::<TranscriptionService>()
             .restart_transcription(&recording_id)?;
-        speakers.remove_if_idle(&recording_id)
+        speakers.remove_if_idle(&recording_id)?;
+        summaries.remove_if_idle(&recording_id)
     })
     .await
     .map_err(app_error)?
@@ -506,6 +525,7 @@ async fn delete_recording(
         TranscriptionStore::open(&root.join("transcription.sqlite3"))?
             .remove_if_idle(&recording_id)?;
         DiarizationStore::open(&root.join("diarization.sqlite3"))?.remove_if_idle(&recording_id)?;
+        SummaryStore::open(&root.join("summary.sqlite3"))?.remove_if_idle(&recording_id)?;
         service.refresh_history()
     })
     .await
@@ -570,14 +590,64 @@ async fn open_transcript(recording_id: String, app: tauri::AppHandle) -> Result<
                 .state::<TranscriptionService>()
                 .transcript_path(&recording_id)?,
         };
-        #[cfg(target_os = "windows")]
-        let mut command = std::process::Command::new("explorer");
-        #[cfg(target_os = "macos")]
-        let mut command = std::process::Command::new("open");
-        #[cfg(target_os = "linux")]
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(path).spawn().map_err(app_error)?;
-        Ok(())
+        open_file(&path)
+    })
+    .await
+    .map_err(app_error)?
+}
+fn open_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(path).spawn().map_err(app_error)?;
+    Ok(())
+}
+#[tauri::command]
+async fn get_summary_state(app: tauri::AppHandle) -> Result<summary::SummaryState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<SummaryService>().state())
+        .await
+        .map_err(app_error)
+}
+#[tauri::command]
+async fn list_summary_models(ollama_url: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        summary_engine::OllamaSummaryEngine::new().list_models(&ollama_url)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn test_ollama_connection(ollama_url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        summary_engine::OllamaSummaryEngine::new().test_connection(&ollama_url)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn retry_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<SummaryService>().retry(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn regenerate_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<SummaryService>().regenerate(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn open_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = app.state::<SummaryService>().summary_path(&recording_id)?;
+        open_file(&path)
     })
     .await
     .map_err(app_error)?
@@ -677,7 +747,8 @@ fn request_exit(app: &tauri::AppHandle, service: RecordingService, gate: &ExitGa
         let result = service
             .shutdown()
             .and_then(|()| app.state::<TranscriptionService>().shutdown())
-            .and_then(|()| app.state::<DiarizationService>().shutdown());
+            .and_then(|()| app.state::<DiarizationService>().shutdown())
+            .and_then(|()| app.state::<SummaryService>().shutdown());
         match result {
             Ok(()) => {
                 gate.0.store(EXIT_ALLOWED, Ordering::Release);
@@ -847,6 +918,11 @@ pub fn run() {
     app.manage(DiarizationService::new(recording_dir.clone(), Arc::new(move || {
         Ok(speaker_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?.diarization_enabled)
     }), Arc::new(diarization_engine::LocalDiarizationEngine::new())));
+    let summary_app = app.handle().clone();
+    app.manage(SummaryService::new(recording_dir.clone(), Arc::new(move || {
+        let settings = summary_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        Ok(SummarySettings { enabled: settings.summary_enabled, ollama_url: settings.ollama_url, model: settings.summary_model })
+    }), Arc::new(summary_engine::OllamaSummaryEngine::new())));
     let availability = match install_tray(app) {
         Ok(controls) => {
             app.manage(controls);
@@ -874,7 +950,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, quit_application]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();
