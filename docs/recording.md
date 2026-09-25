@@ -25,7 +25,7 @@ recordings/
   recordings.sqlite3
   meetings/
     YYYY-MM-DD_HH-mm-ss_meeting_title--<recording-uuid>/
-      track-00.wav
+      track-00.wav          # or track-00.flac once compressed (see below)
       track-01.wav
       transcript.json        # after local transcription
       transcript.md          # after local transcription
@@ -66,6 +66,22 @@ While recording, state polling exposes per-source peak/RMS dBFS telemetry, a sho
 Recent history is intentionally limited to the 25 newest rows; it is not an audio-discovery scan. Older recordings remain indexed and remain in their original folders, so **Open folder** on a selected history row always resolves that row's durable metadata rather than guessing from a title.
 
 Manual transcription is available per finalized recording. Selecting **Transcribe** opts in only that retained recording (including a legacy recording whose `auto_transcribe` flag was absent or false); it queues local work with the selected model and never starts capture, downloads a model, or reads unrelated recordings. Completed and pending jobs remain immutable/idempotent, while an explicit retry retains its pinned model.
+
+## Storage: lossless FLAC compression of finished audio
+
+Once a recording is settled (`recorded` or `interrupted`, never while active) and every pipeline stage that still needs the raw audio has itself settled -- transcription `completed`/`failed`, and speaker identification `completed`/`failed`/disabled -- a low-priority background stage (`audio_compress.rs`) losslessly re-encodes each WAV track to FLAC (`flacenc` for encoding, `claxon` for decoding; pure Rust, no system libraries) and removes the now-redundant WAV. It shares the same serialized processing guard as Whisper/diarization, so it never competes with them for CPU, and it is controlled by the **Compress finished recordings to FLAC** setting (default on).
+
+This is intentionally conservative about safety, since it deletes audio:
+
+1. Encode to a brand-new temp file in the same directory as the WAV, then `fsync` it.
+2. Decode that temp file back and compare every sample against the original WAV for exact equality. Any mismatch, or any error, deletes the temp file and records a job error -- the WAV is never touched.
+3. Only once verified bit-exact: atomically rename the temp file onto its final `.flac` name.
+4. Update the recording's metadata (`file_path` for that track) in one SQLite transaction.
+5. Only now delete the original WAV.
+
+A crash at any point leaves either the WAV still referenced (with, at worst, an orphaned, harmless temp file) or the FLAC already referenced (with, at worst, a redundant WAV still on disk); startup recovery removes orphan temp files and finishes whichever half of the swap did not complete, and never deletes a WAV unless a verified FLAC is the one the metadata already names. A track shorter than FLAC's own minimum block size (32 samples -- far below any real meeting audio) is left as WAV rather than worked around. Existing recordings are picked up the same way new ones are, on the same eligibility scan.
+
+Every audio reader -- transcription decode, speaker identification, restart, and this stage's own verification -- goes through a small shared `audio_file` abstraction that accepts either format transparently, so compression is invisible to the rest of the pipeline. The dashboard/settings page shows a running "Audio on disk" total, and each library card shows its format and size once compressed (e.g. "FLAC · 12.3 MB (saved 51%)").
 
 ## Meeting management and status meaning
 

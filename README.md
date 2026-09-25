@@ -35,6 +35,7 @@ npm run build
 - x86-64-v3 (AVX2) CPU baseline for local transcription, and an optional CUDA build for GPU transcription (see Build and verify below)
 - Optional local speaker-identification stage with separately imported segmentation and voice models; it never blocks transcription
 - Optional local meeting summaries (title, key points, decisions, action items, open questions) via a local [Ollama](https://ollama.com) server, loopback-only so summaries never leave this device; see [local summaries](docs/summary.md)
+- Optional lossless FLAC compression of a finished recording's WAV tracks once transcription and speaker identification no longer need the raw audio, verified bit-exact before the WAV is ever removed; see [recording behavior](docs/recording.md#storage-lossless-flac-compression-of-finished-audio)
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
 
