@@ -74,6 +74,9 @@ type CompressionJob = { recording_id:string; status:string; progress:number; err
 type CompressionState = { enabled:boolean; inhibited:boolean; jobs:CompressionJob[]; error:string|null };
 type RecordingAudioStorage = { recording_id:string; bytes:number; original_bytes:number; format:"wav"|"flac"|"mixed"|"none" };
 type AudioStorageSummary = { total_bytes:number; total_original_bytes:number; recordings:RecordingAudioStorage[] };
+type SearchHit = { kind: string; seq: number; start_ms: number | null; end_ms: number | null; speaker: string | null; snippet_html: string };
+type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
+type SearchResults = { meetings: SearchMeeting[]; took_ms: number };
 type DetectionState = {
   supported: boolean;
   enabled: boolean;
@@ -125,6 +128,15 @@ const summaryActionInFlight = new Set<string>();
 let transcriptionPollInFlight = false;
 let renderedRecentRecordings: string | null = null;
 let historyQuery = "";
+// Full-text search across every recorded meeting's transcript and summary
+// (backed by the `search_transcripts` command's SQLite FTS5 index), distinct
+// from `historyQuery`'s client-side filter over just the 25 most recent rows.
+let transcriptSearchQuery = "";
+let transcriptSearchResults: SearchResults | null = null;
+let transcriptSearchLoading = false;
+let transcriptSearchError: string | null = null;
+let transcriptSearchDebounce: number | undefined;
+let transcriptSearchRequestId = 0;
 const transcribeInFlight = new Set<string>();
 let management: { kind:"rename"|"delete"|"restart"; id:string; title:string } | null = null;
 let managementBusy = false;
@@ -472,6 +484,96 @@ async function refreshDevices() {
   catch (error) { const errors = document.querySelector<HTMLElement>("#device-errors"); if (errors) errors.textContent = `Could not refresh audio devices: ${String(error)}`; }
   finally { inventoryRefreshing = false; if (refresh) refresh.disabled = false; }
 }
+function searchHitLabel(hit: SearchHit) {
+  switch (hit.kind) {
+    case "title": return "Meeting title";
+    case "summary": return "Summary";
+    case "key_point": return "Key point";
+    case "decision": return "Decision";
+    case "action_item": return "Action item";
+    default: return hit.speaker ? escapeHtml(hit.speaker) : "Transcript";
+  }
+}
+function formatHitTimestamp(ms: number | null) {
+  if (ms === null) return "";
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+function renderTranscriptSearchResults() {
+  if (!transcriptSearchQuery.trim()) return "";
+  if (transcriptSearchLoading && !transcriptSearchResults) return `<p class="search-status">Searching…</p>`;
+  if (transcriptSearchError) return `<p class="search-status" role="alert">Could not search: ${escapeHtml(transcriptSearchError)}</p>`;
+  const meetings = transcriptSearchResults?.meetings ?? [];
+  if (!meetings.length) return `<p class="search-status">No matches for “${escapeHtml(transcriptSearchQuery)}”.</p>`;
+  return `<div class="search-results">${meetings.map((meeting) => {
+    const started = new Date(meeting.started_at).toLocaleString();
+    const hits = meeting.hits.map((hit) => {
+      const timestamp = formatHitTimestamp(hit.start_ms);
+      return `<li class="search-hit" role="button" tabindex="0" data-open-search-hit="${escapeAttr(meeting.recording_id)}"><span class="search-hit-meta">${escapeHtml(searchHitLabel(hit))}${timestamp ? ` · ${timestamp}` : ""}</span><span class="search-hit-text">${hit.snippet_html}</span></li>`;
+    }).join("");
+    return `<article class="search-meeting"><header><b>${escapeHtml(meeting.title)}</b><small>${escapeHtml(started)}</small></header><ul>${hits}</ul></article>`;
+  }).join("")}</div>`;
+}
+function updateTranscriptSearchUI() {
+  const container = document.querySelector<HTMLElement>("#transcript-search-results");
+  if (container) container.innerHTML = renderTranscriptSearchResults();
+  document.querySelectorAll<HTMLElement>("[data-open-search-hit]").forEach((el) => {
+    const open = () => invoke("open_transcript", { recordingId: el.dataset.openSearchHit }).catch((error) => notice(String(error), "error"));
+    el.onclick = open;
+    el.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } };
+  });
+}
+async function runTranscriptSearch() {
+  const query = transcriptSearchQuery.trim();
+  if (!query) {
+    transcriptSearchResults = null;
+    transcriptSearchError = null;
+    transcriptSearchLoading = false;
+    updateTranscriptSearchUI();
+    return;
+  }
+  const requestId = ++transcriptSearchRequestId;
+  transcriptSearchLoading = true;
+  updateTranscriptSearchUI();
+  try {
+    const results = await invoke<SearchResults>("search_transcripts", { query, limit: 20 });
+    if (requestId !== transcriptSearchRequestId) return; // a newer query superseded this one
+    transcriptSearchResults = results;
+    transcriptSearchError = null;
+  } catch (error) {
+    if (requestId !== transcriptSearchRequestId) return;
+    transcriptSearchError = String(error);
+  } finally {
+    if (requestId === transcriptSearchRequestId) {
+      transcriptSearchLoading = false;
+      updateTranscriptSearchUI();
+    }
+  }
+}
+function wireTranscriptSearch() {
+  const input = document.querySelector<HTMLInputElement>("#transcript-search-input");
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = "true";
+  input.oninput = () => {
+    transcriptSearchQuery = input.value;
+    window.clearTimeout(transcriptSearchDebounce);
+    transcriptSearchDebounce = window.setTimeout(runTranscriptSearch, 150);
+  };
+  input.onkeydown = (event) => {
+    if (event.key === "Enter") {
+      window.clearTimeout(transcriptSearchDebounce);
+      runTranscriptSearch();
+    } else if (event.key === "Escape") {
+      window.clearTimeout(transcriptSearchDebounce);
+      transcriptSearchQuery = "";
+      input.value = "";
+      transcriptSearchResults = null;
+      transcriptSearchError = null;
+      transcriptSearchLoading = false;
+      updateTranscriptSearchUI();
+    }
+  };
+}
 function recentRecordings() {
   if (!recordingState.recent.length) return `<div class="empty"><div class="empty-wave">~~~</div><h3>Your recordings will appear here</h3><p>Audio and transcripts stay on this device. Import a local Whisper model in Settings to begin transcription. AppFlowy export is coming later.</p></div>`;
   const query=historyQuery.toLocaleLowerCase(); const visible=recordingState.recent.filter(r=>!query||`${r.meeting_title??"Meeting"} ${new Date(r.started_at).toLocaleString()}`.toLocaleLowerCase().includes(query));
@@ -659,6 +761,11 @@ function render() {
             <p id="detection-error" class="recording-error" role="alert"></p>
             <div id="detection-prompt" hidden><p>No audio is recorded until you approve. Make sure participants have consented.</p><div class="detection-actions"><button id="approve-meeting" class="primary">Record this meeting</button><button id="dismiss-meeting" class="secondary">Not this meeting</button></div></div>
           </section>
+          <div id="transcript-search" class="transcript-search">
+            <p class="kicker">SEARCH</p>
+            <input id="transcript-search-input" type="search" aria-label="Search all transcripts and summaries" placeholder="Search every meeting's transcript and summary…" value="${escapeAttr(transcriptSearchQuery)}"/>
+            <div id="transcript-search-results" role="region" aria-live="polite">${renderTranscriptSearchResults()}</div>
+          </div>
           <div class="section-head">
             <div>
               <p class="kicker">RECENT</p>
@@ -981,6 +1088,7 @@ function render() {
       refreshDeviceSection();
     }
   });
+  wireTranscriptSearch();
 }
 if (!preview) {
   listen("detection-state", () => {
