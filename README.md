@@ -34,6 +34,7 @@ npm run build
 - Optional offline acoustic echo cancellation of the microphone against loopback (an independent Rust implementation modeled on WebRTC AEC3's design, not a binding to it -- see `src-tauri/src/echo_cancel/LICENSE-WEBRTC` for the BSD-3 attribution this required), plus a separate text-level duplicate-line cleanup pass after transcription; both toggle independently in Settings
 - x86-64-v3 (AVX2) CPU baseline for local transcription, and an optional CUDA build for GPU transcription (see Build and verify below)
 - Optional local speaker-identification stage with separately imported segmentation and voice models; it never blocks transcription
+- Optional local meeting summaries (title, key points, decisions, action items, open questions) via a local [Ollama](https://ollama.com) server, loopback-only so summaries never leave this device; see [local summaries](docs/summary.md)
 
 To record, open Settings, select and save your sources, then use Start recording or approve a detected meeting. Meeting detection is enabled by default, but it never starts recording without your approval. Closing to the tray keeps recording on supported Windows/macOS setups; Quit finalizes local files. Audio stays local. Obtain participant consent before recording.
 
