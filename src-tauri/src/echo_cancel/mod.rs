@@ -54,6 +54,33 @@ pub struct EchoCancelStats {
     /// input track that is mostly double talk, or has almost no matching
     /// echo at all).
     pub erle_db: Option<f32>,
+    /// Per-block (pass 2, i.e. the actually-output pass) energy trace, in
+    /// timeline order and covering the whole track: whether far-end signal
+    /// was present in that block, the pre-AEC microphone RMS, and the
+    /// post-AEC (residual) RMS actually written to `output`. Empty when AEC
+    /// was not applied (`applied` is `false`). Consumed by
+    /// `residual_echo_gate` to decide, ahead of Whisper, whether a mic VAD
+    /// region is real near-end speech or leftover residual echo AEC did not
+    /// fully remove -- something the single aggregate `erle_db` figure above
+    /// cannot answer per-region.
+    pub blocks: Vec<BlockEnergy>,
+}
+
+/// One `block_len`-sample analysis block of a track's echo-cancellation pass;
+/// see `EchoCancelStats::blocks`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockEnergy {
+    /// Sample index (into the mic track's own 16 kHz buffer) this block starts at.
+    pub start_sample: usize,
+    /// Number of valid (non-padding) samples in this block.
+    pub len_samples: usize,
+    /// Whether the (delay-aligned) reference had far-end signal present
+    /// during this block (see `far_end_active_mask`).
+    pub far_end_active: bool,
+    /// RMS of the raw, pre-AEC microphone signal in this block.
+    pub mic_rms: f32,
+    /// RMS of the post-AEC signal actually written to `output` for this block.
+    pub residual_rms: f32,
 }
 
 /// Cancels acoustic echo from `mic` using `reference` (already summed, if
@@ -88,13 +115,17 @@ pub fn cancel_echo(mic: &[f32], reference: &[f32], sample_rate: u32) -> (Vec<f32
     // through any double talk (near-end contributions are uncorrelated with
     // the reference and average out over the recording) and hand pass 2 an
     // already-converged filter.
-    run_pass(&mut linear_filter, &mic_hp, &aligned_reference, n, None, false, &far_end_active);
+    run_pass(&mut linear_filter, &mic_hp, &aligned_reference, n, None, false, &far_end_active, None);
 
     // Pass 2: replay from the start with the converged filter (continuing to
     // adapt, now double-talk aware since the echo estimate is trustworthy
     // from the first block, to track any residual drift within the
     // recording), this time keeping the output and the ERLE statistics.
+    // Pass 2 is also the pass whose output actually reaches Whisper, so it is
+    // the one whose per-block energy trace `residual_echo_gate` needs; pass 1
+    // is thrown away entirely and never collects one (see `blocks` param).
     let mut output = Vec::with_capacity(mic_hp.len());
+    let mut blocks = Vec::new();
     let stats = run_pass(
         &mut linear_filter,
         &mic_hp,
@@ -103,6 +134,7 @@ pub fn cancel_echo(mic: &[f32], reference: &[f32], sample_rate: u32) -> (Vec<f32
         Some(&mut output),
         true,
         &far_end_active,
+        Some(&mut blocks),
     );
     output.truncate(mic.len());
 
@@ -112,6 +144,7 @@ pub fn cancel_echo(mic: &[f32], reference: &[f32], sample_rate: u32) -> (Vec<f32
             applied: true,
             estimated_delay_ms: Some(delay_ms),
             erle_db: stats.erle_db(),
+            blocks,
         },
     )
 }
@@ -128,6 +161,15 @@ impl PassStats {
     }
 }
 
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_pass(
     filter: &mut PartitionedFilter,
     mic: &[f32],
@@ -136,6 +178,7 @@ fn run_pass(
     mut output: Option<&mut Vec<f32>>,
     respect_double_talk: bool,
     far_end_active: &[bool],
+    mut blocks: Option<&mut Vec<BlockEnergy>>,
 ) -> PassStats {
     let mut dtd = DoubleTalkDetector::new();
     let mut stats = PassStats::default();
@@ -162,6 +205,16 @@ fn run_pass(
         if !far_end_active.get(block_index).copied().unwrap_or(true) {
             if let Some(output) = output.as_deref_mut() {
                 output.extend_from_slice(&mic_block[..len]);
+            }
+            if let Some(blocks) = blocks.as_deref_mut() {
+                let mic_rms = rms(&mic_block[..len]);
+                blocks.push(BlockEnergy {
+                    start_sample: start,
+                    len_samples: len,
+                    far_end_active: false,
+                    mic_rms,
+                    residual_rms: mic_rms,
+                });
             }
             start = end;
             block_index += 1;
@@ -192,6 +245,17 @@ fn run_pass(
         if far_end_only {
             stats.far_end_mic_energy += f64::from(mic_energy);
             stats.far_end_output_energy += f64::from(error_energy * gain * gain);
+        }
+        if let Some(blocks) = blocks.as_deref_mut() {
+            let mic_rms = rms(&mic_block[..len]);
+            let residual_rms = rms(&error[..len]) * gain;
+            blocks.push(BlockEnergy {
+                start_sample: start,
+                len_samples: len,
+                far_end_active: true,
+                mic_rms,
+                residual_rms,
+            });
         }
         if let Some(output) = output.as_deref_mut() {
             output.extend(error[..len].iter().map(|v| v * gain));

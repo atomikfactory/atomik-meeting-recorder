@@ -29,6 +29,7 @@ mod recording;
 mod recording_paths;
 mod recording_store;
 mod recording_wav;
+mod residual_echo_gate;
 mod speaker_alignment;
 mod store;
 mod summary;

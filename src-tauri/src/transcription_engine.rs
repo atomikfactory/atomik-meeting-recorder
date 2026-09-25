@@ -4,6 +4,7 @@ use crate::{
     echo_cancel, echo_dedup,
     recording::Track,
     recording_paths::resolved_recording_directory,
+    residual_echo_gate,
     transcription_types::{ModelInfo, Transcript, TranscriptSegment, TranscriptionRequest},
 };
 use hound::{SampleFormat, WavReader};
@@ -95,6 +96,42 @@ const VAD_MAX_WINDOW_SECONDS: u32 = 30;
 /// Segments this confident that a decoded window contained no speech are
 /// dropped instead of surfaced as (often hallucinated) text.
 const NO_SPEECH_DROP_THRESHOLD: f32 = 0.85;
+/// Looser than `NO_SPEECH_DROP_THRESHOLD` above: on its own this would drop
+/// too many legitimate quiet lines, but combined with the segment already
+/// overlapping weakly-suppressed far-end residual (see
+/// `residual_echo_gate::overlaps_weak_far_end_residual`) it is strong
+/// corroborating evidence the segment is a misheard echo rather than real
+/// speech.
+const RESIDUAL_ECHO_NO_SPEECH_THRESHOLD: f32 = 0.4;
+/// A segment whose tokens average at or below this probability, while also
+/// overlapping weak far-end residual audio, is dropped as likely-hallucinated
+/// echo text (see `RESIDUAL_ECHO_NO_SPEECH_THRESHOLD`).
+const RESIDUAL_ECHO_AVG_TOKEN_PROB_THRESHOLD: f32 = 0.5;
+
+/// The average per-token probability whisper.cpp assigned this segment ((see
+/// whisper-rs 0.16's `WhisperToken::token_probability`), or `1.0` (never
+/// treated as low-confidence) for a segment with no tokens at all -- which
+/// should not happen for a non-empty segment, but is not a reason to drop it
+/// here.
+fn segment_avg_token_probability(segment: &whisper_rs::WhisperSegment<'_>) -> f32 {
+    let n = segment.n_tokens();
+    if n <= 0 {
+        return 1.0;
+    }
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for index in 0..n {
+        if let Some(token) = segment.get_token(index) {
+            sum += token.token_probability();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        1.0
+    } else {
+        sum / count as f32
+    }
+}
 
 pub trait TranscriptionEngine: Send + Sync {
     fn transcribe(
@@ -195,6 +232,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
         progress(0);
         let mut run_track = |track: &Track,
                               samples: &[f32],
+                              echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
                               processed: &mut u32,
                               segments: &mut Vec<TranscriptSegment>,
                               directions: &mut Vec<&'static str>,
@@ -209,6 +247,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 &context,
                 track,
                 samples,
+                echo_blocks,
                 request.language.as_deref(),
                 cancelled,
                 segments,
@@ -237,6 +276,14 @@ impl TranscriptionEngine for LocalWhisperEngine {
             progress(end_progress);
             Ok(())
         };
+        // Per-track (input tracks only) echo-cancellation trace and derived
+        // near-end level, kept around after the transcription loop below so
+        // the echo_dedup pass can also flag mic segments as acoustically
+        // weak/far-end-dominated residual (see `PARTIAL_SIMILARITY_THRESHOLD`
+        // in `echo_dedup.rs`), the same signal `transcribe_decoded_track`
+        // used to gate them before Whisper ever saw them.
+        let mut echo_traces: std::collections::HashMap<String, (Vec<echo_cancel::BlockEnergy>, f32)> =
+            std::collections::HashMap::new();
         if let Some(handle) = aec_handle {
             // AEC only ever substitutes "input" tracks (see
             // `apply_echo_cancellation`); every other track's samples are
@@ -246,6 +293,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 run_track(
                     track,
                     samples,
+                    None,
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -257,10 +305,13 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 .join()
                 .map_err(|_| "Echo cancellation thread panicked.".to_string())?;
             warnings.extend(aec_warnings);
-            for (track, samples) in cleaned_inputs.iter() {
+            for (track, samples, blocks) in cleaned_inputs.iter() {
+                let near_end_level_rms = residual_echo_gate::derive_near_end_level_rms(blocks);
+                echo_traces.insert(track.source_id.clone(), (blocks.clone(), near_end_level_rms));
                 run_track(
                     track,
                     samples,
+                    Some(blocks.as_slice()),
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -273,6 +324,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 run_track(
                     track,
                     samples,
+                    None,
                     &mut processed,
                     &mut segments,
                     &mut directions,
@@ -288,10 +340,33 @@ impl TranscriptionEngine for LocalWhisperEngine {
         let sorted_segments: Vec<TranscriptSegment> =
             order.iter().map(|&i| segments[i].clone()).collect();
         let sorted_directions: Vec<&'static str> = order.iter().map(|&i| directions[i]).collect();
+        let weak_mic_energy: Vec<bool> = sorted_segments
+            .iter()
+            .zip(&sorted_directions)
+            .map(|(segment, direction)| {
+                if *direction != "input" {
+                    return false;
+                }
+                let Some((blocks, near_end_level_rms)) = echo_traces.get(&segment.source_id) else {
+                    return false;
+                };
+                let start_sample = (segment.start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let end_sample = (segment.end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                residual_echo_gate::overlaps_weak_far_end_residual(
+                    blocks,
+                    start_sample,
+                    end_sample,
+                    *near_end_level_rms,
+                )
+            })
+            .collect();
         let mut segments = sorted_segments;
         if request.dedupe_echo_segments {
-            let (deduped, removed) =
-                echo_dedup::dedupe_echo_segments(segments, &sorted_directions);
+            let (deduped, removed) = echo_dedup::dedupe_echo_segments_with_energy(
+                segments,
+                &sorted_directions,
+                &weak_mic_energy,
+            );
             segments = deduped;
             if removed > 0 {
                 warnings.push(format!(
@@ -442,10 +517,12 @@ fn decode_tracks_16k(
 /// VAD's per-window noise-floor adaptation and progress granularity
 /// unchanged from when this loop read straight from the WAV file (see
 /// `decode_track_16k`, which now does that reading).
+#[allow(clippy::too_many_arguments)]
 fn transcribe_decoded_track(
     context: &WhisperContext,
     track: &Track,
     pcm16k: &[f32],
+    echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
     language: Option<&str>,
     cancelled: &AtomicBool,
     segments: &mut Vec<TranscriptSegment>,
@@ -459,6 +536,14 @@ fn transcribe_decoded_track(
     // of letting each 60-second chunk re-detect (and potentially flip
     // languages mid-meeting on a quiet or code-switched chunk).
     let mut detected_language: Option<String> = None;
+    // Computed once per track (not per chunk): a per-recording estimate of
+    // what this user's own speech sounds like, derived from stretches where
+    // the remote side was silent. An empty trace (AEC never applied to this
+    // track) means `echo_blocks` gating below is always a no-op regardless
+    // of this value -- see `residual_echo_gate`.
+    let near_end_level_rms = echo_blocks
+        .map(residual_echo_gate::derive_near_end_level_rms)
+        .unwrap_or(0.0);
     while chunk_start < pcm16k.len() {
         check_cancelled(cancelled)?;
         let chunk_end = (chunk_start + CHUNK_SAMPLES_16K).min(pcm16k.len());
@@ -482,6 +567,26 @@ fn transcribe_decoded_track(
         // avoids a common source of hallucinated text ("Thank you.", repeated
         // lines) on near-silent input.
         let regions = detect_speech_regions(chunk, TARGET_RATE);
+        // Signal-level residual-echo gate (see `residual_echo_gate` and
+        // problem 1a in the tracking doc): a region whose energy AEC left
+        // behind is far-end-dominated echo tail rather than the user's own
+        // voice is dropped here, before it is ever handed to Whisper, so it
+        // cannot be misheard as invented local-user speech. A region where
+        // the remote side was not active for a majority of its span is never
+        // touched -- this can only ever remove far-end-dominated audio, never
+        // a near-end-only stretch.
+        let regions: Vec<(usize, usize)> = regions
+            .into_iter()
+            .filter(|&(window_start, window_end)| match echo_blocks {
+                Some(blocks) => !residual_echo_gate::is_residual_echo_region(
+                    blocks,
+                    chunk_start + window_start,
+                    chunk_start + window_end,
+                    near_end_level_rms,
+                ),
+                None => true,
+            })
+            .collect();
         for (window_start, window_end) in windows_for_regions(&regions, TARGET_RATE) {
             check_cancelled(cancelled)?;
             let window_offset_ms = offset_ms.saturating_add(
@@ -495,6 +600,8 @@ fn transcribe_decoded_track(
                 effective_language,
                 cancelled,
                 track,
+                echo_blocks,
+                near_end_level_rms,
                 segments,
             )?;
             if detected_language.is_none() {
@@ -520,6 +627,8 @@ fn decode_window(
     language: Option<&str>,
     cancelled: &AtomicBool,
     track: &Track,
+    echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
+    near_end_level_rms: f32,
     segments: &mut Vec<TranscriptSegment>,
 ) -> Result<Option<String>, String> {
     check_cancelled(cancelled)?;
@@ -586,6 +695,38 @@ fn decode_window(
             .saturating_add((segment.start_timestamp().max(0) as u64).saturating_mul(10));
         let end_ms = base_offset_ms
             .saturating_add((segment.end_timestamp().max(0) as u64).saturating_mul(10));
+        // Segment-level residual-echo filter (problem 1b): a mic segment
+        // whose span overlaps far-end-dominated, weakly-suppressed-residual
+        // audio *and* which Whisper itself was unsure about (high
+        // no-speech probability, or a low average per-token probability --
+        // both signs of a guessed transcription rather than a confident
+        // one) is dropped even though it slipped past the coarser
+        // window-level gate above (e.g. a short misheard word inside an
+        // otherwise-real region). This never fires for an output/loopback
+        // segment, and never fires when `echo_blocks` is empty/absent (no
+        // AEC ran on this track, or it is not an input track at all), so it
+        // can only ever remove echo-adjacent mic audio.
+        if track.direction != "output" {
+            if let Some(blocks) = echo_blocks {
+                let start_sample = (start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let end_sample = (end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let weak_far_end_residual = residual_echo_gate::overlaps_weak_far_end_residual(
+                    blocks,
+                    start_sample,
+                    end_sample,
+                    near_end_level_rms,
+                );
+                if weak_far_end_residual {
+                    let no_speech = segment.no_speech_probability();
+                    let avg_token_probability = segment_avg_token_probability(&segment);
+                    if no_speech >= RESIDUAL_ECHO_NO_SPEECH_THRESHOLD
+                        || avg_token_probability <= RESIDUAL_ECHO_AVG_TOKEN_PROB_THRESHOLD
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
         segments.push(TranscriptSegment {
             start_ms,
             end_ms: end_ms.max(start_ms),
@@ -1003,11 +1144,14 @@ fn load_flac_16k_mono(path: &Path, max_duration_seconds: u64) -> Result<Vec<f32>
 /// only one track direction, or where cancellation is a no-op for a
 /// specific track (e.g. a silent reference), costs nothing beyond the
 /// direction check and, for a no-op track, one buffer clone. Returns the
-/// (possibly-cleaned) input tracks' samples and any warnings generated --
-/// returned rather than written through a `&mut` so this can run on a
-/// background thread (see its caller in `transcribe`) while the main thread
-/// keeps transcribing tracks AEC never touches.
-type CleanedInputs = (Vec<(Track, Vec<f32>)>, Vec<String>);
+/// (possibly-cleaned) input tracks' samples, per-track echo-cancellation
+/// block-energy trace (empty when AEC did not apply to that track -- see
+/// `residual_echo_gate`, which treats an empty trace as "nothing to gate
+/// on"), and any warnings generated -- returned rather than written through a
+/// `&mut` so this can run on a background thread (see its caller in
+/// `transcribe`) while the main thread keeps transcribing tracks AEC never
+/// touches.
+type CleanedInputs = (Vec<(Track, Vec<f32>, Vec<echo_cancel::BlockEnergy>)>, Vec<String>);
 
 fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
     let mut warnings = Vec::new();
@@ -1018,7 +1162,7 @@ fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
     if output_tracks.is_empty() || input_tracks.is_empty() {
         let unchanged = input_tracks
             .into_iter()
-            .map(|(track, samples)| (track.clone(), samples.as_ref().clone()))
+            .map(|(track, samples)| (track.clone(), samples.as_ref().clone(), Vec::new()))
             .collect();
         return (unchanged, warnings);
     }
@@ -1041,9 +1185,9 @@ fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
             let (cleaned, stats) = echo_cancel::cancel_echo(mic, &reference, TARGET_RATE);
             if stats.applied {
                 cleaned_any = true;
-                ((*track).clone(), cleaned)
+                ((*track).clone(), cleaned, stats.blocks)
             } else {
-                ((*track).clone(), mic.as_ref().clone())
+                ((*track).clone(), mic.as_ref().clone(), Vec::new())
             }
         })
         .collect();
@@ -1355,9 +1499,10 @@ mod tests {
         ];
         let (result, warnings) = apply_echo_cancellation(pcm);
         assert_eq!(result.len(), 1, "only the input track's samples are returned");
-        let (cleaned_track, cleaned_samples) = &result[0];
+        let (cleaned_track, cleaned_samples, blocks) = &result[0];
         assert_eq!(cleaned_track.direction, "input");
         assert_ne!(cleaned_samples, &mic_samples, "input track should be cleaned in place");
+        assert!(!blocks.is_empty(), "a track AEC actually cleaned should have a block trace");
         assert!(warnings.iter().any(|w| w.contains("echo cancellation")));
     }
 

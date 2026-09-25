@@ -26,22 +26,47 @@ const OVERLAP_WINDOW_MS: u64 = 1_500;
 /// dilute the overlap below this threshold, since only an (almost) verbatim
 /// match is safe to drop outright.
 const DUPLICATE_SIMILARITY_THRESHOLD: f32 = 0.6;
+/// A much lower similarity bar used only for a mic segment that (a) lies
+/// inside an overlapping loopback segment's time span and (b) has weak
+/// post-AEC energy consistent with residual echo rather than real near-end
+/// speech (see `residual_echo_gate::overlaps_weak_far_end_residual`). This
+/// catches the case the strict `DUPLICATE_SIMILARITY_THRESHOLD` above cannot:
+/// Whisper *mishearing* residual echo as different words entirely (e.g. "I
+/// can leave here and I mentioned the 21st Thursday" for a remote line about
+/// "scrape the first information into the Google Drive"), where textual
+/// overlap is real but partial rather than near-verbatim. Deliberately not
+/// applied to every mic segment -- only ones already flagged as acoustically
+/// weak-and-far-end-dominated -- so a genuinely independent, low-volume
+/// near-end line is never at risk from this looser bar.
+const PARTIAL_SIMILARITY_THRESHOLD: f32 = 0.3;
+/// Slack allowed when checking that a mic segment's time span lies inside an
+/// overlapping loopback segment's span (see `PARTIAL_SIMILARITY_THRESHOLD`),
+/// matching the general timing slop `OVERLAP_WINDOW_MS` already accounts for
+/// elsewhere in this module, just tighter: this is a containment check, not
+/// just "somewhere nearby".
+const CONTAINMENT_SLACK_MS: u64 = 300;
 
 /// Removes microphone-track segments from `segments` that are clear echo
-/// duplicates of an overlapping loopback-track segment, returning the
-/// filtered list (in the original order) and how many were removed (recorded
-/// in transcript processing notes by the caller). `directions[i]` is the
-/// track direction ("input" or "output", matching `recording::Track::
-/// direction`) that produced `segments[i]`; the two slices must be the same
-/// length. Deterministic: iterates in a fixed order and never mutates
-/// surviving segments, so it is stable to re-run and safe for checkpoint
-/// recovery.
-pub fn dedupe_echo_segments(
+/// duplicates of an overlapping loopback-track segment, or (when
+/// `weak_mic_energy[i]` flags `segments[i]` as acoustically weak, far-end-
+/// dominated residual -- see `residual_echo_gate::overlaps_weak_far_end_
+/// residual`) a much looser partial-overlap match (see
+/// `PARTIAL_SIMILARITY_THRESHOLD`), catching a misheard-echo mic line a pure
+/// text comparison alone would miss. Returns the filtered list (in the
+/// original order) and how many were removed (recorded in transcript
+/// processing notes by the caller). `directions[i]` is the track direction
+/// ("input" or "output", matching `recording::Track::direction`) that
+/// produced `segments[i]`; all three slices/vectors must be the same length.
+/// Deterministic: iterates in a fixed order and never mutates surviving
+/// segments, so it is stable to re-run and safe for checkpoint recovery.
+pub fn dedupe_echo_segments_with_energy(
     segments: Vec<TranscriptSegment>,
     directions: &[&str],
+    weak_mic_energy: &[bool],
 ) -> (Vec<TranscriptSegment>, usize) {
     debug_assert_eq!(segments.len(), directions.len());
-    let keep = echo_duplicate_keep_mask(&segments, directions);
+    debug_assert_eq!(segments.len(), weak_mic_energy.len());
+    let keep = echo_duplicate_keep_mask(&segments, directions, weak_mic_energy);
     let removed = keep.iter().filter(|k| !**k).count();
     let kept = segments
         .into_iter()
@@ -55,7 +80,11 @@ pub fn dedupe_echo_segments(
 /// `segments`. Split out from `dedupe_echo_segments` so tests can assert on
 /// exactly which indices were dropped without reconstructing them from the
 /// filtered output.
-fn echo_duplicate_keep_mask(segments: &[TranscriptSegment], directions: &[&str]) -> Vec<bool> {
+fn echo_duplicate_keep_mask(
+    segments: &[TranscriptSegment],
+    directions: &[&str],
+    weak_mic_energy: &[bool],
+) -> Vec<bool> {
     (0..segments.len())
         .map(|i| {
             // Only a microphone (input) segment can be dropped as an echo
@@ -66,15 +95,29 @@ fn echo_duplicate_keep_mask(segments: &[TranscriptSegment], directions: &[&str])
                 return true;
             }
             let seg = &segments[i];
+            let weak = weak_mic_energy.get(i).copied().unwrap_or(false);
             let is_duplicate = segments.iter().enumerate().any(|(j, other)| {
-                i != j
-                    && directions[j] == "output"
-                    && overlaps_within_window(seg, other)
-                    && word_similarity(&seg.text, &other.text) >= DUPLICATE_SIMILARITY_THRESHOLD
+                if i == j || directions[j] != "output" || !overlaps_within_window(seg, other) {
+                    return false;
+                }
+                let similarity = word_similarity(&seg.text, &other.text);
+                if similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
+                    return true;
+                }
+                weak
+                    && contained_within(seg, other)
+                    && similarity >= PARTIAL_SIMILARITY_THRESHOLD
             });
             !is_duplicate
         })
         .collect()
+}
+
+/// True when `inner`'s time span lies inside `outer`'s, within
+/// `CONTAINMENT_SLACK_MS` slack on either edge.
+fn contained_within(inner: &TranscriptSegment, outer: &TranscriptSegment) -> bool {
+    inner.start_ms.saturating_add(CONTAINMENT_SLACK_MS) >= outer.start_ms
+        && inner.end_ms <= outer.end_ms.saturating_add(CONTAINMENT_SLACK_MS)
 }
 
 fn overlaps_within_window(a: &TranscriptSegment, b: &TranscriptSegment) -> bool {
@@ -136,6 +179,17 @@ fn fold_diacritic(c: char) -> char {
 mod tests {
     use super::*;
 
+    /// Test-only convenience matching this module's pre-energy-flag API: no
+    /// segment is acoustically flagged weak, so only the strict, near-verbatim
+    /// match applies -- exactly the original `dedupe_echo_segments` behavior.
+    fn dedupe_echo_segments(
+        segments: Vec<TranscriptSegment>,
+        directions: &[&str],
+    ) -> (Vec<TranscriptSegment>, usize) {
+        let weak_mic_energy = vec![false; segments.len()];
+        dedupe_echo_segments_with_energy(segments, directions, &weak_mic_energy)
+    }
+
     fn segment(start_ms: u64, end_ms: u64, text: &str) -> TranscriptSegment {
         TranscriptSegment {
             start_ms,
@@ -144,6 +198,64 @@ mod tests {
             source_id: "source".into(),
             source_name: "Source".into(),
         }
+    }
+
+    #[test]
+    fn weak_energy_mic_line_contained_in_a_remote_line_is_removed_on_partial_overlap() {
+        // Reproduces the reported residual-echo hallucination: the mic line
+        // is textually quite different from the overlapping remote line
+        // (word (Jaccard) similarity here is 2/6 = 0.333: above the loose
+        // partial-overlap bar but well below the strict near-verbatim one),
+        // but it lies fully inside the remote line's time span and is
+        // flagged as acoustically weak/far-end residual, so the looser bar
+        // applies.
+        let segments = vec![
+            segment(3_000, 11_000, "one two three four"),
+            segment(5_000, 9_000, "one two five six"),
+        ];
+        let (kept, removed) = dedupe_echo_segments_with_energy(
+            segments,
+            &["output", "input"],
+            &[false, true],
+        );
+        assert_eq!(removed, 1, "weak, contained, partially-overlapping mic line should be dropped");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source_id, "source");
+    }
+
+    #[test]
+    fn a_mic_line_not_flagged_weak_is_not_dropped_by_the_looser_bar() {
+        // Same partial overlap as above, but the acoustic energy flag says
+        // this is not weak/far-end residual -- so the strict bar still
+        // applies, and the line survives.
+        let segments = vec![
+            segment(3_000, 11_000, "one two three four"),
+            segment(5_000, 9_000, "one two five six"),
+        ];
+        let (kept, removed) = dedupe_echo_segments_with_energy(
+            segments,
+            &["output", "input"],
+            &[false, false],
+        );
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn a_weak_mic_line_not_contained_in_the_remote_span_is_not_dropped() {
+        // Weak energy alone is not enough: the mic segment must also lie
+        // inside the overlapping remote segment's time span.
+        let segments = vec![
+            segment(0, 2_000, "one two three four"),
+            segment(1_000, 3_000, "one two five six"),
+        ];
+        let (kept, removed) = dedupe_echo_segments_with_energy(
+            segments,
+            &["output", "input"],
+            &[false, true],
+        );
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
     }
 
     #[test]
