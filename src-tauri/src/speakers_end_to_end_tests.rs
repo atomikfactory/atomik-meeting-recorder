@@ -64,6 +64,19 @@ fn real_end_to_end_speakers_pipeline() {
     let local_name = std::env::var("SPEAKERS_E2E_LOCAL_NAME").unwrap_or_else(|_| "You".into());
     let ollama_model = std::env::var("SPEAKERS_E2E_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
     let ollama_url = std::env::var("SPEAKERS_E2E_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    // A plain file copy loses the recorder's own metadata, so real
+    // started_at/duration_ms (rather than the 1970/00:00:00 this harness used
+    // to hardcode into every rendered header) can optionally be supplied from
+    // the source recording's own sqlite row or its previously-rendered
+    // transcript.md header.
+    let started_at: u64 = std::env::var("SPEAKERS_E2E_STARTED_AT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let duration_ms: u64 = std::env::var("SPEAKERS_E2E_DURATION_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     let mut wavs: Vec<PathBuf> = fs::read_dir(&recording_dir)
         .expect("SPEAKERS_E2E_RECORDING_DIR must exist")
@@ -102,9 +115,9 @@ fn real_end_to_end_speakers_pipeline() {
 
     let recording = Recording {
         recording_id: recording_id.clone(),
-        started_at: 0,
-        ended_at: Some(0),
-        duration_ms: 0,
+        started_at,
+        ended_at: Some(started_at.saturating_add(duration_ms)),
+        duration_ms,
         status: "recorded".into(),
         meeting_title: None,
         storage_path: None,
