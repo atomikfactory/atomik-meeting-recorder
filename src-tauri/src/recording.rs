@@ -88,6 +88,7 @@ impl RecordingService {
     pub fn new(dir: PathBuf) -> Self {
         Self::with_backend_and_title(dir, || Box::new(NativeCapture), best_effort_title)
     }
+    #[cfg(test)]
     fn with_backend(
         dir: PathBuf,
         factory: impl FnOnce() -> Box<dyn AudioCapture> + Send + 'static,

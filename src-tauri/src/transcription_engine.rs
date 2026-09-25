@@ -170,7 +170,7 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 },
             )?;
             let direction: &'static str = if track.direction == "output" { "output" } else { "input" };
-            directions.extend(std::iter::repeat(direction).take(segments.len() - before));
+            directions.extend(std::iter::repeat_n(direction, segments.len() - before));
             if chunk_count > 1 {
                 warnings.push(format!(
                     "{} was processed in {chunk_count} local chunks; words near a chunk boundary may be split or repeated.",
@@ -889,10 +889,14 @@ impl TempWavGuard {
 /// check. Returns the (possibly-substituted) track list and the temporary
 /// WAV guards backing any substituted input track, which must outlive the
 /// caller's use of those paths.
+/// A track list paired with the temporary WAV guards backing any
+/// AEC-substituted input tracks within it.
+type TracksWithGuards = (Vec<(Track, PathBuf)>, Vec<TempWavGuard>);
+
 fn apply_echo_cancellation(
     tracks: &[(Track, PathBuf)],
     warnings: &mut Vec<String>,
-) -> Result<(Vec<(Track, PathBuf)>, Vec<TempWavGuard>), String> {
+) -> Result<TracksWithGuards, String> {
     let output_tracks: Vec<&(Track, PathBuf)> =
         tracks.iter().filter(|(track, _)| track.direction == "output").collect();
     if output_tracks.is_empty() || !tracks.iter().any(|(track, _)| track.direction == "input") {

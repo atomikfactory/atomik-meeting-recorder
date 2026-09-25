@@ -152,10 +152,10 @@ impl DelayEstimator {
             let (t0, t1) = (anchors[segment], anchors[segment + 1]);
             let (s0, s1) = (shifts[segment], shifts[segment + 1]);
             let span = (t1 - t0).max(1) as f64;
-            for t in t0..t1 {
-                let frac = (t - t0) as f64 / span;
+            for (i, out) in aligned[t0..t1].iter_mut().enumerate() {
+                let frac = i as f64 / span;
                 let shift = s0 + (s1 - s0) * frac;
-                aligned[t] = interpolate(reference, t as f64 - shift);
+                *out = interpolate(reference, (t0 + i) as f64 - shift);
             }
         }
         let first_shift_ms = shifts[0] as f32 * 1000.0 / sample_rate as f32;
@@ -299,9 +299,7 @@ mod tests {
             .collect();
         let true_delay = (0.083 * sample_rate as f32) as usize; // 83ms
         let mut mic = vec![0.0f32; total];
-        for i in true_delay..total {
-            mic[i] = reference[i - true_delay];
-        }
+        mic[true_delay..total].copy_from_slice(&reference[..total - true_delay]);
         let mut estimator = DelayEstimator::new();
         let (_, delay_ms) = estimator.align(&mic, &reference, sample_rate);
         let expected_ms = true_delay as f32 * 1000.0 / sample_rate as f32;

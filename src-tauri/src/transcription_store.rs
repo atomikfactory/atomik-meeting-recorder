@@ -279,11 +279,6 @@ impl TranscriptionStore {
             .map_err(err)?;
         Ok(())
     }
-    /// Explicit restart deliberately replaces only a dormant terminal job, with the
-    /// currently selected model. Output archival happens before this transition.
-    pub fn restart_completed(&self, id: &str, key: &str, hash: &str) -> Result<(), String> {
-        self.finish_restart(id, key, hash)
-    }
     pub fn begin_restart(&self, id: &str, key: &str, hash: &str) -> Result<RestartIntent, String> {
         let archive_id = uuid::Uuid::new_v4().to_string();
         let connection = self.lock()?;

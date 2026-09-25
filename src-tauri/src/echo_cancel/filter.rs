@@ -161,8 +161,13 @@ impl PartitionedFilter {
             *bin = Complex32::new(0.0, 0.0);
         }
         for (weight, entry) in self.weights.iter().zip(self.history.iter()) {
-            for k in 0..self.echo_freq.len() {
-                self.echo_freq[k] += weight[k] * entry.spectrum[k];
+            for ((echo, w), bin) in self
+                .echo_freq
+                .iter_mut()
+                .zip(weight.iter())
+                .zip(entry.spectrum.iter())
+            {
+                *echo += w * bin;
             }
         }
         clean_real_edges(&mut self.echo_freq);
@@ -246,16 +251,16 @@ impl PartitionedFilter {
                 .process(&mut self.scratch_time_b, &mut self.scratch_freq_b)
                 .expect("fixed-size forward FFT");
             clean_real_edges(&mut self.scratch_freq_b);
-            for k in 0..weight.len() {
+            for (w, grad) in weight.iter_mut().zip(self.scratch_freq_b.iter()) {
                 // A tiny leak bleeds off any energy an unlucky sequence of
                 // updates accumulates, and the hard magnitude clamp is a
                 // last-resort backstop against runaway divergence (e.g. a
                 // pathological, near-silent-but-not-quite input driving the
                 // per-bin power normalization close to `eps`) rather than a
                 // tuning parameter -- it should not normally bind.
-                let updated = weight[k] * WEIGHT_LEAK + self.scratch_freq_b[k];
+                let updated = *w * WEIGHT_LEAK + grad;
                 let magnitude = updated.norm();
-                weight[k] = if magnitude > MAX_WEIGHT_MAGNITUDE {
+                *w = if magnitude > MAX_WEIGHT_MAGNITUDE {
                     updated * (MAX_WEIGHT_MAGNITUDE / magnitude)
                 } else {
                     updated
@@ -265,6 +270,7 @@ impl PartitionedFilter {
         }
     }
 
+    #[cfg(test)]
     pub fn block_len(&self) -> usize {
         self.n
     }

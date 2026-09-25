@@ -10,7 +10,6 @@ struct Fixture {
     registry: TranscriptionStore,
     recordings: RecordingStore,
     recording: Recording,
-    transcript: Transcript,
 }
 impl Fixture {
     fn new() -> Self {
@@ -99,7 +98,6 @@ impl Fixture {
             registry,
             recordings,
             recording,
-            transcript,
         }
     }
     fn models(&self) -> ModelPair {

@@ -18,6 +18,7 @@ pub struct SpeakerJob {
     pub models: Option<ModelPair>,
     pub output_hash: Option<String>,
     pub speaker_count: Option<u32>,
+    #[cfg(test)]
     pub attempts: u32,
 }
 pub struct DiarizationStore {
@@ -165,6 +166,7 @@ impl DiarizationStore {
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     output_hash: r.get(6)?,
                     speaker_count: r.get(7)?,
+                    #[cfg(test)]
                     attempts: r.get(8)?,
                 })
             })

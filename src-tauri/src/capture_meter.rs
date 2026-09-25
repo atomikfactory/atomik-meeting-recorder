@@ -81,7 +81,7 @@ impl CaptureMeter {
             .seen
             .load(Ordering::Relaxed)
             .then(|| now_ms.saturating_sub(last));
-        if age.map_or(true, |age| age > STALE_MS) {
+        if age.is_none_or(|age| age > STALE_MS) {
             return SourceLevel {
                 source_id,
                 peak_dbfs: FLOOR_DBFS,

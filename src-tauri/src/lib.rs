@@ -67,9 +67,6 @@ enum Lifecycle {
     Detecting,
     Recording,
     Processing,
-    Transcribing,
-    Syncing,
-    Completed,
     Failed,
 }
 #[derive(Default)]

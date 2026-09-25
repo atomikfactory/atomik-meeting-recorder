@@ -116,6 +116,7 @@ impl RecordingStore {
         self.query("SELECT recording_id, started_at, status, payload FROM recordings WHERE NOT EXISTS (SELECT 1 FROM recording_tombstones t WHERE t.recording_id=recordings.recording_id) ORDER BY started_at DESC LIMIT 25")
     }
 
+    #[cfg(test)]
     pub fn unfinished(&self) -> StoreResult<Vec<Recording>> {
         self.query("SELECT recording_id, started_at, status, payload FROM recordings WHERE status IN ('recording', 'processing') AND NOT EXISTS (SELECT 1 FROM recording_tombstones t WHERE t.recording_id=recordings.recording_id) ORDER BY started_at DESC")
     }

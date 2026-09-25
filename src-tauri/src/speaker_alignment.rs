@@ -60,8 +60,8 @@ pub fn align_speakers(t: &Transcript, d: &DiarizationOutput) -> Result<Vec<Optio
         .map(|x| x.map(|(s, p, _)| map[&(s, p)]))
         .collect())
 }
-fn u(v: &Vec<(u64, u64, bool)>) -> (u64, bool) {
-    let mut x = v.clone();
+fn u(v: &[(u64, u64, bool)]) -> (u64, bool) {
+    let mut x = v.to_vec();
     x.sort();
     let (mut a, mut b, mut n, mut g) = (0, 0, 0, true);
     for (l, r, q) in x {

@@ -37,6 +37,7 @@ pub struct TranscriptionSettings {
 }
 impl TranscriptionSettings {
     /// Convenience for tests and fixtures that only care about the model size.
+    #[cfg(test)]
     pub fn for_model(model_key: impl Into<String>) -> Self {
         Self {
             model_key: model_key.into(),
