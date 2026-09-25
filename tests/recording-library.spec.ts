@@ -13,6 +13,8 @@ test.beforeEach(async ({ page }) => {
       if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: fixture.jobs, error: null, backend: "cpu (AVX2)" };
       if (command === "get_detection_state") return { supported: false, enabled: false, phase: "unsupported", detail: "", error: null, seconds_remaining: null, automation_inhibited: false };
       if (command === "get_diarization_state") return { enabled: true, inhibited: false, models: [], jobs: [], error: null };
+      if (command === "get_compression_state") return { enabled: true, inhibited: false, jobs: fixture.compressionJobs ?? [], error: null };
+      if (command === "audio_storage_summary") return fixture.audioStorage ?? { total_bytes: 0, total_original_bytes: 0, recordings: [] };
       if (command === "get_audio_devices") return { backend: "", devices: [], errors: [] };
       if (command === "transcribe_recording" && fixture.deferred) return new Promise(resolve => fixture.resolve = resolve);
       if (["open_recording_folder", "open_transcript", "transcribe_recording"].includes(command)) return null;
@@ -59,6 +61,19 @@ test("completed transcript opens exact ID and has no transcribe action", async (
   await page.getByRole("button", { name: "Open transcript" }).click();
   expect(await page.evaluate(() => (window as any).__library.calls.find((x: any) => x[0] === "open_transcript"))).toEqual(["open_transcript", { recordingId: "abc" }]);
   await expect(page.getByRole("button", { name: "Transcribe" })).toHaveCount(0);
+});
+
+test("library card shows compressed audio size and savings", async ({ page }) => {
+  await page.evaluate(() => {
+    (window as any).__library.audioStorage = {
+      total_bytes: 5_000_000,
+      total_original_bytes: 10_000_000,
+      recordings: [{ recording_id: "abc", bytes: 5_000_000, original_bytes: 10_000_000, format: "flac" }],
+    };
+  });
+  await page.waitForTimeout(5100);
+  await expect(page.locator(".recording-row")).toContainText("FLAC");
+  await expect(page.locator(".recording-row")).toContainText("saved 50%");
 });
 
 test("waiting model routes to Settings and focuses the Whisper chooser", async ({ page }) => {

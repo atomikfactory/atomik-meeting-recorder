@@ -18,6 +18,7 @@ type Settings = {
   summary_enabled?: boolean;
   ollama_url?: string;
   summary_model?: string;
+  compress_audio?: boolean;
 };
 type AudioSourceSelection = { id: string; name: string; direction: "input" | "output" };
 type AudioDevice = { id: string | null; name: string; direction: "input" | "output"; is_default: boolean; default_format: string | null; selectable: boolean; unavailable_reason: string | null };
@@ -68,6 +69,10 @@ type TranscriptionState = { inhibited:boolean; model:{key:string;available:boole
 type DiarizationState = { enabled:boolean; inhibited:boolean; models:{kind:"segmentation"|"embedding";available:boolean;error:string|null}[];jobs:{recording_id:string;status:string;progress:number;error:string|null;speaker_count:number|null}[];error:string|null };
 type SummaryJob = { recording_id:string; status:string; progress:number; error:string|null; title:string|null };
 type SummaryState = { enabled:boolean; inhibited:boolean; jobs:SummaryJob[]; error:string|null };
+type CompressionJob = { recording_id:string; status:string; progress:number; error:string|null; bytes_before:number|null; bytes_after:number|null };
+type CompressionState = { enabled:boolean; inhibited:boolean; jobs:CompressionJob[]; error:string|null };
+type RecordingAudioStorage = { recording_id:string; bytes:number; original_bytes:number; format:"wav"|"flac"|"mixed"|"none" };
+type AudioStorageSummary = { total_bytes:number; total_original_bytes:number; recordings:RecordingAudioStorage[] };
 type DetectionState = {
   supported: boolean;
   enabled: boolean;
@@ -93,6 +98,7 @@ let settings: Settings = {
   summary_enabled: true,
   ollama_url: "http://127.0.0.1:11434",
   summary_model: "qwen3:8b",
+  compress_audio: true,
 };
 let inventory: AudioInventory | null = null;
 let selectedSourceIds = new Set<string>();
@@ -110,6 +116,8 @@ let lastIdleRecordingPoll = 0;
 let transcriptionState: TranscriptionState = { inhibited:false, model:{key:"base",available:false}, jobs:[], imported_models:[], error:null, backend:"cpu (AVX2)" };
 let diarizationState:DiarizationState={enabled:true,inhibited:false,models:[],jobs:[],error:null}; let diarizationPoll=false;
 let summaryState:SummaryState={enabled:true,inhibited:false,jobs:[],error:null}; let summaryPoll=false;
+let compressionState:CompressionState={enabled:true,inhibited:false,jobs:[],error:null}; let compressionPoll=false;
+let audioStorage:AudioStorageSummary={total_bytes:0,total_original_bytes:0,recordings:[]}; let audioStoragePoll=false;
 let summaryModels:string[]=[]; let summaryModelsError:string|null=null; let summaryModelsLoading=false;
 const summaryActionInFlight = new Set<string>();
 let transcriptionPollInFlight = false;
@@ -288,6 +296,34 @@ function transcriptionSummary(recording: Recording) {
   return "Not queued — legacy recordings are never transcribed automatically.";
 }
 function audioSummary(recording: Recording) { return recording.status === "recorded" ? "Audio saved" : recording.status === "interrupted" ? "Audio saved with interruptions" : "Audio failed"; }
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+function audioStorageEntry(recordingId: string) { return audioStorage.recordings.find((r) => r.recording_id === recordingId); }
+function audioStorageLine(recordingId: string) {
+  const entry = audioStorageEntry(recordingId);
+  if (!entry || entry.format === "none" || entry.bytes <= 0) return "";
+  const saved = entry.original_bytes > entry.bytes && entry.original_bytes > 0 ? Math.round((1 - entry.bytes / entry.original_bytes) * 100) : 0;
+  const label = entry.format === "flac" ? "FLAC" : entry.format === "wav" ? "WAV" : "Mixed";
+  return saved > 0 ? `${label} · ${formatBytes(entry.bytes)} (saved ${saved}%)` : `${label} · ${formatBytes(entry.bytes)}`;
+}
+function compressionSummary(recordingId: string) {
+  const job = compressionState.jobs.find((item) => item.recording_id === recordingId);
+  if (job?.status === "failed") return "Audio compression failed";
+  if (job?.status === "compressing") return "Compressing audio";
+  return "";
+}
+function audioStorageSummaryText() {
+  if (!audioStorage.total_bytes) return "Audio on disk: not yet measured.";
+  const saved = audioStorage.total_original_bytes > audioStorage.total_bytes && audioStorage.total_original_bytes > 0
+    ? Math.round((1 - audioStorage.total_bytes / audioStorage.total_original_bytes) * 100)
+    : 0;
+  return saved > 0
+    ? `Audio on disk: ${formatBytes(audioStorage.total_bytes)} (was ${formatBytes(audioStorage.total_original_bytes)}, saved ${saved}%).`
+    : `Audio on disk: ${formatBytes(audioStorage.total_bytes)}.`;
+}
 function transcriptSummary(recording: Recording) { const job=transcriptionJob(recording.recording_id); if(!job)return "Transcript not started"; return job.status === "waiting_model" ? `Transcript needs model${job.model_key?`: ${job.model_key}`:""}` : job.status === "queued" ? "Transcript queued" : job.status === "transcribing" ? `Transcript working ${Math.round(job.progress)}%` : job.status === "completed" ? "Transcript completed" : "Transcript failed"; }
 function diarizationSummary(recordingId: string) {
   const job = diarizationState.jobs.find((item) => item.recording_id === recordingId);
@@ -308,6 +344,8 @@ function summarySummary(recordingId: string) {
   return job.status.replaceAll("_", " ");
 }
 async function refreshSummaryState(){if(preview||!backendReady||document.hidden||summaryPoll)return;summaryPoll=true;try{summaryState=await invoke<SummaryState>("get_summary_state")}catch(error){summaryState={...summaryState,error:`Could not check local summaries: ${String(error)}`}}finally{summaryPoll=false;updateRecordingUI()}}
+async function refreshCompressionState(){if(preview||!backendReady||document.hidden||compressionPoll)return;compressionPoll=true;try{compressionState=await invoke<CompressionState>("get_compression_state")}catch(error){compressionState={...compressionState,error:`Could not check audio compression: ${String(error)}`}}finally{compressionPoll=false;updateRecordingUI()}}
+async function refreshAudioStorage(){if(preview||!backendReady||document.hidden||audioStoragePoll)return;audioStoragePoll=true;try{audioStorage=await invoke<AudioStorageSummary>("audio_storage_summary")}catch{/* best-effort only */}finally{audioStoragePoll=false;updateRecordingUI()}}
 async function refreshSummaryModels(url: string) {
   if (preview || !backendReady || summaryModelsLoading) return;
   summaryModelsLoading = true;
@@ -367,6 +405,8 @@ async function loadDesktop() {
     refreshTranscriptionState();
     refreshDiarizationState();
     refreshSummaryState();
+    refreshCompressionState();
+    refreshAudioStorage();
     refreshSummaryModels(settings.ollama_url ?? "http://127.0.0.1:11434");
   } catch (error) {
     backendReady = false;
@@ -441,7 +481,8 @@ function recentRecordings() {
     const summaryBusy=summaryActionInFlight.has(recording.recording_id);
     const summaryActions=summary?.status==="completed"?`<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Regenerate summary</button>${summary.title&&summary.title!==(recording.meeting_title??"Meeting")?`<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy?"disabled":""}>Use suggested title: ${escapeHtml(summary.title)}</button>`:""}`:summary?.status==="failed"?`<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy?"disabled":""}>Retry summary</button>`:"";
     const manage=`<button class="secondary" data-rename="${escapeAttr(recording.recording_id)}">Rename</button><button class="secondary" data-delete="${escapeAttr(recording.recording_id)}">Remove</button>${["completed","failed","waiting_model"].includes(job?.status??"")?`<button class="secondary" data-restart="${escapeAttr(recording.recording_id)}">Restart transcription</button>`:""}`;
-    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}</article>`;
+    const storageLine = audioStorageLine(recording.recording_id); const compressionLine = compressionSummary(recording.recording_id);
+    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title||"Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}</article>`;
   }).join("")}</div>`;
 }
 function updateRecordingUI() {
@@ -711,6 +752,9 @@ function render() {
               <p id="summary-models-status">${escapeHtml(summaryModelsError ?? "Refresh to list models installed in Ollama.")}</p>
               <div><button type="button" class="secondary" id="refresh-summary-models" ${disabled()}>Refresh models</button> <button type="button" class="secondary" id="test-ollama-connection" ${disabled()}>Test connection</button></div>
             </section>
+            <section class="model-settings"><label class="toggle"><input type="checkbox" name="compress_audio" ${settings.compress_audio !== false ? "checked" : ""} ${disabled()}/><span><b>Compress finished recordings to FLAC</b><small>Once transcription (and speaker identification, if enabled) has finished with a recording's audio, losslessly compresses each WAV track to FLAC and verifies it decodes back to the exact original samples before removing the WAV. Never runs on an active recording.</small></span></label>
+              <p id="audio-storage-total">${escapeHtml(audioStorageSummaryText())}</p>
+            </section>
             <section class="audio-settings" aria-labelledby="audio-sources-heading">
               <div class="audio-head"><div><b id="audio-sources-heading">Audio sources</b><small>Select one or more inputs for local capture.</small></div><button type="button" id="refresh-devices" class="secondary" ${disabled()}>Refresh</button></div>
               <p id="capture-next" class="capture-next">Select one or more sources for your next local recording.</p>
@@ -868,6 +912,7 @@ function render() {
       summary_enabled: form.get("summary_enabled") === "on",
       ollama_url: String(form.get("ollama_url") ?? "http://127.0.0.1:11434").trim(),
       summary_model: String(form.get("summary_model") ?? "qwen3:8b"),
+      compress_audio: form.get("compress_audio") === "on",
       audio_sources: settings.audio_sources,
     };
     try {
@@ -949,9 +994,11 @@ if (!preview) {
   window.setInterval(refreshTranscriptionState, 1000);
   window.setInterval(refreshDiarizationState, 1000);
   window.setInterval(refreshSummaryState, 1000);
+  window.setInterval(refreshCompressionState, 1000);
+  window.setInterval(refreshAudioStorage, 5000);
   window.setInterval(refreshDetectionState, 1000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); } });
 } else render();

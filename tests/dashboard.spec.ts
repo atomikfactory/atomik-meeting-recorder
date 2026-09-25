@@ -32,6 +32,11 @@ test("settings access failure preserves data and offers recovery", async ({
         if (command === "get_recording_state")
           return { status: "idle", active: null, recent: [], error: null };
         if (command === "get_audio_devices") return { backend: "test", errors: [], devices: [{ id: "mic-1", name: "Desk mic", direction: "input", is_default: true, default_format: "2 channels · 48000 Hz", selectable: true, unavailable_reason: null }] };
+        if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: [], error: null, backend: "cpu (AVX2)" };
+        if (command === "get_diarization_state") return { enabled: true, inhibited: false, models: [], jobs: [], error: null };
+        if (command === "get_summary_state") return { enabled: true, inhibited: false, jobs: [], error: null };
+        if (command === "get_compression_state") return { enabled: true, inhibited: false, jobs: [], error: null };
+        if (command === "audio_storage_summary") return { total_bytes: 0, total_original_bytes: 0, recordings: [] };
         if (command === "save_settings") throw new Error("Permission denied");
         throw new Error(`Unexpected test command: ${command}`);
       },
