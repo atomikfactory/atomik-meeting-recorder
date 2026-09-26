@@ -106,3 +106,63 @@ test("export errors are rendered as text, not executed",async({page})=>{
   await expect(page.locator("img[src=x]")).toHaveCount(0);
   await expect(page.locator("#recent-recordings")).toContainText("<img src=x onerror=alert(1)>");
 });
+
+test("unsaved AppFlowy edits survive background status polling",async({page})=>{
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.locator('[name="appflowy_enabled"]').check();
+  await expect(page.locator('[name="appflowy_auto_export"]')).toBeEnabled();
+  await page.locator('[name="appflowy_auto_export"]').check();
+  await page.locator('[name="appflowy_use_native_block"]').uncheck();
+  await page.locator('[name="appflowy_base_url"]').fill("https://flowy.example.com");
+  await page.locator("#appflowy-email").fill("user@example.com");
+  await page.locator("#appflowy-email").focus();
+  await page.waitForTimeout(5000);
+  await expect(page.locator('[name="appflowy_enabled"]')).toBeChecked();
+  await expect(page.locator('[name="appflowy_auto_export"]')).toBeChecked();
+  await expect(page.locator('[name="appflowy_use_native_block"]')).not.toBeChecked();
+  await expect(page.locator('[name="appflowy_base_url"]')).toHaveValue("https://flowy.example.com");
+  await expect(page.locator("#appflowy-email")).toHaveValue("user@example.com");
+  await expect(page.locator("#appflowy-email")).toBeFocused();
+});
+
+test("typed sign-in code survives polling after a code is sent",async({page})=>{
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.locator("#appflowy-email").fill("user@example.com");
+  await page.getByRole("button",{name:"Send sign-in code"}).click();
+  await page.locator("#appflowy-code").fill("123");
+  await page.waitForTimeout(5000);
+  await expect(page.locator("#appflowy-code")).toHaveValue("123");
+  await page.locator("#appflowy-code").fill("123456");
+  await page.getByRole("button",{name:"Verify code"}).click();
+  await expect(page.locator("#appflowy-auth-status")).toContainText("Signed in as user@example.com");
+});
+
+test("workspace choice survives polling while signed in",async({page})=>{
+  await page.evaluate(()=>{const f=(window as any).__af;f.workspaces=[{workspace_id:"ws1",workspace_name:"One"},{workspace_id:"ws2",workspace_name:"Two"}];f.appflowy={...f.appflowy,connected:true,email:"user@example.com"}});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await expect(page.locator("#appflowy-auth-status")).toContainText("Signed in as user@example.com",{timeout:5000});
+  await expect(page.locator('[name="appflowy_workspace_id"] option')).toHaveCount(2,{timeout:5000});
+  await page.locator('[name="appflowy_workspace_id"]').selectOption("ws2");
+  await page.waitForTimeout(5000);
+  await expect(page.locator('[name="appflowy_workspace_id"]')).toHaveValue("ws2");
+});
+
+test("no unsaved Settings control is reset by background polling",async({page})=>{
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.locator('[name="appflowy_enabled"]').check();
+  const edited=await page.evaluate(()=>{
+    const out:Record<string,string|boolean>={};
+    const page=document.querySelector('[data-view="settings"]')||document;
+    for(const el of Array.from(page.querySelectorAll<HTMLInputElement|HTMLSelectElement>("input, select"))){
+      const key=el.name||el.id; if(!key||el.disabled||(el as HTMLElement).offsetParent===null)continue;
+      if(el instanceof HTMLInputElement&&el.type==="checkbox"){el.checked=!el.checked;el.dispatchEvent(new Event("change",{bubbles:true}));out[key]=el.checked}
+      else if(el instanceof HTMLInputElement&&["text","email","url","search"].includes(el.type)&&!el.readOnly){el.value=el.value+"x";el.dispatchEvent(new Event("input",{bubbles:true}));out[key]=el.value}
+      else if(el instanceof HTMLInputElement&&el.type==="number"){el.value=String(Number(el.value||0)+1);el.dispatchEvent(new Event("input",{bubbles:true}));out[key]=el.value}
+    }
+    return out;
+  });
+  expect(Object.keys(edited).length).toBeGreaterThan(5);
+  await page.waitForTimeout(6000);
+  const after=await page.evaluate((keys:string[])=>Object.fromEntries(keys.map(k=>{const el=document.querySelector<HTMLInputElement>(`[name="${k}"]`)||document.getElementById(k) as HTMLInputElement|null;return[k,el?(el.type==="checkbox"?el.checked:el.value):null]})),Object.keys(edited));
+  expect(after).toEqual(edited);
+});

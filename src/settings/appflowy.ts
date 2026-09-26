@@ -31,7 +31,18 @@ export async function refreshAppFlowyState() {
     updateRecordingUI();
     updateAppFlowySettingsUI();
   }
+  // A session restored at startup never passes through verify, so load the
+  // workspace list the first time the backend reports a connection.
+  if (store.appflowyState.connected && !workspacesRequested) {
+    workspacesRequested = true;
+    await refreshAppFlowyWorkspaces();
+  } else if (!store.appflowyState.connected) {
+    workspacesRequested = false;
+  }
 }
+
+let workspacesRequested = false;
+let renderedKey = "";
 
 export async function refreshAppFlowyWorkspaces() {
   if (preview || !store.backendReady || !store.appflowyState.connected) return;
@@ -81,6 +92,12 @@ export function wireAppFlowySettingsSection() {
     catch (error) { store.appflowyAuthError = `Could not verify code: ${String(error)}`; }
     finally { store.appflowyAuthBusy = false; updateAppFlowySettingsUI(); }
   });
+  // Auto-export depends on the live (possibly unsaved) enable checkbox, not the saved setting.
+  const enabled = document.querySelector<HTMLInputElement>('[name="appflowy_enabled"]');
+  enabled?.addEventListener("change", () => {
+    const auto = document.querySelector<HTMLInputElement>('[name="appflowy_auto_export"]');
+    if (auto) auto.disabled = Boolean(disabled()) || !enabled.checked;
+  });
   document.querySelector("#appflowy-sign-out")?.addEventListener("click", async () => {
     try { await invoke("appflowy_sign_out"); store.appflowyOtpSent = false; store.appflowyOtpEmail = ""; await refreshAppFlowyState(); }
     catch (error) { notice(`Could not sign out of AppFlowy: ${String(error)}`, "error"); }
@@ -88,9 +105,39 @@ export function wireAppFlowySettingsSection() {
   });
 }
 
+/// Polling calls this every couple of seconds, so it must never discard what
+/// the user is editing: it re-renders only when the auth/workspace structure
+/// changes, and then carries unsaved control values, focus and caret across.
 export function updateAppFlowySettingsUI() {
-  const section = document.querySelector("#appflowy-settings-section");
+  const section = document.querySelector<HTMLElement>("#appflowy-settings-section");
   if (!section) return;
+  const s = store.appflowyState;
+  const key = JSON.stringify([s.connected, s.email, store.appflowyOtpSent, store.appflowyOtpEmail, store.appflowyAuthBusy, store.appflowyAuthError, store.appflowyWorkspaces, disabled()]);
+  if (key === renderedKey && section.childElementCount) return;
+  const controls = Array.from(section.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select"));
+  const saved = new Map(controls.map((c) => [c.name || c.id, c instanceof HTMLInputElement && c.type === "checkbox" ? c.checked : c.value]));
+  const hadRender = section.childElementCount > 0 && renderedKey !== "";
+  const active = document.activeElement as HTMLInputElement | null;
+  const focusKey = active && section.contains(active) ? active.name || active.id : "";
+  const caret = focusKey && typeof active!.selectionStart === "number" ? [active!.selectionStart, active!.selectionEnd] : null;
   section.innerHTML = appflowySettingsSectionHtml();
+  renderedKey = key;
+  if (hadRender) {
+    for (const c of Array.from(section.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select"))) {
+      const value = saved.get(c.name || c.id);
+      if (value === undefined) continue;
+      if (c instanceof HTMLInputElement && c.type === "checkbox") c.checked = value as boolean;
+      else if (c instanceof HTMLSelectElement) { if (Array.from(c.options).some((o) => o.value === value)) c.value = value as string; }
+      else c.value = value as string;
+    }
+    const enabled = section.querySelector<HTMLInputElement>('[name="appflowy_enabled"]');
+    const auto = section.querySelector<HTMLInputElement>('[name="appflowy_auto_export"]');
+    if (enabled && auto) auto.disabled = Boolean(disabled()) || !enabled.checked;
+  }
   wireAppFlowySettingsSection();
+  if (focusKey) {
+    const el = section.querySelector<HTMLInputElement>(`[name="${CSS.escape(focusKey)}"], #${CSS.escape(focusKey)}`);
+    el?.focus();
+    if (el && caret) try { el.setSelectionRange(caret[0], caret[1]); } catch { /* not a text input */ }
+  }
 }
