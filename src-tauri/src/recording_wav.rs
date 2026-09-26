@@ -575,10 +575,19 @@ mod tests {
             })
             .unwrap();
         // No subsequent packet arrives. The receive timeout must still update
-        // and sync the recoverable header before the sender is closed.
-        thread::sleep(Duration::from_millis(1_150));
-        let bytes = fs::read(&path).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 2);
+        // and sync the recoverable header before the sender is closed. The
+        // writer checkpoints about once a second; poll with a generous deadline
+        // so a slow, shared CI runner can't turn scheduling delay into a failure.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let data_bytes = loop {
+            let bytes = fs::read(&path).unwrap();
+            let value = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+            if value == 2 || std::time::Instant::now() >= deadline {
+                break value;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(data_bytes, 2);
         drop(handle.sender);
         assert!(handle.join.join().unwrap().error.is_none());
         let _ = fs::remove_dir_all(path.parent().unwrap());

@@ -44,6 +44,7 @@ pub trait FileWriter {
     fn exists(&self, path: &Path) -> bool;
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub trait RegistryWriter {
     /// Sets `subkey`'s default (unnamed) value to `manifest_path`, creating
     /// `subkey` under `HKEY_CURRENT_USER` if needed.

@@ -4,11 +4,13 @@ pub(crate) fn best_effort_title() -> Option<String> {
     platform_title()
 }
 
+#[cfg(any(target_os = "windows", test))]
 #[derive(Clone)]
 struct Candidate {
     title: String,
     foreground: bool,
 }
+#[cfg(any(target_os = "windows", test))]
 fn choose(candidates: Vec<Candidate>) -> Option<String> {
     let foreground: Vec<_> = candidates.iter().filter(|c| c.foreground).collect();
     let selected = if foreground.len() == 1 {
@@ -21,6 +23,7 @@ fn choose(candidates: Vec<Candidate>) -> Option<String> {
     let title = selected.title.trim();
     (!title.is_empty()).then(|| title.chars().take(160).collect())
 }
+#[cfg(target_os = "windows")]
 fn recognized(executable: &str, title: &str) -> bool {
     let title = title.to_ascii_lowercase();
     (matches!(executable, "chrome.exe" | "firefox.exe")

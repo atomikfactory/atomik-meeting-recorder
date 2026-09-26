@@ -82,6 +82,7 @@ fn unsupported() -> SignalSnapshot {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn unknown(message: impl Into<String>) -> SignalSnapshot {
     SignalSnapshot {
         supported: cfg!(target_os = "windows"),

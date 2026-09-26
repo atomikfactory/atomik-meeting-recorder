@@ -27,6 +27,7 @@ impl FileWriter for FakeFs {
 
 #[derive(Default)]
 struct FakeRegistry {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     values: HashMap<String, String>,
 }
 impl RegistryWriter for FakeRegistry {
