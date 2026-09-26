@@ -213,7 +213,7 @@ fn real_end_to_end_speakers_pipeline() {
     // --- 3. Render transcript.md exactly as the app would (with speaker labels) ---
     let mut labeled_transcript = transcript.clone();
     labeled_transcript.local_speaker_name = Some(local_name.clone());
-    let transcript_md = markdown_document_labeled(&recording, &labeled_transcript, Some(&labels));
+    let transcript_md = markdown_document_labeled(&recording, &labeled_transcript, Some(&labels), None);
     let transcript_path = output_dir.join("transcript.md");
     fs::write(&transcript_path, &transcript_md).expect("must write transcript.md");
     println!("Wrote {}", transcript_path.display());
@@ -230,6 +230,7 @@ fn real_end_to_end_speakers_pipeline() {
         model: ollama_model.clone(),
         local_speaker_name: local_name,
         remote_speaker_labels: Some(labels),
+        names: Default::default(),
     };
     let summary_started = Instant::now();
     let mut progress_calls = Vec::new();

@@ -50,7 +50,9 @@ mod search_store;
 #[cfg(test)]
 mod search_tests;
 mod speaker_alignment;
+mod speaker_names;
 mod store;
+mod voice_profiles;
 mod summary;
 mod summary_engine;
 mod summary_store;

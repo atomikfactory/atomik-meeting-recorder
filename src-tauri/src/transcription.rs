@@ -12,6 +12,7 @@ use crate::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -455,7 +456,10 @@ impl TranscriptionService {
             .get_by_id(id)?
             .ok_or("Recording metadata is unavailable.")?;
         validate_transcript(&transcript, &j, &recording)?;
-        if read_checkpoint(&markdown)? != markdown_document(&recording, &transcript).as_bytes() {
+        let names = crate::speaker_names::names_for(&self.root, id);
+        if read_checkpoint(&markdown)?
+            != markdown_document_labeled(&recording, &transcript, None, Some(&names)).as_bytes()
+        {
             return Err("Markdown differs from its saved transcript. It remains on disk; open the recordings folder to inspect it.".into());
         }
         Ok(markdown)
@@ -856,6 +860,20 @@ pub(crate) fn atomic_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if path.exists() {
         return Err("Refusing to replace existing transcript output.".into());
     }
+    atomic_write(path, bytes)
+}
+/// As `atomic_new`, but deliberately allowed to replace an existing file --
+/// used only for regenerating a *presentation* Markdown file (transcript.md /
+/// transcript-speakers.md) from its already-durable checkpoint after the
+/// user renames a speaker (see `speaker_names.rs`). Never touches
+/// `transcript.json`/`speakers.json`, which stay the immutable source of
+/// truth this is regenerated from -- so re-running this after a crash simply
+/// reproduces the same bytes.
+pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    reject_symlink(path)?;
+    atomic_write(path, bytes)
+}
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -958,13 +976,20 @@ pub(crate) const DEFAULT_REMOTE_LABEL: &str = "Remote";
 /// removed from `recording.tracks`). Purely a display concern --
 /// `segment.source_id`/`source_name` are never mutated, keeping
 /// `transcript.json` a stable historical record independent of presentation.
+/// Per-recording display names a user has set for this meeting's speaker
+/// labels (see `speaker_names.rs`), keyed by the base presentation label
+/// ("You", "Speaker 1", "Remote", ...). Looked up once per render and passed
+/// down rather than re-read per segment.
+pub(crate) type SpeakerNames = HashMap<String, String>;
+
 pub(crate) fn presentation_label(
     recording: &Recording,
     segment: &TranscriptSegment,
     local_speaker_name: &str,
     remote_speaker: Option<u32>,
+    names: Option<&SpeakerNames>,
 ) -> String {
-    match recording
+    let base = match recording
         .tracks
         .iter()
         .find(|track| track.source_id == segment.source_id)
@@ -975,22 +1000,27 @@ pub(crate) fn presentation_label(
             .map(|n| format!("Speaker {n}"))
             .unwrap_or_else(|| DEFAULT_REMOTE_LABEL.to_string()),
         _ => segment.source_name.clone(),
-    }
+    };
+    names
+        .and_then(|names| names.get(&base).cloned())
+        .unwrap_or(base)
 }
 
 pub(crate) fn markdown_document(recording: &Recording, t: &Transcript) -> String {
-    markdown_document_labeled(recording, t, None)
+    markdown_document_labeled(recording, t, None, None)
 }
 
 /// As `markdown_document`, optionally overlaying per-segment remote speaker
 /// numbers (parallel to `t.segments`; `None` entries mean undecided) from a
-/// completed local speaker-identification checkpoint (see `diarization.rs`).
-/// A pure function of `(recording, t, remote_labels)`, so the diarization
+/// completed local speaker-identification checkpoint (see `diarization.rs`),
+/// and/or a user-set per-recording label -> display name mapping (see
+/// `speaker_names.rs`). A pure function of its inputs, so the diarization
 /// companion Markdown stays checkpoint-safe just like the base transcript.
 pub(crate) fn markdown_document_labeled(
     recording: &Recording,
     t: &Transcript,
     remote_labels: Option<&[Option<u32>]>,
+    names: Option<&SpeakerNames>,
 ) -> String {
     let local_speaker_name = t.local_speaker_name.as_deref().unwrap_or("You");
     let note = if remote_labels.is_some() {
@@ -1012,7 +1042,7 @@ pub(crate) fn markdown_document_labeled(
     }
     for (i, segment) in t.segments.iter().enumerate() {
         let remote_speaker = remote_labels.and_then(|labels| labels.get(i).copied().flatten());
-        let label = presentation_label(recording, segment, local_speaker_name, remote_speaker);
+        let label = presentation_label(recording, segment, local_speaker_name, remote_speaker, names);
         output.push_str(&format!(
             "**[{}–{}] {}:** {}\n\n",
             timestamp(segment.start_ms),

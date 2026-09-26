@@ -429,9 +429,10 @@ fn gather_index_data(
         state.transcript_checksum = Some(transcript.0.clone());
         let labels = read_completed_speaker_labels(root, extra_roots, recording, &transcript.1);
         let local_speaker_name = transcript.1.local_speaker_name.as_deref().unwrap_or("You");
+        let names = crate::speaker_names::names_for(root, &recording.recording_id);
         for (i, segment) in transcript.1.segments.iter().enumerate() {
             let remote_speaker = labels.as_ref().and_then(|l| l.get(i).copied().flatten());
-            let speaker = presentation_label(recording, segment, local_speaker_name, remote_speaker);
+            let speaker = presentation_label(recording, segment, local_speaker_name, remote_speaker, Some(&names));
             rows.push(IndexRow {
                 kind: "segment",
                 seq: i as i64,

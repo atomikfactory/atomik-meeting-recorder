@@ -109,6 +109,7 @@ fn real_ollama_summarizes_copied_transcripts() {
                 .clone()
                 .unwrap_or_else(|| "You".into()),
             remote_speaker_labels: None,
+            names: Default::default(),
             transcript: transcript.clone(),
             ollama_url: ollama_url.clone(),
             model: model.clone(),

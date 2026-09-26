@@ -535,6 +535,7 @@ fn tick(
                     &recording,
                     &transcript,
                 ),
+                names: crate::speaker_names::names_for(root, &job.recording_id),
                 transcript: transcript.clone(),
                 ollama_url: settings.ollama_url.clone(),
                 model: settings.model.clone(),

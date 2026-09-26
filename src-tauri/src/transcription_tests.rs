@@ -886,11 +886,11 @@ fn presentation_label_uses_local_name_for_input_track_regardless_of_remote_label
     let recording = labeled_recording();
     let segment = labeled_segment("mic");
     assert_eq!(
-        presentation_label(&recording, &segment, "Ben", None),
+        presentation_label(&recording, &segment, "Ben", None, None),
         "Ben"
     );
     assert_eq!(
-        presentation_label(&recording, &segment, "Ben", Some(3)),
+        presentation_label(&recording, &segment, "Ben", Some(3), None),
         "Ben"
     );
 }
@@ -899,11 +899,11 @@ fn presentation_label_numbers_remote_speakers_and_falls_back_to_remote() {
     let recording = labeled_recording();
     let segment = labeled_segment("loopback");
     assert_eq!(
-        presentation_label(&recording, &segment, "Ben", Some(2)),
+        presentation_label(&recording, &segment, "Ben", Some(2), None),
         "Speaker 2"
     );
     assert_eq!(
-        presentation_label(&recording, &segment, "Ben", None),
+        presentation_label(&recording, &segment, "Ben", None, None),
         DEFAULT_REMOTE_LABEL
     );
 }
@@ -912,7 +912,7 @@ fn presentation_label_falls_back_to_source_name_for_an_unresolvable_track() {
     let recording = labeled_recording();
     let segment = labeled_segment("deleted-track");
     assert_eq!(
-        presentation_label(&recording, &segment, "Ben", Some(1)),
+        presentation_label(&recording, &segment, "Ben", Some(1), None),
         "Raw device name"
     );
 }
@@ -948,7 +948,7 @@ fn markdown_labeled_overlays_remote_speaker_numbers_from_a_diarization_checkpoin
         local_speaker_name: Some("Ada".into()),
         segments: vec![labeled_segment("mic"), labeled_segment("loopback")],
     };
-    let md = markdown_document_labeled(&recording, &transcript, Some(&[None, Some(1)]));
+    let md = markdown_document_labeled(&recording, &transcript, Some(&[None, Some(1)]), None);
     assert!(md.contains("**[00:00:00–00:00:01] Ada:**"));
     assert!(md.contains("**[00:00:00–00:00:01] Speaker 1:**"));
 }

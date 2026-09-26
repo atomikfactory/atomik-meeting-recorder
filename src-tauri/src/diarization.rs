@@ -296,8 +296,9 @@ impl DiarizationService {
         }
         let checkpoint = validate_checkpoint(&bytes, &job, &recording, &transcript)?;
         let md = output_path(&directory, "transcript-speakers.md")?;
+        let names = crate::speaker_names::names_for(&self.root, &job.recording_id);
         if read_checkpoint(&md)?
-            != speaker_markdown(&recording, &transcript, &checkpoint).as_bytes()
+            != speaker_markdown(&recording, &transcript, &checkpoint, Some(&names)).as_bytes()
         {
             return Err("Speaker Markdown was modified or damaged; open the recordings folder to inspect preserved files.".into());
         }
@@ -464,12 +465,13 @@ fn speaker_markdown(
     recording: &Recording,
     transcript: &Transcript,
     checkpoint: &SpeakerCheckpoint,
+    names: Option<&crate::transcription::SpeakerNames>,
 ) -> String {
     let mut labelled = transcript.clone();
     labelled
         .warnings
         .extend(checkpoint.output.warnings.iter().cloned());
-    markdown_document_labeled(recording, &labelled, Some(&checkpoint.labels))
+    markdown_document_labeled(recording, &labelled, Some(&checkpoint.labels), names)
 }
 /// Best-effort lookup of a recording's completed local speaker-identification
 /// labels (see `SpeakerCheckpoint`), for embedding remote speaker numbers into
@@ -624,7 +626,8 @@ fn tick(
             atomic_new(&json, &bytes)?;
             (checkpoint, bytes)
         };
-        let markdown = speaker_markdown(&recording, &transcript, &checkpoint);
+        let names = crate::speaker_names::names_for(root, &job.recording_id);
+        let markdown = speaker_markdown(&recording, &transcript, &checkpoint, Some(&names));
         if md.exists() {
             if read_checkpoint(&md)? != markdown.as_bytes() {
                 return Err("Existing speaker Markdown differs; file preserved.".into());

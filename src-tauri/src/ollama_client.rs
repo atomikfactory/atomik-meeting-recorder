@@ -124,12 +124,13 @@ pub fn format_segments(
     recording: &Recording,
     local_speaker_name: &str,
     remote_speaker_by_segment: Option<&std::collections::HashMap<SegmentKey, u32>>,
+    names: Option<&crate::transcription::SpeakerNames>,
 ) -> String {
     segments
         .iter()
         .map(|segment| {
             let remote_speaker = remote_speaker_by_segment.and_then(|m| m.get(&segment_key(segment)).copied());
-            let label = presentation_label(recording, segment, local_speaker_name, remote_speaker);
+            let label = presentation_label(recording, segment, local_speaker_name, remote_speaker, names);
             format!(
                 "[{}] {}: {}",
                 timestamp(segment.start_ms),

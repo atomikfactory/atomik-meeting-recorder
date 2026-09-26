@@ -24,6 +24,12 @@ pub struct SummaryRequest {
     /// `transcript.segments`. `None` when diarization has not completed for
     /// this recording -- remote lines then render as "Remote".
     pub remote_speaker_labels: Option<Vec<Option<u32>>>,
+    /// Per-recording display names the user has set for this meeting's
+    /// speaker labels (see `speaker_names.rs`), so the summary the model
+    /// writes uses "Alice"/"Bob" rather than "Speaker 1"/"Speaker 2" once the
+    /// user has named them. Regenerating (not auto-regenerating) a summary
+    /// is the only way this takes effect -- see `summary.rs::regenerate`.
+    pub names: crate::transcription::SpeakerNames,
 }
 
 pub trait SummaryEngine: Send + Sync {
@@ -132,6 +138,7 @@ impl SummaryEngine for OllamaSummaryEngine {
                 &request.recording,
                 &request.local_speaker_name,
                 remote_map,
+                Some(&request.names),
             )
         );
         let num_ctx = choose_num_ctx(full_text.len());
@@ -158,6 +165,7 @@ impl SummaryEngine for OllamaSummaryEngine {
                     &request.recording,
                     &request.local_speaker_name,
                     remote_map,
+                    Some(&request.names),
                 )
             );
             let raw = client.chat(&request.model, &chunk_system, &text, chunk_schema(), num_ctx)?;

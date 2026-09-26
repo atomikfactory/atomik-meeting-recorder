@@ -601,13 +601,14 @@ fn load_meeting_export_data(
     validate_transcript(&transcript, &parent, &recording)?;
     let local_speaker_name = transcript.local_speaker_name.clone().unwrap_or_else(|| settings.local_speaker_name.clone());
     let labels = crate::diarization::read_completed_speaker_labels(root, &settings.extra_library_roots, &recording, &transcript);
+    let names = crate::speaker_names::names_for(root, recording_id);
     let turns: Vec<SpeakerTurn> = transcript
         .segments
         .iter()
         .enumerate()
         .map(|(i, segment)| {
             let remote_speaker = labels.as_ref().and_then(|l| l.get(i).copied().flatten());
-            let speaker_label = presentation_label(&recording, segment, &local_speaker_name, remote_speaker);
+            let speaker_label = presentation_label(&recording, segment, &local_speaker_name, remote_speaker, Some(&names));
             SpeakerTurn { speaker_label, start_ms: segment.start_ms, end_ms: segment.end_ms, text: segment.text.clone() }
         })
         .collect();
