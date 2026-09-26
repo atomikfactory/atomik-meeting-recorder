@@ -1774,9 +1774,8 @@ pub fn run() {
     Ok(())
 }).on_window_event(|window, event| {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-        let tray_available = window.state::<TrayStatus>().0.lock().map(|status| status.available).unwrap_or(false);
         #[cfg(not(target_os = "linux"))]
-        if tray_available {
+        if window.state::<TrayStatus>().0.lock().map(|status| status.available).unwrap_or(false) {
             api.prevent_close();
             let _ = window.hide();
             return;
