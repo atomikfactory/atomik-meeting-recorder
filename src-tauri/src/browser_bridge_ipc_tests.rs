@@ -6,11 +6,30 @@ use std::time::{Duration, Instant};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 fn unique_name() -> String {
+    // Kept short (unlike a "meetingrecorder-browser-bridge-test-..." name)
+    // because on Unix it becomes part of a socket path under a directory
+    // that is itself none too short in a test binary's `$TMPDIR` -- see
+    // `short_test_dir` below.
     format!(
-        "meetingrecorder-browser-bridge-test-{}-{}",
+        "amr-t-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// A short scratch directory for the Unix-socket round-trip tests below.
+/// `std::env::temp_dir()` resolves to `$TMPDIR` on macOS
+/// (`/var/folders/xx/<long random segment>/T/`), which combined with any
+/// further subdirectory and the `.sock` filename can exceed
+/// `sockaddr_un::sun_path`'s 104-byte limit (108 on Linux); `bind`/`connect`
+/// then fail with no indication the path length was the cause. `/tmp`
+/// itself is always short on both platforms.
+#[cfg(not(windows))]
+fn short_test_dir(label: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        "/tmp/amr-t-{label}-{}",
+        std::process::id()
+    ))
 }
 
 fn wait_for<F: Fn() -> bool>(condition: F) -> bool {
@@ -79,7 +98,7 @@ fn in_process_round_trip_ignores_invalid_json_then_accepts_a_valid_line() {
 #[cfg(not(windows))]
 #[test]
 fn in_process_round_trip_delivers_a_valid_observation() {
-    let dir = std::env::temp_dir().join(format!("meetingrecorder-bridge-test-{}", std::process::id()));
+    let dir = short_test_dir("a");
     std::fs::create_dir_all(&dir).unwrap();
     let name = unique_name();
     let state = BrowserBridgeState::new();
@@ -108,7 +127,7 @@ fn in_process_round_trip_delivers_a_valid_observation() {
 #[cfg(not(windows))]
 #[test]
 fn in_process_round_trip_ignores_invalid_json_then_accepts_a_valid_line() {
-    let dir = std::env::temp_dir().join(format!("meetingrecorder-bridge-test2-{}", std::process::id()));
+    let dir = short_test_dir("b");
     std::fs::create_dir_all(&dir).unwrap();
     let name = unique_name();
     let state = BrowserBridgeState::new();

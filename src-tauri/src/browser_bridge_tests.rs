@@ -192,6 +192,66 @@ fn state_expires_a_stale_in_call_observation() {
     assert!(state.current_in_call(far_future).is_none());
 }
 
+// sockaddr_un::sun_path is 104 bytes on macOS (108 on Linux), including the
+// trailing NUL Rust adds when binding/connecting; leave headroom below the
+// tighter macOS limit rather than cutting it exactly at either.
+#[cfg(not(windows))]
+const SUN_PATH_SAFE_LIMIT: usize = 100;
+
+#[cfg(not(windows))]
+#[test]
+fn generated_socket_paths_stay_under_the_sun_path_limit() {
+    // Mirrors browser_bridge_ipc::platform::socket_path's `dir.join(name +
+    // ".sock")` using short_private_socket_dir() directly -- the fallback
+    // `default_socket_dir()` takes on macOS, where `XDG_RUNTIME_DIR` is
+    // never set -- rather than mutating the process-wide `XDG_RUNTIME_DIR`
+    // env var, which parallel test threads also read.
+    let dir = short_private_socket_dir().expect("short_private_socket_dir should succeed under /tmp");
+    let path = dir.join(format!("{}.sock", crate::browser_bridge_ipc::ENDPOINT_NAME));
+    let len = path.as_os_str().len();
+    assert!(
+        len < SUN_PATH_SAFE_LIMIT,
+        "socket path {path:?} is {len} bytes, at or over the sun_path limit"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn ensure_private_dir_creates_and_accepts_a_fresh_0700_directory() {
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!(
+        "amr-test-fresh-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ensure_private_dir(&dir, uid));
+    assert!(ensure_private_dir(&dir, uid), "re-checking an already-ours dir must still accept it");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
+fn ensure_private_dir_refuses_a_directory_it_does_not_exclusively_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!(
+        "amr-test-unsafe-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    // World-writable/readable, not the required 0700: another local user
+    // could have pre-created this under a shared /tmp.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        !ensure_private_dir(&dir, uid),
+        "a pre-existing directory with the wrong permissions must be refused, not silently reused"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn state_treats_ended_as_no_current_call_immediately() {
     let state = BrowserBridgeState::new();

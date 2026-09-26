@@ -76,6 +76,9 @@ keyring = { version = "3", default-features = false, features = ["windows-native
 
 [target.'cfg(not(windows))'.dependencies]
 sherpa-onnx = "=1.13.8"
+# Only for getuid() in browser_bridge.rs's short, per-user socket-directory
+# fallback (see short_private_socket_dir).
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["apple-native"] }

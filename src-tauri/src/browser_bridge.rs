@@ -299,6 +299,13 @@ impl BrowserBridgeState {
 /// fresh by the browser) call this same function, so they always agree.
 /// `XDG_RUNTIME_DIR` is already per-user and mode 0700 on every common
 /// Linux desktop; it is the correct home for a short-lived local socket.
+///
+/// macOS never sets `XDG_RUNTIME_DIR`, and its `$TMPDIR`
+/// (`/var/folders/xx/<long random segment>/T/`) is long enough that a
+/// socket path built under it can exceed `sockaddr_un::sun_path`'s 104-byte
+/// limit (108 on Linux) -- `bind`/`connect` then fail outright with no
+/// indication the path was the problem. `short_private_socket_dir` is a
+/// short, fixed, per-user fallback that avoids this regardless of `$TMPDIR`.
 #[cfg(not(windows))]
 pub fn default_socket_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
@@ -307,12 +314,53 @@ pub fn default_socket_dir() -> std::path::PathBuf {
             return PathBuf::from(dir);
         }
     }
-    if let Ok(dir) = std::env::var("TMPDIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Some(dir) = short_private_socket_dir() {
+        return dir;
     }
     PathBuf::from("/tmp")
+}
+
+/// A short (well under any `sun_path` limit), per-user, 0700 directory under
+/// `/tmp` used when `XDG_RUNTIME_DIR` is unset -- always true on macOS, and
+/// the fallback path when a Linux session manager doesn't set it either.
+/// `/tmp` is world-writable, so another local user could otherwise
+/// pre-create `dir` (as a symlink elsewhere, or a directory they own) ahead
+/// of us; refuse to reuse anything that isn't already exactly ours with
+/// exactly these permissions rather than silently trusting or widening it.
+#[cfg(not(windows))]
+fn short_private_socket_dir() -> Option<std::path::PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let dir = std::path::PathBuf::from(format!("/tmp/atomik-mr-{uid}"));
+    ensure_private_dir(&dir, uid).then_some(dir)
+}
+
+/// Creates `dir` mode 0700 if it doesn't exist, then confirms it is a
+/// directory owned by `uid` with exactly mode 0700 (whether just-created or
+/// pre-existing). Returns `false` -- refusing to use `dir` -- for anything
+/// else: owned by another user, wider permissions, a symlink, a plain file,
+/// or a directory that could not be created. Split out from
+/// `short_private_socket_dir` so tests can point it at a scratch path
+/// instead of the real per-uid `/tmp` directory.
+#[cfg(not(windows))]
+fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let is_exclusively_ours = |meta: &std::fs::Metadata| {
+        meta.is_dir() && meta.uid() == uid && meta.permissions().mode() & 0o777 == 0o700
+    };
+    if std::fs::symlink_metadata(dir).is_err() {
+        if std::fs::create_dir(dir).is_err() {
+            return false;
+        }
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    // Always re-check (rather than trusting a fresh `create_dir`): another
+    // process could have raced us between creation and the permission
+    // change, or the path could have pre-existed under another user's
+    // control (this directory lives under the world-writable `/tmp`).
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => is_exclusively_ours(&meta),
+        Err(_) => false,
+    }
 }
 
 /// Starts the background thread that accepts connections from the

@@ -2640,6 +2640,7 @@ dependencies = [
  "flacenc",
  "hound",
  "keyring",
+ "libc",
  "libpulse-binding",
  "libpulse-simple-binding",
  "realfft",
