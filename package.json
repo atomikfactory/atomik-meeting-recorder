@@ -22,5 +22,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0"
-  }
+  },
+  "license": "GPL-3.0-or-later"
 }

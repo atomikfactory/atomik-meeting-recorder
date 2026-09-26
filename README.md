@@ -98,3 +98,7 @@ The optional Windows scripts `scripts/native-smoke.mjs`, `scripts/native-audio-s
 See [manual acceptance checks](docs/manual-checks.md) for tray, permissions, and hardware checks. Recording and transcription have synthetic lifecycle, recovery, and idempotency tests. Remote-import idempotency remains future work; no AppFlowy requests are made.
 
 `scripts/native-recording-smoke.mjs --allow-capture` is a separate, explicitly consented five-second Windows capture check. It selects the C922 webcam and default output on this development machine, retains the audio locally, and inspects headers only. Do not run it during a real recording or without microphone/system-audio consent. Synthetic tests do not open hardware.
+
+## License
+
+Atomik Meeting Recorder is licensed under the GNU General Public License v3.0 or later; see [LICENSE](LICENSE). Third-party components keep their own licences (for example the WebRTC-derived echo canceller in `src-tauri/src/echo_cancel/LICENSE-WEBRTC`).

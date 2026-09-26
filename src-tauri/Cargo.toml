@@ -3,6 +3,7 @@ name = "meeting-recorder"
 version = "0.1.0"
 description = "A local-first Atomik meeting recorder"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "meeting_recorder_lib"
