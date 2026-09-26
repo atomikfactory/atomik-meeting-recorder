@@ -166,3 +166,42 @@ test("no unsaved Settings control is reset by background polling",async({page})=
   const after=await page.evaluate((keys:string[])=>Object.fromEntries(keys.map(k=>{const el=document.querySelector<HTMLInputElement>(`[name="${k}"]`)||document.getElementById(k) as HTMLInputElement|null;return[k,el?(el.type==="checkbox"?el.checked:el.value):null]})),Object.keys(edited));
   expect(after).toEqual(edited);
 });
+
+test("a transcribed meeting offers AppFlowy setup when export is off, opening Settings",async({page})=>{
+  const setup=page.getByRole("button",{name:"Set up AppFlowy export"});
+  await expect(setup).toBeVisible();
+  await setup.click();
+  await expect(page.locator("#appflowy-settings-section")).toBeVisible();
+  await expect(page.locator('[name="appflowy_enabled"]')).toBeVisible();
+});
+
+test("enabled but signed out offers sign-in instead of a dead export button",async({page})=>{
+  await page.evaluate(()=>{(window as any).__af.appflowy={...(window as any).__af.appflowy,enabled:true,connected:false}});
+  await expect(page.getByRole("button",{name:"Sign in to AppFlowy"})).toBeVisible({timeout:5000});
+  await expect(page.getByRole("button",{name:"Export to AppFlowy",exact:true})).toHaveCount(0);
+});
+
+test("full path: enable, sign in, then export from the meeting card",async({page})=>{
+  await page.getByRole("button",{name:"Set up AppFlowy export"}).click();
+  await page.locator('[name="appflowy_enabled"]').check();
+  await page.getByRole("button",{name:"Save preferences"}).click();
+  await page.evaluate(()=>{const f=(window as any).__af;f.appflowy={...f.appflowy,enabled:true}});
+  await page.locator("#appflowy-email").fill("user@example.com");
+  await page.getByRole("button",{name:"Send sign-in code"}).click();
+  await page.locator("#appflowy-code").fill("123456");
+  await page.getByRole("button",{name:"Verify code"}).click();
+  await expect(page.locator("#appflowy-auth-status")).toContainText("Signed in as user@example.com");
+  await page.getByRole("button",{name:"Dashboard"}).click();
+  const exportButton=page.getByRole("button",{name:"Export to AppFlowy",exact:true});
+  await expect(exportButton).toBeVisible({timeout:5000});
+  await exportButton.click();
+  await expect(page.getByRole("button",{name:"Export to AppFlowy again"})).toBeVisible({timeout:5000});
+});
+
+test("meetings without a finished transcript show no AppFlowy action",async({page})=>{
+  await page.evaluate(()=>{const f=(window as any).__af;f.appflowy={...f.appflowy,enabled:true,connected:true,email:"u@e.com"}});
+  await page.route("**/*",r=>r.continue());
+  await page.evaluate(()=>{const t=(window as any).__TAURI_INTERNALS__;const orig=t.invoke;t.invoke=async(c:string,a:any)=>c==="get_transcription_state"?{inhibited:false,model:{key:"base",available:false},jobs:[{recording_id:"a",status:"transcribing",progress:40,error:null,markdown_path:null}],error:null,backend:"cpu (AVX2)"}:orig(c,a)});
+  await page.waitForTimeout(2500);
+  await expect(page.locator("[data-appflowy-export],[data-appflowy-setup]")).toHaveCount(0);
+});

@@ -258,24 +258,33 @@ fn set_error(slot: &Mutex<Option<String>>, value: Option<String>) {
 /// labels and the summary are final before anything is sent.
 fn is_ready_for_export(root: &Path, settings: &AppFlowySettings, recording: &Recording) -> Result<bool, String> {
     if settings.diarization_enabled && recording.tracks.iter().any(|t| t.direction == "output") {
-        let done = DiarizationStore::open(&root.join("diarization.sqlite3"))?
+        let status = DiarizationStore::open(&root.join("diarization.sqlite3"))?
             .get(&recording.recording_id)?
-            .map(|j| j.status == "completed")
-            .unwrap_or(false);
-        if !done {
+            .map(|j| j.status);
+        if !diarization_settled(status.as_deref()) {
             return Ok(false);
         }
     }
     if settings.summary_enabled {
-        let done = SummaryStore::open(&root.join("summary.sqlite3"))?
+        let status = SummaryStore::open(&root.join("summary.sqlite3"))?
             .get(&recording.recording_id)?
-            .map(|j| j.status == "completed")
-            .unwrap_or(false);
-        if !done {
+            .map(|j| j.status);
+        if !summary_settled(status.as_deref()) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+/// Speaker labels are optional: only a job that can still finish is worth
+/// waiting for. Missing models or a failed job export without labels rather
+/// than holding the meeting back forever.
+fn diarization_settled(status: Option<&str>) -> bool {
+    !matches!(status, None | Some("queued" | "diarizing"))
+}
+/// A summary still pending (queued, running or waiting for Ollama to come
+/// back) delays export; a failed summary exports the transcript alone.
+fn summary_settled(status: Option<&str>) -> bool {
+    matches!(status, Some("completed" | "failed"))
 }
 
 fn tick(

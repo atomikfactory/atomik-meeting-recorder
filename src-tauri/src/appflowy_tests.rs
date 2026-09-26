@@ -344,3 +344,50 @@ fn a_transient_failure_is_queued_for_backoff_retry_not_marked_permanently_failed
     assert_eq!(job.status, "queued", "a transient failure must remain queued for backoff, not become permanently failed");
     assert!(job.error.as_deref().unwrap_or_default().contains("outage") || job.error.is_some());
 }
+
+#[test]
+fn optional_diarization_never_blocks_auto_export_forever() {
+    assert!(!super::diarization_settled(None));
+    assert!(!super::diarization_settled(Some("queued")));
+    assert!(!super::diarization_settled(Some("diarizing")));
+    assert!(super::diarization_settled(Some("completed")));
+    assert!(super::diarization_settled(Some("failed")));
+    assert!(super::diarization_settled(Some("waiting_models")));
+}
+
+#[test]
+fn a_failed_summary_exports_the_transcript_alone() {
+    assert!(!super::summary_settled(None));
+    assert!(!super::summary_settled(Some("queued")));
+    assert!(!super::summary_settled(Some("summarizing")));
+    assert!(!super::summary_settled(Some("waiting_ollama")));
+    assert!(super::summary_settled(Some("completed")));
+    assert!(super::summary_settled(Some("failed")));
+}
+
+#[test]
+fn auto_export_proceeds_when_speaker_models_are_not_imported() {
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    let mut recording = fixture.recording.clone();
+    let mut loopback = recording.tracks[0].clone();
+    loopback.source_id = "speakers".into();
+    loopback.name = "Speakers".into();
+    loopback.direction = "output".into();
+    recording.tracks.push(loopback);
+    fixture.recordings.save(&recording).unwrap();
+    let diarization = DiarizationStore::open(&fixture.root.join("diarization.sqlite3")).unwrap();
+    diarization.enqueue(&recording.recording_id, &"b".repeat(64)).unwrap();
+    let mut settings = fixture.settings(&server);
+    settings.auto_export = true;
+    settings.diarization_enabled = true;
+    // Still queued: a job that can finish is worth waiting for.
+    tick(&fixture.root, &fixture.store, &settings, &fixture.credentials, &AtomicBool::new(false)).unwrap();
+    assert!(fixture.store.get_job(&recording.recording_id).unwrap().is_none());
+    // Models never imported: waiting forever would hide the meeting, so export without labels.
+    diarization.status(&recording.recording_id, "waiting_models", 0, None).unwrap();
+    tick(&fixture.root, &fixture.store, &settings, &fixture.credentials, &AtomicBool::new(false)).unwrap();
+    tick(&fixture.root, &fixture.store, &settings, &fixture.credentials, &AtomicBool::new(false)).unwrap();
+    assert_eq!(fixture.store.get_job(&recording.recording_id).unwrap().unwrap().status, "completed");
+}

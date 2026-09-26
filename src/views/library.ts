@@ -102,8 +102,12 @@ export function recentRecordings() {
     const compressionLine = compressionSummary(recording.recording_id);
     const appflowyBusy = appflowyActionInFlight.has(recording.recording_id);
     const appflowyJobFor = appflowyJob(recording.recording_id);
-    const appflowyActions = !store.appflowyState.enabled
+    const appflowyActions = job?.status !== "completed"
       ? ""
+      : !store.appflowyState.enabled || !store.appflowyState.connected
+      ? `<button class="secondary" data-appflowy-setup>${store.appflowyState.enabled ? "Sign in to AppFlowy" : "Set up AppFlowy export"}</button>`
+      : appflowyJobFor?.status === "queued" || appflowyJobFor?.status === "exporting"
+      ? `<button class="secondary" disabled>${appflowyJobFor.status === "exporting" ? "Exporting to AppFlowy…" : "AppFlowy export queued"}</button>`
       : appflowyJobFor?.status === "completed"
         ? `<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy again</button>`
         : appflowyJobFor?.status === "failed"
@@ -239,6 +243,10 @@ export function updateRecordingUI() {
     }
   };
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export]").forEach(button => button.onclick = () => runAppFlowyAction(button.dataset.appflowyExport!, "appflowy_export_now"));
+  document.querySelectorAll<HTMLButtonElement>("[data-appflowy-setup]").forEach(button => button.onclick = () => {
+    document.querySelector<HTMLButtonElement>("[data-page='settings']")?.click();
+    document.querySelector("#appflowy-settings-section")?.scrollIntoView({ block: "start" });
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-retry]").forEach(button => button.onclick = () => runAppFlowyAction(button.dataset.appflowyRetry!, "appflowy_retry"));
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export-again]").forEach(button => button.onclick = () => {
     const id = button.dataset.appflowyExportAgain!;
