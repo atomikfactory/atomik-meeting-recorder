@@ -19,7 +19,8 @@ body {
 #app {
   display: grid;
   grid-template-columns: 232px 1fr;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 aside {
   background: #efeae0;
@@ -27,6 +28,10 @@ aside {
   padding: 26px 16px;
   display: flex;
   flex-direction: column;
+  /* Fixed full-height sidebar: it never scrolls with `main`, which owns its
+     own independent scrollbar below. */
+  height: 100vh;
+  overflow-y: auto;
 }
 .brand {
   display: flex;
@@ -78,6 +83,11 @@ main {
   width: 100%;
   margin: auto;
   padding: 28px 56px 70px;
+  /* The main content area is the independently scrolling region: the
+     sidebar (`aside`) stays fixed in place while this scrolls. */
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 .topbar {
   display: flex;
@@ -299,7 +309,14 @@ button {
 .live-meters,#live-meters{grid-column:1/-1;display:grid;gap:8px}.level-row{display:grid;grid-template-columns:minmax(0,1fr) 62px;gap:4px 10px;align-items:center;min-height:62px;padding:8px;border-radius:6px;background:#f7fbf8}.level-row b{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.level-row .level-state{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.level-row .meter{grid-column:1;height:7px;background:#dce6e1;border-radius:8px;overflow:hidden}.level-row .meter+small{grid-column:2;font-variant-numeric:tabular-nums;white-space:nowrap}.level-row small{color:#62716b;font-size:11px}.level-row b{font-size:12px}.meter i{display:block;width:100%;height:100%;transform-origin:left;background:#14736d;transition:transform .1s linear}.level-row.is-clipping .meter i{background:#c88927}.level-row.is-clipping small{color:#9b6818}@media (prefers-reduced-motion:reduce){.meter i{transition:none}}
 .stop-recording { background: #a04e43; border-color: #8a4037; }
 .recording-list { display: grid; gap: 9px; margin-top: 14px; }
-.recording-row { display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; padding: 14px 16px; border: 1px solid #ded8cb; border-radius: 8px; background: #fbf8f2; }
+.recording-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 16px; padding: 14px 16px; border: 1px solid #ded8cb; border-radius: 8px; background: #fbf8f2; }
+.select-row { display: inline-flex; align-items: flex-start; padding-top: 2px; }
+.select-row.select-all { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; font-size: 12px; color: #4c5651; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+.chip { font: inherit; font-size: 12px; border: 1px solid #cfc8bb; background: #fbf8f2; color: #4c5651; border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+.chip.active { background: #0d746e; border-color: #0d746e; color: #fff; }
+.selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 14px; padding: 10px 14px; border-radius: 8px; background: #d8e9e4; color: #075d59; font-size: 12px; }
+.selection-bar span { font-weight: 700; }
 .recording-row div { display: grid; gap: 4px; }.recording-row small { color: #75807a; }.recording-row > span { text-transform: capitalize; color: #17645f; font-size: 12px; font-weight: 700; }.recording-row p { grid-column: 1 / -1; color: #a04e43; margin: 2px 0 0; font-size: 12px; }
 .empty {
   text-align: center;
@@ -340,6 +357,9 @@ label {
   gap: 9px;
   color: #34433e;
   font-weight: 650;
+}
+label[hidden] {
+  display: none;
 }
 .value {
   font-size: 12px;

@@ -1,6 +1,7 @@
 import { invoke, preview } from "../api";
 import { notice } from "../ui/notice";
 import { recordingBusy, store, summaryActionInFlight, appflowyActionInFlight, transcribeInFlight } from "../store";
+import type { LibraryFilter } from "../store";
 import type { Recording, RecordingState } from "../types";
 import { escapeAttr, escapeHtml, setTextIfChanged } from "../util/escape";
 import { levelDb, recordingDuration, recordingSources, sourceSummary } from "../util/format";
@@ -67,11 +68,73 @@ export function recordingLabel(status: RecordingState["status"]) {
   return status === "recording" ? "Recording" : status === "processing" ? "Saving recording" : status === "failed" ? "Recording failed" : "Ready to record";
 }
 
+/// Is this meeting's AppFlowy export completed ("Synced to AppFlowy" filter)?
+function isSyncedToAppFlowy(recording: Recording) {
+  return appflowyJob(recording.recording_id)?.status === "completed";
+}
+/// Does this meeting have no completed summary ("No summary" filter)?
+function hasNoCompletedSummary(recording: Recording) {
+  return summaryJob(recording.recording_id)?.status !== "completed";
+}
+function passesLibraryFilter(recording: Recording): boolean {
+  switch (store.libraryFilter) {
+    case "synced": return isSyncedToAppFlowy(recording);
+    case "not_synced": return !isSyncedToAppFlowy(recording);
+    case "no_summary": return hasNoCompletedSummary(recording);
+    default: return true;
+  }
+}
+/// The list before the filter chips are applied, but after the free-text
+/// history search box -- the same set the filter chips' counts are drawn
+/// from, so a count always matches what choosing that chip will show.
+function historySearched(): Recording[] {
+  const query = store.historyQuery.toLocaleLowerCase();
+  return store.recordingState.recent.filter((r) => !query || `${r.meeting_title ?? "Meeting"} ${new Date(r.started_at).toLocaleString()}`.toLocaleLowerCase().includes(query));
+}
+const LIBRARY_FILTERS: { key: LibraryFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "synced", label: "Synced to AppFlowy" },
+  { key: "not_synced", label: "Not synced" },
+  { key: "no_summary", label: "No summary" },
+];
+function filterChipsHtml(searched: Recording[]) {
+  const counts: Record<LibraryFilter, number> = {
+    all: searched.length,
+    synced: searched.filter(isSyncedToAppFlowy).length,
+    not_synced: searched.filter((r) => !isSyncedToAppFlowy(r)).length,
+    no_summary: searched.filter(hasNoCompletedSummary).length,
+  };
+  return `<div class="filter-chips" role="group" aria-label="Filter meetings">${LIBRARY_FILTERS.map(({ key, label }) =>
+    `<button type="button" class="chip${store.libraryFilter === key ? " active" : ""}" aria-pressed="${store.libraryFilter === key}" data-filter="${key}">${escapeHtml(label)} (${counts[key]})</button>`,
+  ).join("")}</div>`;
+}
+function selectionBarHtml(visibleIds: string[]) {
+  const selected = visibleIds.filter((id) => store.selectedRecordingIds.has(id));
+  if (!selected.length) return "";
+  const busy = store.bulkActionBusy ? "disabled" : "";
+  return `<div id="library-selection-bar" class="selection-bar" role="region" aria-live="polite">
+    <span>${selected.length} selected</span>
+    <button type="button" class="secondary" data-bulk-clear ${busy}>Clear selection</button>
+    <button type="button" class="secondary" data-bulk-queue-transcription ${busy}>Queue transcription</button>
+    <button type="button" class="secondary" data-bulk-queue-summary ${busy}>Queue summary</button>
+    <button type="button" class="secondary" data-bulk-remove ${busy}>Remove from list</button>
+    <button type="button" class="secondary" data-bulk-delete-disk ${busy}>Delete from disk</button>
+  </div>`;
+}
+
 export function recentRecordings() {
   if (!store.recordingState.recent.length) return `<div class="empty"><div class="empty-wave">~~~</div><h3>Your recordings will appear here</h3><p>Audio and transcripts stay on this device. Import a local Whisper model in Settings to begin transcription. AppFlowy export is off by default; enable it in Settings.</p></div>`;
-  const query = store.historyQuery.toLocaleLowerCase();
-  const visible = store.recordingState.recent.filter((r) => !query || `${r.meeting_title ?? "Meeting"} ${new Date(r.started_at).toLocaleString()}`.toLocaleLowerCase().includes(query));
-  return `<p class="history-scope">Searching the 25 most recent recordings. Older recordings stay in their original folders; use Open folder on a recording.</p><div class="recording-list">${visible.map((recording) => {
+  // Selection persists across re-renders/filters/searches, but an id whose
+  // recording has actually left the list (e.g. deleted) is pruned here.
+  const knownIds = new Set(store.recordingState.recent.map((r) => r.recording_id));
+  for (const id of store.selectedRecordingIds) if (!knownIds.has(id)) store.selectedRecordingIds.delete(id);
+  const searched = historySearched();
+  const visible = searched.filter(passesLibraryFilter);
+  const visibleIds = visible.map((r) => r.recording_id);
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => store.selectedRecordingIds.has(id));
+  const someSelected = visibleIds.some((id) => store.selectedRecordingIds.has(id));
+  const selectAll = `<label class="select-row select-all"><input type="checkbox" id="library-select-all" ${allSelected ? "checked" : ""} data-indeterminate="${someSelected && !allSelected}" aria-label="Select all visible meetings"/><span>Select all (visible)</span></label>`;
+  return `${filterChipsHtml(searched)}${selectionBarHtml(visibleIds)}<p class="history-scope">Searching the 25 most recent recordings. Older recordings stay in their original folders; use Open folder on a recording.</p>${visible.length ? selectAll : ""}<div class="recording-list">${visible.map((recording) => {
     const issues = recordingIssues(recording);
     const shortId = recording.recording_id.slice(0, 8);
     const started = new Date(recording.started_at).toLocaleString();
@@ -115,7 +178,8 @@ export function recentRecordings() {
           : !appflowyJobFor && store.appflowyState.connected
             ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>`
             : "";
-    return `<article class="recording-row"><div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}</article>`;
+    const checkbox = `<label class="select-row"><input type="checkbox" data-select="${escapeAttr(recording.recording_id)}" aria-label="Select ${escapeAttr(recording.meeting_title || "Meeting")}" ${store.selectedRecordingIds.has(recording.recording_id) ? "checked" : ""}/></label>`;
+    return `<article class="recording-row">${checkbox}<div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}</article>`;
   }).join("")}</div>`;
 }
 
@@ -265,6 +329,241 @@ export function updateRecordingUI() {
     }
   });
   wireManagementDialog();
+  wireLibrarySelection();
+  wireBulkDialog();
+}
+
+function selectedIdsInList(): string[] {
+  const known = new Set(store.recordingState.recent.map((r) => r.recording_id));
+  return Array.from(store.selectedRecordingIds).filter((id) => known.has(id));
+}
+
+function wireLibrarySelection() {
+  document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((input) => {
+    input.onchange = () => {
+      const id = input.dataset.select!;
+      if (input.checked) store.selectedRecordingIds.add(id);
+      else store.selectedRecordingIds.delete(id);
+      updateRecordingUI();
+    };
+  });
+  const selectAll = document.querySelector<HTMLInputElement>("#library-select-all");
+  if (selectAll) {
+    selectAll.indeterminate = selectAll.dataset.indeterminate === "true";
+    selectAll.onchange = () => {
+      const ids = Array.from(document.querySelectorAll<HTMLInputElement>("[data-select]")).map((i) => i.dataset.select!);
+      if (selectAll.checked) ids.forEach((id) => store.selectedRecordingIds.add(id));
+      else ids.forEach((id) => store.selectedRecordingIds.delete(id));
+      updateRecordingUI();
+    };
+  }
+  document.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach((button) => {
+    button.onclick = () => {
+      store.libraryFilter = button.dataset.filter as LibraryFilter;
+      store.renderedRecentRecordings = null;
+      updateRecordingUI();
+    };
+  });
+  const clear = document.querySelector<HTMLButtonElement>("[data-bulk-clear]");
+  if (clear) clear.onclick = () => { store.selectedRecordingIds.clear(); updateRecordingUI(); };
+  const queueTranscription = document.querySelector<HTMLButtonElement>("[data-bulk-queue-transcription]");
+  if (queueTranscription) queueTranscription.onclick = runBulkQueueTranscription;
+  const queueSummary = document.querySelector<HTMLButtonElement>("[data-bulk-queue-summary]");
+  if (queueSummary) queueSummary.onclick = runBulkQueueSummary;
+  const remove = document.querySelector<HTMLButtonElement>("[data-bulk-remove]");
+  if (remove) remove.onclick = () => openBulkDialog("remove");
+  const deleteFromDisk = document.querySelector<HTMLButtonElement>("[data-bulk-delete-disk]");
+  if (deleteFromDisk) deleteFromDisk.onclick = () => openBulkDialog("delete");
+}
+
+async function runBulkQueueTranscription() {
+  if (store.bulkActionBusy) return;
+  const ids = selectedIdsInList();
+  store.bulkActionBusy = true;
+  updateRecordingUI();
+  let queued = 0;
+  let skipped = 0;
+  for (const id of ids) {
+    const recording = store.recordingState.recent.find((r) => r.recording_id === id);
+    const job = transcriptionJob(id);
+    try {
+      if (job?.status === "failed") {
+        await invoke("retry_transcription", { recordingId: id });
+        queued++;
+      } else if (!job && recording && ["recorded", "interrupted", "failed"].includes(recording.status) && recording.tracks.some((t) => t.frames_written > 0)) {
+        await invoke("transcribe_recording", { recordingId: id });
+        queued++;
+      } else {
+        skipped++;
+      }
+    } catch {
+      skipped++;
+    }
+  }
+  store.bulkActionBusy = false;
+  store.lastBulkResult = `${queued} queued, ${skipped} skipped`;
+  notice(store.lastBulkResult);
+  await refreshTranscriptionState();
+  await refreshRecordingState(true);
+  updateRecordingUI();
+}
+
+async function runBulkQueueSummary() {
+  if (store.bulkActionBusy) return;
+  const ids = selectedIdsInList();
+  store.bulkActionBusy = true;
+  updateRecordingUI();
+  let queued = 0;
+  let skipped = 0;
+  for (const id of ids) {
+    const transcript = transcriptionJob(id);
+    const summary = summaryJob(id);
+    try {
+      if (transcript?.status !== "completed" || summary?.status === "completed") {
+        skipped++;
+      } else if (summary?.status === "failed" || summary?.status === "waiting_ollama") {
+        await invoke("retry_summary", { recordingId: id });
+        queued++;
+      } else if (!summary) {
+        // No summary job at all yet -- e.g. the transcript finished before
+        // summaries were enabled, or `auto_transcribe` was off -- so there
+        // is nothing for retry/regenerate to act on. Enqueue a first job.
+        await invoke("queue_summary", { recordingId: id });
+        queued++;
+      } else {
+        skipped++;
+      }
+    } catch {
+      skipped++;
+    }
+  }
+  store.bulkActionBusy = false;
+  store.lastBulkResult = `${queued} queued, ${skipped} skipped`;
+  notice(store.lastBulkResult);
+  await refreshSummaryStateAndUI();
+  updateRecordingUI();
+}
+
+function openBulkDialog(kind: "remove" | "delete") {
+  const ids = selectedIdsInList();
+  if (!ids.length) return;
+  store.bulkDialog = { kind, ids, mode: "recycle_bin" };
+  store.bulkDialogError = "";
+  renderBulkDialog();
+  const dialog = document.querySelector<HTMLDialogElement>("#bulk-dialog");
+  if (!dialog?.open) dialog?.showModal();
+}
+
+function bulkAudioBytes(ids: string[]) {
+  const byId = new Map(store.audioStorage.recordings.map((r) => [r.recording_id, r.bytes]));
+  return ids.reduce((total, id) => total + (byId.get(id) ?? 0), 0);
+}
+function formatBytes(bytes: number) {
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+function bulkTitles(ids: string[]) {
+  const byId = new Map(store.recordingState.recent.map((r) => [r.recording_id, r.meeting_title ?? "Meeting"]));
+  const titles = ids.map((id) => byId.get(id) ?? "Meeting").slice(0, 3);
+  return titles.join(", ") + (ids.length > 3 ? `, and ${ids.length - 3} more` : "");
+}
+
+function renderBulkDialog() {
+  const task = store.bulkDialog;
+  const title = document.querySelector("#bulk-dialog-title");
+  const detail = document.querySelector("#bulk-dialog-detail");
+  const options = document.querySelector<HTMLElement>("#bulk-delete-options");
+  const confirmLabel = document.querySelector<HTMLElement>("#bulk-confirm-label");
+  const confirmTarget = document.querySelector("#bulk-confirm-target");
+  const errorNode = document.querySelector("#bulk-dialog-error");
+  const confirmButton = document.querySelector<HTMLButtonElement>("#bulk-dialog-confirm");
+  const cancelButton = document.querySelector<HTMLButtonElement>("#bulk-dialog-cancel");
+  if (!task || !title || !detail || !options || !confirmLabel || !errorNode || !confirmButton || !cancelButton) return;
+  if (title) title.textContent = task.kind === "remove" ? "Remove from list" : "Delete from disk";
+  const titles = bulkTitles(task.ids);
+  if (task.kind === "remove") {
+    detail.textContent = `Remove ${task.ids.length} meeting(s) from the list: ${titles}. Audio and transcripts stay on disk; nothing is deleted.`;
+    options.hidden = true;
+  } else {
+    detail.textContent = `Permanently remove ${task.ids.length} meeting(s) from disk: ${titles}. Total audio: ${formatBytes(bulkAudioBytes(task.ids))}. AppFlowy pages already exported for these meetings are never touched or deleted.`;
+    options.hidden = false;
+    document.querySelectorAll<HTMLInputElement>('input[name="bulk-mode"]').forEach((radio) => {
+      radio.checked = radio.value === task.mode;
+      radio.onchange = () => { if (radio.checked) { store.bulkDialog = { ...task, mode: radio.value as "recycle_bin" | "permanent" }; renderBulkDialog(); } };
+    });
+    confirmLabel.hidden = task.mode !== "permanent";
+    if (confirmTarget) confirmTarget.textContent = "DELETE";
+  }
+  errorNode.textContent = store.bulkDialogError;
+  confirmButton.disabled = store.bulkDialogBusy || bulkConfirmDisabled();
+  cancelButton.disabled = store.bulkDialogBusy;
+}
+
+function bulkConfirmDisabled(): boolean {
+  const task = store.bulkDialog;
+  if (!task) return true;
+  if (task.kind === "remove" || task.mode === "recycle_bin") return false;
+  const input = (document.querySelector<HTMLInputElement>("#bulk-confirm-input")?.value ?? "").trim();
+  return input !== "DELETE" && input !== String(task.ids.length);
+}
+
+function wireBulkDialog() {
+  const dialog = document.querySelector<HTMLDialogElement>("#bulk-dialog");
+  const confirmInput = document.querySelector<HTMLInputElement>("#bulk-confirm-input");
+  if (confirmInput) confirmInput.oninput = () => renderBulkDialog();
+  const cancel = document.querySelector<HTMLButtonElement>("#bulk-dialog-cancel");
+  if (cancel) cancel.onclick = (event) => {
+    event.preventDefault();
+    if (store.bulkDialogBusy) return;
+    store.bulkDialog = null;
+    dialog?.close();
+  };
+  if (dialog) dialog.oncancel = (event) => {
+    if (store.bulkDialogBusy) event.preventDefault();
+    else store.bulkDialog = null;
+  };
+  const confirm = document.querySelector<HTMLButtonElement>("#bulk-dialog-confirm");
+  if (confirm) confirm.onclick = async (event) => {
+    event.preventDefault();
+    const task = store.bulkDialog;
+    if (!task || store.bulkDialogBusy || bulkConfirmDisabled()) return;
+    store.bulkDialogBusy = true;
+    renderBulkDialog();
+    try {
+      if (task.kind === "remove") {
+        let removed = 0;
+        let failed = 0;
+        for (const id of task.ids) {
+          try { await invoke("delete_recording", { recordingId: id }); removed++; }
+          catch { failed++; }
+        }
+        store.lastBulkResult = `${removed} removed from the list${failed ? `, ${failed} failed` : ""}`;
+      } else {
+        const summary = await invoke<{ results: { recording_id: string; deleted: boolean; skipped_reason: string | null }[] }>(
+          "delete_recordings_from_disk",
+          { recordingIds: task.ids, mode: task.mode },
+        );
+        const deleted = summary.results.filter((r) => r.deleted).length;
+        const skippedReasons = summary.results.filter((r) => !r.deleted).map((r) => r.skipped_reason).filter(Boolean);
+        store.lastBulkResult = `Deleted ${deleted}, skipped ${skippedReasons.length}${skippedReasons.length ? `: ${skippedReasons.join("; ")}` : ""}`;
+      }
+      notice(store.lastBulkResult!);
+      store.selectedRecordingIds.clear();
+      store.bulkDialog = null;
+      dialog?.close();
+      await refreshRecordingState(true);
+    } catch (error) {
+      store.bulkDialogError = String(error);
+      renderBulkDialog();
+    } finally {
+      store.bulkDialogBusy = false;
+      updateRecordingUI();
+    }
+  };
 }
 
 // `updateRecordingUI` runs on every poll tick, so summary/AppFlowy action

@@ -42,6 +42,10 @@ tauri-plugin-dialog = "2"
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 flacenc = "0.5.1"
 claxon = "0.4.3"
+# Cross-platform OS Recycle Bin/Trash for "Delete from disk" (recycle-bin
+# mode). Pure Rust, dual MIT/Apache-2.0 licensed -- compatible with this
+# project's dependency licensing.
+trash = "5"
 
 [target.'cfg(windows)'.dependencies]
 # The upstream 1.13.8 static Windows archive is built with /MT, while

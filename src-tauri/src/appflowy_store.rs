@@ -354,6 +354,32 @@ impl AppFlowyStore {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+    /// A deletion is allowed to remove a dormant/completed/failed job row, but
+    /// never one whose export is actively in flight. Mirrors
+    /// `transcription_store::remove_if_idle` and friends. Deliberately leaves
+    /// `appflowy_pages` (the create-only idempotency ledger) untouched: an
+    /// exported page already living in AppFlowy is never modified or removed
+    /// by deleting the local recording.
+    pub fn remove_job_if_idle(&self, recording_id: &str) -> Result<(), String> {
+        let c = self.c.lock().map_err(|_| "store lock")?;
+        let status: Option<String> = c
+            .query_row(
+                "SELECT status FROM appflowy_jobs WHERE recording_id=?1",
+                params![recording_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if status.as_deref() == Some("exporting") {
+            return Err("An AppFlowy export is in progress; wait for it to finish before deleting this recording.".into());
+        }
+        c.execute(
+            "DELETE FROM appflowy_jobs WHERE recording_id=?1",
+            params![recording_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
     /// "Export again": only valid once the previous export finished (either
     /// way); bumps `export_index` so the next tick creates a brand-new
     /// meeting page (never touching the old one) rather than resuming into

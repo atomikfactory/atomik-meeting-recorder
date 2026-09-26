@@ -48,7 +48,7 @@ test("settings access failure preserves data and offers recovery", async ({
     "Settings file is unavailable",
   );
   await expect(page.locator("#record")).toBeDisabled();
-  await expect(page.locator("#quit")).toBeEnabled();
+  await expect(page.locator("#quit")).toHaveCount(0);
   await page.getByRole("button", { name: "Retry desktop connection" }).click();
   await expect(page.locator("#retry")).toHaveCount(0);
   await expect(page.locator(".notice img")).toHaveCount(0);
@@ -131,4 +131,37 @@ test("dashboard renders capability truth and screenshots", async ({ page }) => {
     path: "test-results/dashboard-780x760.png",
     fullPage: true,
   });
+});
+
+test("the sidebar stays fixed while the main content scrolls independently", async ({ page }) => {
+  await page.addInitScript(() => {
+    const track = { source_id: "mic", name: "Desk mic", direction: "input", sample_rate: 48000, channels: 1, file_path: "x.wav", frames_written: 480, dropped_samples: 0, error: null };
+    const recent = Array.from({ length: 30 }, (_, i) => ({ recording_id: `r${i}`, started_at: 1700000000000 + i, ended_at: 1, duration_ms: 1, status: "recorded", tracks: [track], error: null, meeting_title: `Meeting ${i}`, storage_path: `meetings/x--r${i}`, transcription_status: "", appflowy_status: "" }));
+    Object.assign(window, { __TAURI_INTERNALS__: { transformCallback: () => 1, invoke: async (command: string) => {
+      if (command === "plugin:event|listen") return 1;
+      if (command === "get_settings") return { auto_record: true, start_debounce_seconds: 10, end_grace_seconds: 30, whisper_model: "base", audio_sources: [] };
+      if (command === "get_app_state") return { status: "idle", recording_supported: true, detection_supported: false, appflowy_connected: false, recordings_folder: "", tray_available: true, tray_error: null };
+      if (command === "get_recording_state") return { status: "idle", active: null, recent, error: null };
+      if (command === "get_transcription_state") return { inhibited: false, model: { key: "base", available: false }, jobs: [], error: null, backend: "cpu (AVX2)" };
+      if (command === "get_detection_state") return { supported: false, enabled: false, phase: "unsupported", detail: "", error: null, seconds_remaining: null, automation_inhibited: false };
+      if (command === "get_diarization_state") return { enabled: true, inhibited: false, models: [], jobs: [], error: null };
+      if (command === "get_compression_state") return { enabled: true, inhibited: false, jobs: [], error: null };
+      if (command === "audio_storage_summary") return { total_bytes: 0, total_original_bytes: 0, recordings: [] };
+      if (command === "get_audio_devices") return { backend: "", devices: [], errors: [] };
+      throw Error(command);
+    } } });
+  });
+  for (const size of [{ width: 780, height: 600 }, { width: 1400, height: 900 }]) {
+    await page.setViewportSize(size);
+    await page.goto("/");
+    const aside = page.locator("aside");
+    const before = await aside.boundingBox();
+    expect(before?.y).toBe(0);
+    await page.evaluate(() => { document.querySelector("main")!.scrollTop = 5000; });
+    const scrolled = await page.evaluate(() => document.querySelector("main")!.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
+    const after = await aside.boundingBox();
+    expect(after?.y).toBe(0);
+    expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBeTruthy();
+  }
 });

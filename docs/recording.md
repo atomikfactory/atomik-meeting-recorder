@@ -110,6 +110,17 @@ To choose a model, open **Settings**, select the intended **Whisper model** key,
 
 Automated synthetic and mocked tests are distinct from hardware acceptance. Physical unplug, sleep/wake, long-duration drift, and macOS/Linux permission behavior require native verification. See [verification results](verification.md) for checks actually run.
 
+## Deleting meetings: list vs disk
+
+The library supports two, deliberately different, kinds of deletion, selectable per-meeting or in bulk over a multi-select:
+
+- **Remove from list** (`delete_recording`) is the soft delete described above: it hides the meeting from history and worker selection, but its folder, WAV tracks, transcript, summary, and any AppFlowy export stay exactly as they are on disk. Use this when you just want the meeting out of the way.
+- **Delete from disk** (`delete_recordings_from_disk`, bulk-only) is destructive: it removes the meeting's whole folder from disk -- moved to the OS Recycle Bin/Trash by default (recoverable through the OS, via the [`trash`](https://crates.io/crates/trash) crate, MIT/Apache-2.0), or permanently deleted when "Delete permanently" is chosen (irreversible; the confirmation dialog requires typing `DELETE` or the exact number of meetings being deleted before this mode can be confirmed). Either way, it also removes the meeting's rows from every local store: recordings, transcription, diarization, summary, compression, and the local AppFlowy job queue.
+
+Delete from disk refuses (and reports as skipped, never as a batch-wide error) any meeting that is currently being captured, or has a transcription/diarization/summarization/compression/AppFlowy-export job actively running for it right now; a queued, completed, or failed job never blocks it. Each meeting's folder is resolved through the same known-library-roots validation used everywhere else a recording's folder is touched (canonicalized, symlink/junction-rejecting, confirmed to be a direct child of a recognized recordings library) before anything is touched, so a tampered or stale path can never cause deletion outside a recording's own folder. The recording is tombstoned in the database *before* its folder is touched, reusing the same tombstone mechanism "Remove from list" already relies on for crash safety: a crash mid-deletion leaves at worst a folder that failed to be removed, never a database row pointing at audio that may already be gone, and startup recovery only ever repairs *unfinished* (still-recording) rows, so a tombstoned meeting is never resurrected.
+
+**What is never touched:** Delete from disk never calls AppFlowy over the network, and never removes a row from the AppFlowy pages journal (the create-only ledger of pages this app has already exported). A meeting page already exported to AppFlowy stays exactly where it is in AppFlowy; only this app's own local bookkeeping for that export job is removed.
+
 ## Primary references
 
 - [CPAL 0.18.2 device/stream API](https://docs.rs/cpal/0.18.2/cpal/traits/trait.DeviceTrait.html)

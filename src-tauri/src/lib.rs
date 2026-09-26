@@ -39,6 +39,7 @@ mod meeting_signals;
 mod meeting_title;
 mod ollama_client;
 mod recording;
+mod recording_delete;
 mod recording_paths;
 mod recording_store;
 mod recording_wav;
@@ -64,6 +65,8 @@ use appflowy_client::Workspace as AppFlowyWorkspace;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use appflowy_credentials::OsCredentialStore;
 use appflowy_credentials::SharedCredentialStore;
+use appflowy_store::AppFlowyStore;
+use audio_compress_store::CompressionStore;
 use audio_devices::{
     AudioDeviceDirection, AudioDeviceInventory, AudioInventorySnapshot, CpalAudioDeviceInventory,
 };
@@ -742,6 +745,61 @@ async fn delete_recording(
     .await
     .map_err(app_error)?
 }
+/// Permanently removes each recording's whole meeting folder from disk
+/// (moved to the OS Recycle Bin/Trash by default, or permanently deleted for
+/// `mode == "permanent"`) and its rows from every local store. Distinct from
+/// `delete_recording` above, which only hides a recording from the list;
+/// audio stays on disk there. Never calls AppFlowy and never touches the
+/// `appflowy_pages` journal -- an already-exported page stays exactly where
+/// it is in AppFlowy.
+#[tauri::command]
+async fn delete_recordings_from_disk(
+    recording_ids: Vec<String>,
+    mode: String,
+    app: tauri::AppHandle,
+    recording: State<'_, RecordingService>,
+) -> Result<recording_delete::DeleteSummary, String> {
+    let service = recording.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = try_processing_guard()?;
+        let mode = recording_delete::DeleteMode::parse(&mode)?;
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        let recordings_store = RecordingStore::open(&root)?;
+        let transcription = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
+        let diarization = DiarizationStore::open(&root.join("diarization.sqlite3"))?;
+        let summary = SummaryStore::open(&root.join("summary.sqlite3"))?;
+        let compression = CompressionStore::open(&root.join("compression.sqlite3"))?;
+        let appflowy = AppFlowyStore::open(&root.join("appflowy.sqlite3"))?;
+        let active_recording_id = service.state().active.map(|r| r.recording_id);
+        let stores = recording_delete::DeleteStores {
+            recordings: &recordings_store,
+            transcription: &transcription,
+            diarization: &diarization,
+            summary: &summary,
+            compression: &compression,
+            appflowy: &appflowy,
+        };
+        let summary = recording_delete::delete_recordings_from_disk(
+            &recording_ids,
+            mode,
+            &root,
+            &extra,
+            &stores,
+            active_recording_id.as_deref(),
+            &recording_delete::OsTrash,
+        );
+        for result in &summary.results {
+            if result.deleted {
+                app.state::<SearchService>().remove(&result.recording_id);
+            }
+        }
+        service.refresh_history()?;
+        Ok(summary)
+    })
+    .await
+    .map_err(app_error)?
+}
 #[tauri::command]
 async fn search_transcripts(
     query: String,
@@ -860,6 +918,19 @@ async fn retry_summary(recording_id: String, app: tauri::AppHandle) -> Result<()
 async fn regenerate_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<SummaryService>().regenerate(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Manually enqueues a first summary job for a recording that has a
+/// completed transcript but no summary job yet at all (distinct from
+/// `retry_summary`/`regenerate_summary`, which both require an existing
+/// job row). Used by the library's bulk "Queue summary" action for
+/// meetings the automatic pipeline never queued.
+#[tauri::command]
+async fn queue_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<SummaryService>().queue(&recording_id)
     })
     .await
     .map_err(app_error)?
@@ -1613,7 +1684,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

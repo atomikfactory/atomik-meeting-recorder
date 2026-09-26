@@ -85,9 +85,7 @@ export function dashboardSectionHtml(): string {
             ><button id="stop-recording" class="primary stop-recording" hidden disabled>Stop recording</button
             ><button id="folder" class="secondary" ${disabled()}>
               Open recordings folder</button
-            ><button id="quit" class="quiet" ${preview ? "disabled" : ""}>
-              Quit
-            </button>
+            >
           </div>
           <div class="capabilities">
             <article>
@@ -178,9 +176,6 @@ export function wireDashboardSection() {
   });
   document.querySelector("#folder")?.addEventListener("click", () =>
     invoke("open_recordings_folder").catch((error) => notice(String(error), "error")),
-  );
-  document.querySelector("#quit")?.addEventListener("click", () =>
-    invoke("quit_application").catch((error) => notice(String(error), "error")),
   );
   for (const [id, command] of [["approve-meeting", "confirm_detected_recording"], ["dismiss-meeting", "dismiss_detected_recording"]]) {
     document.getElementById(id)?.addEventListener("click", async () => {

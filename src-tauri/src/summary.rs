@@ -209,6 +209,37 @@ impl SummaryService {
         }
         self.stores()?.0.regenerate(id)
     }
+    /// Manually enqueues a *first* summary job for a recording whose
+    /// transcript is already completed but which the automatic pipeline
+    /// never queued (e.g. the transcript finished before summaries were
+    /// enabled, or `auto_transcribe` was off). Goes through the exact same
+    /// `SummaryStore::enqueue` call `tick`'s automatic pass uses, keyed off
+    /// the same completed-transcript checksum, so it is just as idempotent:
+    /// calling it again once a job already exists is a no-op, never a
+    /// duplicate or a reset of an in-progress/completed job.
+    pub fn queue(&self, id: &str) -> Result<(), String> {
+        // Unlike `retry`/`regenerate` (which resume or redo compute a live
+        // worker will pick up), this only durably records intent -- exactly
+        // like the automatic pipeline's own `store.enqueue` call in `tick`,
+        // which is likewise never gated on whether a worker happens to be
+        // running right now. A queued row sits harmlessly until a
+        // non-inhibited worker (this session's, or a future run's) claims it.
+        if !(self.settings)()?.enabled {
+            return Err("Summaries are turned off in Settings.".into());
+        }
+        let (store, registry) = self.stores()?;
+        let job = registry
+            .get(id)?
+            .ok_or("This recording has no transcript yet.")?;
+        if job.status != "completed" {
+            return Err("This recording's transcript is not completed yet.".into());
+        }
+        let checksum = job
+            .checksum
+            .as_deref()
+            .ok_or("Completed transcript has no checksum.")?;
+        store.enqueue(id, checksum)
+    }
     /// The user changed a setting that could unblock waiting jobs (enabled the
     /// feature, or fixed the URL/model); wake them immediately rather than
     /// waiting out their backoff.

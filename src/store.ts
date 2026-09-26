@@ -30,6 +30,9 @@ import type {
 } from "./types";
 
 export type ManagementTask = { kind: "rename" | "delete" | "restart"; id: string; title: string };
+export type LibraryFilter = "all" | "synced" | "not_synced" | "no_summary";
+export type DeleteFromDiskMode = "recycle_bin" | "permanent";
+export type BulkDialogTask = { kind: "remove" | "delete"; ids: string[]; mode: DeleteFromDiskMode };
 
 export const icon = `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="2" y="2" width="44" height="44" rx="14" fill="#0d746e"/><rect x="19" y="10" width="10" height="19" rx="5" fill="#f7f4ed"/><path d="M14 24a10 10 0 0 0 20 0M24 34v5M18 39h12" fill="none" stroke="#f7f4ed" stroke-width="3" stroke-linecap="round"/></svg>`;
 
@@ -105,6 +108,18 @@ export const store = {
 
   renderedRecentRecordings: null as string | null,
   historyQuery: "",
+
+  // Multi-select + filters + bulk actions in the recording list. Selection
+  // lives here (not only in DOM checkboxes) so it survives the list's
+  // frequent innerHTML re-renders on background polling, search filtering,
+  // and the list gaining/losing rows.
+  selectedRecordingIds: new Set<string>(),
+  libraryFilter: "all" as LibraryFilter,
+  bulkActionBusy: false,
+  bulkDialog: null as BulkDialogTask | null,
+  bulkDialogBusy: false,
+  bulkDialogError: "",
+  lastBulkResult: null as string | null,
 
   // Full-text search across every recorded meeting's transcript and summary
   // (backed by the `search_transcripts` command's SQLite FTS5 index), distinct

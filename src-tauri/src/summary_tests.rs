@@ -342,3 +342,72 @@ fn regenerate_reruns_with_current_model() {
     assert_eq!(f.job().status, "completed");
     assert_eq!(e.calls.load(Ordering::SeqCst), 2);
 }
+#[test]
+fn queue_enqueues_a_first_summary_job_for_a_completed_transcript() {
+    let f = Fixture::new();
+    assert!(f.store.get(&f.recording.recording_id).unwrap().is_none());
+    f.service().queue(&f.recording.recording_id).unwrap();
+    assert_eq!(f.job().status, "queued");
+}
+#[test]
+fn queue_is_idempotent_and_never_resets_an_existing_job() {
+    let f = Fixture::new();
+    let service = f.service();
+    service.queue(&f.recording.recording_id).unwrap();
+    service.queue(&f.recording.recording_id).unwrap();
+    assert_eq!(f.store.all().unwrap().len(), 1, "must not create a duplicate row");
+    let e = FakeEngine::default();
+    f.tick(&e);
+    assert_eq!(f.job().status, "completed");
+    // Calling queue again once the job has already completed must not reset
+    // or re-run it -- same idempotency guarantee as the automatic pipeline's
+    // `store.enqueue` call in `tick`.
+    service.queue(&f.recording.recording_id).unwrap();
+    assert_eq!(f.job().status, "completed");
+    assert_eq!(e.calls.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn queue_refuses_a_recording_without_a_completed_transcript() {
+    let root = std::env::temp_dir().join(format!("meeting-summary-queue-test-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let registry = TranscriptionStore::open(&root.join("transcription.sqlite3")).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    // Enqueued but never claimed/completed -- transcription itself has not
+    // finished yet, so there is nothing to summarize.
+    registry.enqueue(&id, "base", &"a".repeat(64)).unwrap();
+    let service = SummaryService::with_inhibition(
+        root.clone(),
+        Arc::new(|| Ok(SummarySettings::for_model("qwen3:8b"))),
+        Arc::new(FakeEngine::default()),
+        true,
+    );
+    let error = service.queue(&id).unwrap_err();
+    assert!(error.contains("not completed"), "{error}");
+    drop(service);
+    drop(registry);
+    let _ = fs::remove_dir_all(&root);
+}
+#[test]
+fn queue_refuses_an_unknown_recording() {
+    let f = Fixture::new();
+    let error = f.service().queue("00000000-0000-0000-0000-000000000000").unwrap_err();
+    assert!(error.contains("no transcript"), "{error}");
+}
+#[test]
+fn queue_reports_a_clear_error_and_makes_no_row_when_summaries_are_disabled() {
+    let f = Fixture::new();
+    let service = SummaryService::with_inhibition(
+        f.root.clone(),
+        Arc::new(|| {
+            Ok(SummarySettings {
+                enabled: false,
+                ..SummarySettings::for_model("qwen3:8b")
+            })
+        }),
+        Arc::new(FakeEngine::default()),
+        true,
+    );
+    let error = service.queue(&f.recording.recording_id).unwrap_err();
+    assert_eq!(error, "Summaries are turned off in Settings.");
+    assert!(f.store.get(&f.recording.recording_id).unwrap().is_none());
+}

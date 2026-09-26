@@ -10,7 +10,7 @@ These are manual acceptance checks, not a claim that every platform has passed. 
 - With no selected sources, Start must reject without opening streams. With explicit capture consent and saved sources, window and tray Start/Stop must operate the same session. Stop is disabled when idle; repeated Start must not create another recording.
 - Open recordings folder. Confirm it opens the app-owned local folder without interpreting its path as a shell command.
 - Close the window on supported Windows/macOS tray setups: process remains running and the tray can restore the window. Quit exits completely.
-- On Linux without a visible AppIndicator host, ensure closing never leaves the only window irretrievably hidden. Use the in-window Quit action. Also check Linux with a visible tray host.
+- On Linux without a visible AppIndicator host, ensure closing never leaves the only window irretrievably hidden. There is no in-window Quit button; use the tray's Quit action (the only way to exit while the tray keeps the app running in the background). Also check Linux with a visible tray host.
 - Launch a second instance: existing window should be restored instead of a second background instance.
 - Test at the minimum supported window size and 125% / 150% display scaling. Verify keyboard focus, settings labels, save feedback, and no clipped controls. Check reduced-motion preference.
 - Simulate a read-only settings directory and invalid saved settings in an isolated test profile. Surface the error, preserve the original data, and do not enable saving default values over unreadable settings.
