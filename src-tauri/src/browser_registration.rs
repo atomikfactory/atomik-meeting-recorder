@@ -113,14 +113,14 @@ fn manifest_json(browser: Browser, exe_path: &Path) -> Vec<u8> {
     let body = match browser {
         Browser::Firefox => json!({
             "name": HOST_NAME,
-            "description": "Meeting Recorder browser-detection bridge",
+            "description": "Atomik Meeting Recorder browser-detection bridge",
             "path": exe,
             "type": "stdio",
             "allowed_extensions": [FIREFOX_EXTENSION_ID],
         }),
         Browser::Chrome | Browser::Edge => json!({
             "name": HOST_NAME,
-            "description": "Meeting Recorder browser-detection bridge",
+            "description": "Atomik Meeting Recorder browser-detection bridge",
             "path": exe,
             "type": "stdio",
             "allowed_origins": [format!("chrome-extension://{CHROMIUM_EXTENSION_ID}/")],

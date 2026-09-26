@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Meeting Recorder desktop window",
+  "description": "Atomik Meeting Recorder desktop window",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

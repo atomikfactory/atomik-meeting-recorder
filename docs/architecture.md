@@ -1,4 +1,4 @@
-# Meeting Recorder implementation plan
+# Atomik Meeting Recorder implementation plan
 
 ## Inspection — 2026-09-23
 

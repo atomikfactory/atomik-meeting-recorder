@@ -1491,11 +1491,11 @@ fn start_tray_status_updater(app: tauri::AppHandle) {
                     let _ = controls.start.set_enabled(!recording && !processing);
                     let _ = controls.stop.set_enabled(recording);
                     let tooltip = if recording {
-                        "Meeting Recorder — Recording"
+                        "Atomik Meeting Recorder — Recording"
                     } else if processing {
-                        "Meeting Recorder — Saving recording"
+                        "Atomik Meeting Recorder — Saving recording"
                     } else {
-                        "Meeting Recorder — Ready"
+                        "Atomik Meeting Recorder — Ready"
                     };
                     let _ = controls.tray.set_tooltip(Some(tooltip));
                     let _ = controls.tray.set_icon(if recording {
@@ -1684,7 +1684,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

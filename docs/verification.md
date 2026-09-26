@@ -150,7 +150,7 @@ The verified executable depends on its adjacent DLLs in the target directory; it
 
 Rust verification after the timestamp/meter changes passed **117 tests**, with **2 opt-in tests ignored** and no failures. Synthetic coverage includes timestamp jitter, reset epoch re-anchoring, forward-gap retention, late loopback callbacks, long drift, bounded future jumps, finite/stale meter handling, zero-time callback heartbeats, peak expiry, per-source mapping, and clearing levels on stop. UI coverage includes live levels, stale/malformed telemetry, clipping indication, processing state, and settings navigation.
 
-No native lifecycle or hardware capture check was run for this increment because a user-owned Meeting Recorder process was already running from the normal target path. The verified debug executable remains `src-tauri/target-verified/debug/meeting-recorder.exe` with adjacent DLL dependencies.
+No native lifecycle or hardware capture check was run for this increment because a user-owned Atomik Meeting Recorder process was already running from the normal target path. The verified debug executable remains `src-tauri/target-verified/debug/meeting-recorder.exe` with adjacent DLL dependencies.
 
 ## Recording library and manual transcription verification â€” 2026-09-24
 

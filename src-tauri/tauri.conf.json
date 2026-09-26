@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Meeting Recorder",
+  "productName": "Atomik Meeting Recorder",
   "version": "0.1.0",
   "identifier": "com.local.meetingrecorder",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Meeting Recorder",
+        "title": "Atomik Meeting Recorder",
         "width": 1080,
         "height": 760,
         "minWidth": 780,

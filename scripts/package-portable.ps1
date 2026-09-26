@@ -78,7 +78,7 @@ $tauriConf = Get-Content (Join-Path $srcTauri 'tauri.conf.json') -Raw | ConvertF
 $version = $tauriConf.version
 
 $distRoot = Join-Path $projectRoot 'dist-portable'
-$folderName = "MeetingRecorder-$version-cuda-portable"
+$folderName = "AtomikMeetingRecorder-$version-cuda-portable"
 $outDir = Join-Path $distRoot $folderName
 
 if (Test-Path $outDir) {
@@ -92,10 +92,10 @@ foreach ($dll in $requiredDlls) {
 }
 
 $readme = @"
-Meeting Recorder $version (CUDA, portable) — Windows x64
-==========================================================
+Atomik Meeting Recorder $version (CUDA, portable) — Windows x64
+================================================================
 
-This folder is a self-contained, GPU-accelerated build of Meeting Recorder.
+This folder is a self-contained, GPU-accelerated build of Atomik Meeting Recorder.
 No installer is required: run meeting-recorder.exe directly from here.
 
 Requirements

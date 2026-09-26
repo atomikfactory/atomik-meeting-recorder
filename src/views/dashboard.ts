@@ -63,7 +63,7 @@ export function dashboardSectionHtml(): string {
   return `<section id="dashboard" class="page">
           <div class="hero">
             <div>
-              <p class="kicker">MEETING RECORDER</p>
+              <p class="kicker">ATOMIK MEETING RECORDER</p>
               <h1>Keep the conversation,<br /><em>not the busywork.</em></h1>
               <p class="lede">
                 A calm, private place for your meeting notes and transcripts.

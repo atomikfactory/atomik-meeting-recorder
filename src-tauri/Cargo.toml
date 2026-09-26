@@ -1,7 +1,7 @@
 [package]
 name = "meeting-recorder"
 version = "0.1.0"
-description = "A local-first meeting recorder"
+description = "A local-first Atomik meeting recorder"
 edition = "2021"
 
 [lib]

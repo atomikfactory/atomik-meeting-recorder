@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Meeting Recorder detection helper",
+  "name": "Atomik Meeting Recorder detection helper",
   "version": "1.0.0",
-  "description": "Local-only: tells the Meeting Recorder desktop app when a supported browser meeting tab is active, so it can ask before recording. Sends only platform, call state, meeting title, and an opaque tab id over native messaging -- never page content, URLs, or participant data.",
+  "description": "Local-only: tells the Atomik Meeting Recorder desktop app when a supported browser meeting tab is active, so it can ask before recording. Sends only platform, call state, meeting title, and an opaque tab id over native messaging -- never page content, URLs, or participant data.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5Bus7/ND05eeAEYRIsc2b86fWKMXkjMAp5DX5hmakZDU3chggfHaoLWvaCJAellwB8O3WXDBTMI9J6ci5f8thaL1YjccEGqhGVOJYv/uipF92nSr/yH2RDUutrIFBtPMosxL0Jn0JVQK4UPo1M9amjm40Hr4MUgiTXA436nffspkGZrKk++HXdJGnymcGrRyYdUhTVV5F56kvGY5o2V25/bDjZ6hW36XL2/JLUXSeKnWdYfUuh04yIj0YMlS0qmiCTm5NO4MPQNMvzMYqo3omPMxeIgLj8qWz3QIlLP15TSucosbJNWHsinZiTxlK4C4WAwIjw2+DjRlqsSLwzqQAwIDAQAB",
   "minimum_chrome_version": "96",
   "permissions": ["nativeMessaging", "storage"],
