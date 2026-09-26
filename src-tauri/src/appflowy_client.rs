@@ -131,6 +131,14 @@ struct FolderResponse {
     data: FolderView,
 }
 
+/// `collab_id` matters: AppFlowy-Cloud's `create_document_page` stores the
+/// document collab under `collab_id.unwrap_or(Uuid::new_v4())` and the *page*
+/// under `view_id.unwrap_or(collab_id)`, independently. Sending only
+/// `view_id` (this integration's original bug) leaves the document stored
+/// under a random id the client never learns, so opening the page by its
+/// `view_id` later fails with "Collab not found: Collab not found for
+/// object_id: <view_id>" even though page creation reported success. Setting
+/// `collab_id` equal to `view_id` on every create makes the two always match.
 #[derive(Debug, Serialize)]
 struct CreatePageParams<'a> {
     parent_view_id: &'a str,
@@ -138,6 +146,7 @@ struct CreatePageParams<'a> {
     name: &'a str,
     page_data: &'a serde_json::Value,
     view_id: &'a str,
+    collab_id: &'a str,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct Page {
@@ -465,12 +474,33 @@ impl AppFlowyClient {
         let path = format!("/api/workspace/{workspace_id}/page-view");
         let response = self.post_authed_json(
             &path,
-            &CreatePageParams { parent_view_id, layout: LAYOUT_DOCUMENT, name, page_data, view_id },
+            // `collab_id` == `view_id` (see the `CreatePageParams` doc
+            // comment) so the document is always findable by the id the
+            // returned `Page.view_id` reports.
+            &CreatePageParams { parent_view_id, layout: LAYOUT_DOCUMENT, name, page_data, view_id, collab_id: view_id },
         )?;
         let parsed: PageResponse = response
             .into_json()
             .map_err(|e| ClientError::Rejected(format!("Unreadable create-page response: {e}")))?;
         Ok(parsed.data)
+    }
+    /// Read-only: confirms a page's document actually opens, via the
+    /// existing allowlisted `GET .../page-view/{view_id}` route -- no new
+    /// route. Returns `Ok(true)` once the server answers 200 (the document
+    /// loads), `Ok(false)` specifically for a 404 (the page or its document
+    /// collab is missing -- covers both a genuinely deleted/nonexistent
+    /// `view_id` and the "Record not found: Collab not found" symptom of the
+    /// pre-fix `collab_id` bug), and propagates any other error (network,
+    /// 401-after-refresh, unexpected 4xx/5xx) so a caller doesn't silently
+    /// treat an unrelated failure as "content missing".
+    #[allow(clippy::result_large_err)]
+    pub fn page_content_loads(&self, workspace_id: &str, view_id: &str) -> Result<bool, ClientError> {
+        let path = format!("/api/workspace/{workspace_id}/page-view/{view_id}");
+        match self.get_authed(Method::Get, &path) {
+            Ok(_response) => Ok(true),
+            Err(ClientError::Rejected(message)) if message.contains("HTTP 404") => Ok(false),
+            Err(other) => Err(other),
+        }
     }
 }
 

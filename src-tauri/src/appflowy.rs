@@ -91,6 +91,12 @@ pub struct PageInfo {
     pub name: String,
     pub status: String,
     pub url: Option<String>,
+    /// True if this row was planned/created by a version predating a fix
+    /// such as the `collab_id` bug (see `docs/appflowy.md`) -- its content
+    /// may not open in AppFlowy even though it is listed. This app never
+    /// deletes it; the Settings UI surfaces this so the user can, if they
+    /// want, delete it themselves in AppFlowy.
+    pub legacy: bool,
 }
 /// A candidate destination for "My daily meetings": a workspace Space, or
 /// (indented one level, `depth: 1`) a top-level page inside one. Read-only,
@@ -257,7 +263,8 @@ impl AppFlowyService {
             .into_iter()
             .map(|p| {
                 let url = p.remote_view_id.as_ref().map(|id| appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, id));
-                PageInfo { key: p.key, kind: p.kind, name: p.name, status: p.status, url }
+                let legacy = p.is_legacy();
+                PageInfo { key: p.key, kind: p.kind, name: p.name, status: p.status, url, legacy }
             })
             .collect())
     }
@@ -411,11 +418,14 @@ struct PagePlan<'a> {
 }
 
 /// Resolves (finding or creating) one page in the root -> date -> meeting
-/// chain. Read-before-write: a page already marked `created` locally is
-/// trusted outright; otherwise the parent's folder tree is re-read and an
-/// exact-name child is adopted if found (covers both a user's pre-existing
-/// page and a crash after a successful remote create but before the local
-/// journal was updated) -- only creating a new page when neither is true.
+/// chain. Read-before-write: a page already marked `created` locally (at the
+/// current generation -- `AppFlowyStore::find_or_plan` never hands back a
+/// legacy row's remote id, planning a fresh one instead, see its own docs)
+/// is trusted outright; otherwise the parent's folder tree is re-read and an
+/// exact-name child is adopted if it is neither a known-legacy `view_id` nor
+/// one whose content fails to load (covers both a user's pre-existing page
+/// and a crash after a successful remote create but before the local journal
+/// was updated) -- only creating a new page when none of that is true.
 ///
 /// After creating a brand-new page (not when adopting an existing one --
 /// that page is already known-visible), the parent's folder tree is
@@ -427,7 +437,10 @@ struct PagePlan<'a> {
 /// second, independent safety net: if the server ever accepts a create but
 /// the page doesn't show up under its parent, the job is failed with a
 /// clear message instead of reporting "completed" for a page the user will
-/// never see.
+/// never see. A third check -- `page_content_loads` -- guards against the
+/// "Record not found: Collab not found" bug the same way: even a
+/// newly-created, correctly-listed page could in principle have a missing
+/// document collab, so this is verified before the page is ever trusted.
 fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) -> Result<String, ExportError> {
     let PagePlan { workspace_id, key, kind, parent_remote_id, name, page_data } = plan;
     let record = store.find_or_plan(key, kind, Some(parent_remote_id), workspace_id, name).map_err(|e| (e, false))?;
@@ -436,9 +449,17 @@ fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) 
     }
     let folder: FolderView = client.get_folder(workspace_id, Some(parent_remote_id)).map_err(classify_client_error)?;
     if let Some(existing) = folder.child_named(name) {
-        let remote_id = existing.view_id.clone();
-        store.mark_created(key, &remote_id).map_err(|e| (e, false))?;
-        return Ok(remote_id);
+        let candidate_id = existing.view_id.clone();
+        let legacy = store.is_legacy_view_id(&candidate_id).map_err(|e| (e, false))?;
+        if !legacy && client.page_content_loads(workspace_id, &candidate_id).map_err(classify_client_error)? {
+            store.mark_created(&record.key, &candidate_id).map_err(|e| (e, false))?;
+            return Ok(candidate_id);
+        }
+        // Either a known-legacy view_id, or a name match whose content 404s
+        // ("Collab not found") -- never adopted; fall through and create a
+        // fresh page instead. A duplicate-named page can result (documented
+        // in docs/appflowy.md); this is preferred over silently treating a
+        // broken or legacy page as this meeting/date/root's home.
     }
     let page = client
         .create_page(workspace_id, parent_remote_id, &record.planned_view_id, name, page_data)
@@ -449,7 +470,13 @@ fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) 
             "AppFlowy accepted \"{name}\" but it is not visible under its parent afterward; the export was marked failed rather than reported as completed for a page you would not be able to find."
         ), false));
     }
-    store.mark_created(key, &page.view_id).map_err(|e| (e, false))?;
+    if !client.page_content_loads(workspace_id, &page.view_id).map_err(classify_client_error)? {
+        return Err((format!(
+            "AppFlowy accepted \"{name}\" but its content failed to load afterward (Collab not found for {}); the export was marked failed rather than reported as completed for a page you would not be able to open.",
+            page.view_id
+        ), false));
+    }
+    store.mark_created(&record.key, &page.view_id).map_err(|e| (e, false))?;
     Ok(page.view_id)
 }
 

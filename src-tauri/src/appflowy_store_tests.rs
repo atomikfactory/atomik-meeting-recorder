@@ -115,6 +115,53 @@ fn recover_resumes_interrupted_exports_as_queued() {
 }
 
 #[test]
+fn find_or_plan_stamps_the_current_generation() {
+    let store = store();
+    let key = root_key("w1", "space1");
+    let record = store.find_or_plan(&key, "root", None, "w1", "My daily meetings").unwrap();
+    assert_eq!(record.generation, CURRENT_GENERATION);
+    assert!(!record.is_legacy());
+}
+
+#[test]
+fn a_legacy_row_is_never_reused_and_a_fresh_row_is_planned_instead() {
+    let store = store();
+    let key = root_key("w1", "space1");
+    // Simulate a row left behind by a version predating a generation bump
+    // (e.g. the pre-fix `collab_id` bug) -- occupies the same deterministic
+    // key a fresh export would otherwise reuse.
+    store.insert_legacy_row(&key, "root", "w1", "My daily meetings", "legacy-remote-id", 1).unwrap();
+
+    let record = store.find_or_plan(&key, "root", None, "w1", "My daily meetings").unwrap();
+    assert_ne!(record.key, key, "a fresh row must be planned under a different key, never reusing the legacy row's key");
+    assert_eq!(record.generation, CURRENT_GENERATION);
+    assert!(record.remote_view_id.is_none(), "the fresh row must not inherit the legacy row's remote id");
+
+    // The legacy row itself is left completely untouched.
+    let legacy = store.get_page(&key).unwrap().unwrap();
+    assert_eq!(legacy.remote_view_id.as_deref(), Some("legacy-remote-id"));
+    assert_eq!(legacy.generation, 1);
+
+    // Retrying is stable: the same fresh key is reused, not a third row.
+    let retry = store.find_or_plan(&key, "root", None, "w1", "My daily meetings").unwrap();
+    assert_eq!(retry.key, record.key);
+}
+
+#[test]
+fn is_legacy_view_id_reflects_the_generation_of_the_row_that_recorded_it() {
+    let store = store();
+    let legacy_key = root_key("w1", "space1");
+    store.insert_legacy_row(&legacy_key, "root", "w1", "My daily meetings", "legacy-remote-id", 1).unwrap();
+    assert!(store.is_legacy_view_id("legacy-remote-id").unwrap());
+
+    let date_key_str = date_key("w1", "root-remote", "2026-09-26");
+    store.find_or_plan(&date_key_str, "date", None, "w1", "2026-09-26").unwrap();
+    store.mark_created(&date_key_str, "fresh-remote-id").unwrap();
+    assert!(!store.is_legacy_view_id("fresh-remote-id").unwrap());
+    assert!(!store.is_legacy_view_id("never-recorded").unwrap());
+}
+
+#[test]
 fn page_and_meeting_keys_are_deterministic_across_calls() {
     assert_eq!(root_key("w1", "s1"), root_key("w1", "s1"));
     assert_eq!(date_key("w1", "root1", "2026-09-25"), date_key("w1", "root1", "2026-09-25"));

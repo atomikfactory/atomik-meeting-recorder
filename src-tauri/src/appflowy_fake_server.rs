@@ -26,6 +26,19 @@ struct FakeNode {
 struct FakeState {
     nodes: HashMap<String, FakeNode>,
     page_data: HashMap<String, serde_json::Value>,
+    /// Models AppFlowy-Cloud's real `create_document_page` semantics: the
+    /// document collab is stored under
+    /// `collab_id.unwrap_or(Uuid::new_v4())`, the *page* (view) under
+    /// `view_id.unwrap_or(collab_id)` -- independently. `GET
+    /// .../page-view/{view_id}` (the real client-facing "does this page's
+    /// document actually open" check) only succeeds when a collab was really
+    /// stored under that exact `view_id`, i.e. when the request's
+    /// `collab_id` equalled its `view_id`. A request that omits `collab_id`
+    /// (the pre-fix bug this fake reproduces) stores the collab under a
+    /// fresh random id the caller never learns, so this map records `false`
+    /// for that `view_id` -- "Collab not found" on lookup, exactly like the
+    /// real server.
+    collab_ok: HashMap<String, bool>,
     workspace_id: String,
     access_token: String,
     refresh_token: String,
@@ -40,6 +53,12 @@ struct FakeState {
     /// `appflowy.rs`'s post-create verification failing the job instead of
     /// reporting success.
     hide_created_children: bool,
+    /// When set, every subsequently created page is stored with no working
+    /// collab (`collab_ok=false`) regardless of what `collab_id` the request
+    /// sent -- simulates a server-side failure to persist the document
+    /// collab, to exercise `appflowy.rs`'s post-create content-load
+    /// verification failing the job instead of reporting success.
+    force_missing_collab: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +115,7 @@ impl FakeAppFlowyServer {
         let mut server = Self::start_with_state(FakeState {
             nodes,
             page_data: HashMap::new(),
+            collab_ok: HashMap::new(),
             fail_next_page_view: None,
             workspace_id,
             access_token: "access-1".into(),
@@ -104,6 +124,7 @@ impl FakeAppFlowyServer {
             otp_code: "123456".into(),
             refresh_count: 0,
             hide_created_children: false,
+            force_missing_collab: false,
         });
         server.space_id = space_ids.first().cloned().unwrap_or_default();
         server
@@ -181,9 +202,24 @@ impl FakeAppFlowyServer {
     pub fn fail_next_page_view(&self, status: u16, message: &str) {
         self.state.lock().unwrap().fail_next_page_view = Some((status, message.to_string()));
     }
+    /// Seeds an existing page with a working document collab (the normal
+    /// case: a page a user created themselves, or one this integration
+    /// created correctly).
     pub fn seed_existing_page(&self, parent_id: &str, id: &str, name: &str) {
+        self.seed_existing_page_with_collab(parent_id, id, name, true);
+    }
+    /// Seeds an existing page whose document collab is missing -- `GET
+    /// .../page-view/{id}` 404s "Collab not found" even though the page is
+    /// listed under its parent, exactly like the three broken pages left
+    /// behind on the user's real account by the pre-fix bug. Used to prove
+    /// name-match adoption skips a page whose content doesn't actually load.
+    pub fn seed_broken_existing_page(&self, parent_id: &str, id: &str, name: &str) {
+        self.seed_existing_page_with_collab(parent_id, id, name, false);
+    }
+    fn seed_existing_page_with_collab(&self, parent_id: &str, id: &str, name: &str, collab_ok: bool) {
         let mut state = self.state.lock().unwrap();
         state.nodes.insert(id.to_string(), FakeNode { name: name.to_string(), is_space: false, children: vec![] });
+        state.collab_ok.insert(id.to_string(), collab_ok);
         if let Some(parent) = state.nodes.get_mut(parent_id) {
             parent.children.push(id.to_string());
         }
@@ -193,6 +229,11 @@ impl FakeAppFlowyServer {
     /// `FakeState::hide_created_children`.
     pub fn omit_created_children(&self) {
         self.state.lock().unwrap().hide_created_children = true;
+    }
+    /// After this call, every subsequently created page has no working
+    /// document collab -- see `FakeState::force_missing_collab`.
+    pub fn force_missing_collab(&self) {
+        self.state.lock().unwrap().force_missing_collab = true;
     }
 }
 
@@ -322,14 +363,30 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
                 return;
             }
             let parent_id = body.get("parent_view_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let view_id = body.get("view_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Real `create_document_page` semantics (AppFlowy-Cloud
+            // `src/biz/workspace/page_view.rs`): the document collab is
+            // stored under `collab_id.unwrap_or(Uuid::new_v4())`, and the
+            // page under `view_id.unwrap_or(collab_id)`. A request that
+            // omits `collab_id` (the pre-fix bug) gets a collab stored under
+            // a random id that never equals `view_id`, so its content never
+            // loads by `view_id` afterward.
+            let collab_id = body.get("collab_id").and_then(|v| v.as_str()).map(str::to_string);
+            let view_id = body
+                .get("view_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| collab_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let effective_collab_id = collab_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if !s.nodes.contains_key(&parent_id) {
                 respond(stream, "404 Not Found", &serde_json::json!({"message": "parent not found"}));
                 return;
             }
             let hide = s.hide_created_children;
+            let collab_ok = !s.force_missing_collab && effective_collab_id == view_id;
             s.nodes.insert(view_id.clone(), FakeNode { name, is_space: false, children: vec![] });
+            s.collab_ok.insert(view_id.clone(), collab_ok);
             if !hide {
                 if let Some(parent) = s.nodes.get_mut(&parent_id) {
                     parent.children.push(view_id.clone());
@@ -339,6 +396,25 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
                 s.page_data.insert(view_id.clone(), page_data.clone());
             }
             respond(stream, "200 OK", &serde_json::json!({"data": {"view_id": view_id}}));
+        }
+        (method, p) if method == "GET" && p.contains("/page-view/") => {
+            if !check_auth(&auth, &s.access_token, stream) {
+                return;
+            }
+            let view_id = p.rsplit('/').next().unwrap_or("");
+            if !s.nodes.contains_key(view_id) {
+                respond(stream, "404 Not Found", &serde_json::json!({"message": "Page not found"}));
+                return;
+            }
+            if s.collab_ok.get(view_id).copied().unwrap_or(false) {
+                respond(stream, "200 OK", &serde_json::json!({"data": {"view_id": view_id}}));
+            } else {
+                respond(
+                    stream,
+                    "404 Not Found",
+                    &serde_json::json!({"message": format!("Record not found: Collab not found for object_id: {view_id}")}),
+                );
+            }
         }
         _ => {
             respond(stream, "404 Not Found", &serde_json::json!({"message": format!("unhandled fake route {method} {path}")}));

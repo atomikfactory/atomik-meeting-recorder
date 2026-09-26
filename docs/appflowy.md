@@ -107,6 +107,58 @@ convention, in `src-tauri/src/appflowy_client.rs`:
    if its content looks incomplete -- this integration never "fixes" a page
    it did not just create.
 
+## The "Record not found" bug and how it was fixed
+
+A confirmed bug on a real account: pages this integration created appeared
+correctly in the AppFlowy sidebar, but opening one failed with
+`[Document lifecycle]: failed to init document: Record not found: Collab not
+found for object_id: <the page's own view_id>`.
+
+**Root cause.** AppFlowy-Cloud's `create_document_page`
+(`src/biz/workspace/page_view.rs`) stores the page's *document collab* under
+`collab_id.unwrap_or(Uuid::new_v4())` and the *page itself* under
+`view_id.unwrap_or(collab_id)` -- two independent ids. This integration's
+`CreatePageParams` sent `view_id` but never `collab_id`, so the server always
+generated a random collab id that never matched the `view_id` the page was
+listed and later opened under -- the document was, in effect, unreachable
+from the moment it was created, even though page creation itself reported
+success and the page showed up in the folder tree.
+
+**The fix.** Every `create_page` call now sends `collab_id` equal to the same
+`view_id` it sends, so the document is always stored under the exact id used
+to open it. `appflowy_fake_server.rs` models the real server's semantics
+(collab stored under `collab_id`, page under `view_id`, independently) so
+this codebase's own tests reproduce the bug for the old request shape and
+prove the fix for the new one. After creating any page (root, date, or
+meeting), and before adopting any existing page found by name or by the local
+journal, `AppFlowyClient::page_content_loads` calls the existing read-only
+`GET .../page-view/{view_id}` route to confirm the page's document actually
+opens -- not just that the page is listed. A page whose content 404s
+("Collab not found") is never trusted: after creation it fails the export
+job with a clear message instead of reporting success; when found by name or
+journal, it is skipped in favor of creating a fresh page (which can mean a
+duplicate-named page appears alongside the broken one -- see
+[Limitations](#limitations)).
+
+**Legacy pages are never reused.** Every local journal row
+(`appflowy_pages` in `appflowy_store.rs`) is stamped with a `generation`
+number; a row from before this fix defaults to generation 1 via the
+database migration, while everything this version plans or creates is
+generation 2 (`AppFlowyStore::CURRENT_GENERATION`). A legacy row is never
+handed back as "already created" (a fresh row is planned instead, under a
+distinct local key), and a legacy `view_id` is excluded from name-based
+adoption even if a page with the expected name exists in AppFlowy -- so a
+meeting export can never silently attach itself to a page from before the
+fix. Settings' **Previously created pages** list marks each legacy row
+"created by an earlier version -- content may not open; you can delete it in
+AppFlowy" (see [Open in AppFlowy / previously created
+pages](#open-in-appflowy--previously-created-pages)); this app itself never
+deletes anything, so a broken page from an older version stays in AppFlowy
+until the user removes it there. A meeting export job that already
+`completed` against a page later marked legacy is **not** automatically
+re-exported -- only the existing, confirmation-gated **Export again** action
+creates a fresh page.
+
 ## Page structure
 
 ```
@@ -216,6 +268,18 @@ after the user confirms in the dashboard -- the prior page is never touched.
   Settings' **Previously created pages** list to open one directly and, if
   you want, move it into a Space yourself -- this app never moves anything
   on its own.
+- Pages created by a version of this app before the `collab_id` fix
+  described in [The "Record not found" bug](#the-record-not-found-bug-and-how-it-was-fixed)
+  may fail to open at all ("Record not found: Collab not found"). Because
+  this app never deletes or updates anything it created, these pages are
+  left exactly where they are; Settings' **Previously created pages** list
+  marks each one so you can find and, if you want, delete it yourself in
+  AppFlowy. Since a legacy page is never reused as a parent, a later export
+  of the same meeting (or a meeting on the same date) creates a fresh,
+  working root/date/meeting page rather than adding more content under the
+  broken one -- you may see a duplicate-named "My daily meetings" or date
+  page in AppFlowy as a result; the working one is whatever this app's
+  Settings/dashboard links to going forward.
 - The native `ai_meeting` block currently renders correctly in AppFlowy Web
   (and any client that has shipped this feature); it may render as a blank
   or "unsupported block" placeholder elsewhere. Use the standard-blocks
@@ -251,11 +315,18 @@ Space resolution (a Space named "General" preferred, the first Space by
 order otherwise, an explicit `parent_view_id` always honoured, and a
 workspace with no Space failing the job with a clear message); post-create
 verification failing the job when the fake server accepts a create but
-doesn't list the new page under its parent; 401-triggered token refresh; the
-OTP sign-in flow; permanent (4xx) vs. transient (5xx/network) failure
-handling; disabled/auto-export gating; "Export again" confirmation and
-suffixing; and French-language UTF-8 content. `tests/appflowy.spec.ts`
-covers the Settings sign-in flow, the per-meeting export button, the
-Destination picker (including surviving background polling), the "Open in
-AppFlowy" button, and the previously-created-pages list (escaped names, and
-its Open links), all with mocked IPC.
+doesn't list the new page under its parent; post-create *content* verification
+failing the job when a created page's document collab doesn't load; a
+page-view create request that omits `collab_id` reproducing the "Record not
+found: Collab not found" bug against the fake server, and the fixed request
+(`collab_id == view_id`) resolving it; a legacy (pre-fix generation) root row
+never being adopted, with a fresh, working root planned and created instead;
+a name-matched page whose content fails to load being skipped in favor of a
+fresh page; 401-triggered token refresh; the OTP sign-in flow; permanent
+(4xx) vs. transient (5xx/network) failure handling; disabled/auto-export
+gating; "Export again" confirmation and suffixing; and French-language UTF-8
+content. `tests/appflowy.spec.ts` covers the Settings sign-in flow, the
+per-meeting export button, the Destination picker (including surviving
+background polling), the "Open in AppFlowy" button, and the
+previously-created-pages list (escaped names, its Open links, and the
+legacy-page label), all with mocked IPC.

@@ -226,7 +226,7 @@ test("previously created pages list renders escaped names with working open link
   await page.evaluate(()=>{
     const f=(window as any).__af;
     f.appflowy={...f.appflowy,connected:true,email:"user@example.com"};
-    f.pages=[{key:"root:ws1:space1",kind:"root",name:"<img src=x onerror=alert(1)>",status:"created",url:"https://appflowy.com/app/ws1/root1"}];
+    f.pages=[{key:"root:ws1:space1",kind:"root",name:"<img src=x onerror=alert(1)>",status:"created",url:"https://appflowy.com/app/ws1/root1",legacy:false}];
   });
   await page.getByRole("button",{name:"Settings"}).click();
   await expect(page.locator("#appflowy-previous-pages")).toContainText("<img src=x onerror=alert(1)>");
@@ -234,6 +234,22 @@ test("previously created pages list renders escaped names with working open link
   await page.locator("#appflowy-previous-pages").locator("summary").click();
   await page.locator("#appflowy-previous-pages").getByRole("button",{name:"Open"}).click();
   expect(await page.evaluate(()=> (window as any).__af.openedUrls)).toEqual(["https://appflowy.com/app/ws1/root1"]);
+});
+
+test("a legacy previously-created page is labeled as possibly broken",async({page})=>{
+  await page.evaluate(()=>{
+    const f=(window as any).__af;
+    f.appflowy={...f.appflowy,connected:true,email:"user@example.com"};
+    f.pages=[
+      {key:"root:ws1:space1",kind:"root",name:"My daily meetings",status:"created",url:"https://appflowy.com/app/ws1/root1",legacy:true},
+      {key:"date:ws1:root1:2026-09-26",kind:"date",name:"2026-09-26",status:"created",url:"https://appflowy.com/app/ws1/date1",legacy:false},
+    ];
+  });
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.locator("#appflowy-previous-pages").locator("summary").click();
+  const items=page.locator("#appflowy-previous-pages li");
+  await expect(items.nth(0)).toContainText("created by an earlier version");
+  await expect(items.nth(1)).not.toContainText("created by an earlier version");
 });
 
 test("meetings without a finished transcript show no AppFlowy action",async({page})=>{

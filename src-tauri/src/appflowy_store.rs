@@ -26,6 +26,17 @@ pub fn meeting_key(recording_id: &str, export_index: u32) -> String {
     format!("meeting:{recording_id}:{export_index}")
 }
 
+/// Bumped whenever a bug is fixed in how pages are created/parented such
+/// that a page created by an older version must never be trusted again (see
+/// `docs/appflowy.md`'s "Record not found" bug). Every row this version
+/// plans or creates is stamped with this value; any row already in the
+/// database from before a bump defaults to generation 1 via the column's
+/// `DEFAULT`, so it is automatically legacy without a data migration having
+/// to touch it. Bumped to 2 for the `collab_id` fix (a `view_id`-only
+/// `CreatePageParams` stored the document under a random id, so opening the
+/// page by `view_id` failed with "Collab not found").
+pub const CURRENT_GENERATION: i32 = 2;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageRecord {
     pub key: String,
@@ -36,6 +47,15 @@ pub struct PageRecord {
     pub planned_view_id: String,
     pub remote_view_id: Option<String>,
     pub status: String,
+    /// See `CURRENT_GENERATION`. `< CURRENT_GENERATION` means this row was
+    /// planned/created by an older, possibly-buggy version and must never be
+    /// adopted as an existing page again.
+    pub generation: i32,
+}
+impl PageRecord {
+    pub fn is_legacy(&self) -> bool {
+        self.generation < CURRENT_GENERATION
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +100,13 @@ impl AppFlowyStore {
                 export_index INTEGER NOT NULL DEFAULT 1,attempts INTEGER NOT NULL DEFAULT 0,retry_after INTEGER);",
         )
         .map_err(|e| e.to_string())?;
+        // Migration: every row that existed before this column was added is,
+        // by definition, from a version predating the generation fix, so the
+        // column's own DEFAULT (1) marks them legacy with no data rewrite.
+        // `ALTER TABLE ... ADD COLUMN` errors if the column already exists
+        // (e.g. re-opening a database this same version already migrated),
+        // which is expected and ignored.
+        let _ = c.execute("ALTER TABLE appflowy_pages ADD COLUMN generation INTEGER NOT NULL DEFAULT 1", []);
         Ok(Self { c: Mutex::new(c) })
     }
 
@@ -93,6 +120,7 @@ impl AppFlowyStore {
             planned_view_id: row.get(5)?,
             remote_view_id: row.get(6)?,
             status: row.get(7)?,
+            generation: row.get(8)?,
         })
     }
     /// Every page this integration has ever planned or created, for the
@@ -102,7 +130,7 @@ impl AppFlowyStore {
     pub fn all_pages(&self) -> Result<Vec<PageRecord>, String> {
         let c = self.c.lock().map_err(|_| "store lock")?;
         let mut stmt = c
-            .prepare("SELECT key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status FROM appflowy_pages ORDER BY rowid")
+            .prepare("SELECT key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status,generation FROM appflowy_pages ORDER BY rowid")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], Self::row_to_page)
@@ -116,18 +144,26 @@ impl AppFlowyStore {
             .lock()
             .map_err(|_| "store lock")?
             .query_row(
-                "SELECT key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status FROM appflowy_pages WHERE key=?1",
+                "SELECT key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status,generation FROM appflowy_pages WHERE key=?1",
                 params![key],
                 Self::row_to_page,
             )
             .optional()
             .map_err(|e| e.to_string())
     }
-    /// Returns the existing row for `key` if one is already planned/created;
-    /// otherwise inserts a new `status='creating'` row with a freshly
-    /// generated `planned_view_id` and returns that. Never overwrites an
-    /// existing row -- idempotency without ever updating what a previous run
-    /// already recorded.
+    /// Returns the existing row for `key` if one is already planned/created
+    /// **at the current generation**; otherwise inserts a new
+    /// `status='creating'` row, stamped with `CURRENT_GENERATION`, with a
+    /// freshly generated `planned_view_id`, and returns that. Never
+    /// overwrites an existing row -- idempotency without ever updating what a
+    /// previous run already recorded.
+    ///
+    /// If a row already occupies `key` but is legacy (`generation <
+    /// CURRENT_GENERATION` -- created by a version predating a fix such as
+    /// the `collab_id` bug), it is left completely untouched (never adopted,
+    /// never reused) and a *fresh* row is planned instead, under a
+    /// generation-suffixed key derived from `key` -- so a legacy row can
+    /// never block or be silently promoted into this run's page.
     pub fn find_or_plan(
         &self,
         key: &str,
@@ -137,19 +173,40 @@ impl AppFlowyStore {
         name: &str,
     ) -> Result<PageRecord, String> {
         if let Some(existing) = self.get_page(key)? {
-            return Ok(existing);
+            if !existing.is_legacy() {
+                return Ok(existing);
+            }
+            let fresh_key = format!("{key}#g{CURRENT_GENERATION}");
+            return self.find_or_plan(&fresh_key, kind, parent_key, workspace_id, name);
         }
         let planned_view_id = uuid::Uuid::new_v4().to_string();
         self.c
             .lock()
             .map_err(|_| "store lock")?
             .execute(
-                "INSERT INTO appflowy_pages(key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status)\
-                 VALUES(?1,?2,?3,?4,?5,?6,NULL,'creating')",
-                params![key, kind, parent_key, workspace_id, name, planned_view_id],
+                "INSERT INTO appflowy_pages(key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status,generation)\
+                 VALUES(?1,?2,?3,?4,?5,?6,NULL,'creating',?7)",
+                params![key, kind, parent_key, workspace_id, name, planned_view_id, CURRENT_GENERATION],
             )
             .map_err(|e| e.to_string())?;
         self.get_page(key)?.ok_or_else(|| "page record vanished after insert".into())
+    }
+    /// True if `view_id` is recorded as a page this integration itself
+    /// created/adopted at a legacy generation -- used to exclude a
+    /// name-matched folder child from adoption even though nothing else about
+    /// it looks wrong (see `docs/appflowy.md`'s "Record not found" bug).
+    pub fn is_legacy_view_id(&self, view_id: &str) -> Result<bool, String> {
+        self.c
+            .lock()
+            .map_err(|_| "store lock")?
+            .query_row(
+                "SELECT 1 FROM appflowy_pages WHERE remote_view_id=?1 AND generation<?2 LIMIT 1",
+                params![view_id, CURRENT_GENERATION],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(|e| e.to_string())
     }
     /// Marks a page created (or adopted from the folder tree on retry).
     /// Idempotent: calling it twice with the same `remote_view_id` is fine.
@@ -317,6 +374,34 @@ impl AppFlowyStore {
         } else {
             Err("A meeting can only be exported again once its current export has finished.".into())
         }
+    }
+}
+
+#[cfg(test)]
+impl AppFlowyStore {
+    /// Test-only: inserts a page row directly, bypassing `find_or_plan`
+    /// (which always stamps `CURRENT_GENERATION`), so a test can simulate a
+    /// row a specific older version would have left behind -- e.g. one of
+    /// the legacy rows from before the `collab_id` fix.
+    pub fn insert_legacy_row(
+        &self,
+        key: &str,
+        kind: &str,
+        workspace_id: &str,
+        name: &str,
+        remote_view_id: &str,
+        generation: i32,
+    ) -> Result<(), String> {
+        self.c
+            .lock()
+            .map_err(|_| "store lock")?
+            .execute(
+                "INSERT INTO appflowy_pages(key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status,generation)\
+                 VALUES(?1,?2,NULL,?3,?4,?5,?5,'created',?6)",
+                params![key, kind, workspace_id, name, remote_view_id, generation],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 

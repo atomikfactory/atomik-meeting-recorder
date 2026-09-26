@@ -449,6 +449,83 @@ fn a_failed_summary_exports_the_transcript_alone() {
 }
 
 #[test]
+fn a_legacy_root_row_is_never_adopted_and_a_fresh_working_root_is_created() {
+    // Reproduces the shape of the user's real, broken account: "My daily
+    // meetings" was created by a version predating the `collab_id` fix
+    // (generation 1), and a same-named page really exists in AppFlowy --
+    // exactly what a name-match adoption would otherwise pick up. It must be
+    // left completely alone, and a fresh, working root created instead. The
+    // same mechanism (`AppFlowyStore::find_or_plan` refusing to hand back a
+    // legacy row, `is_legacy_view_id` excluding it from name adoption) is
+    // shared by the date and meeting levels -- see
+    // `appflowy_store_tests.rs` for generic, non-root-specific proof of it.
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    let root_key_str = root_key(&server.workspace_id, &server.space_id);
+    fixture.store.insert_legacy_row(&root_key_str, "root", &server.workspace_id, "My daily meetings", "legacy-root-id", 1).unwrap();
+    server.seed_existing_page(&server.space_id, "legacy-root-id", "My daily meetings");
+
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+
+    let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
+    assert_eq!(job.status, "completed", "{:?}", job.error);
+    // Fresh root + date + meeting: 3 creates, none of them reusing the
+    // legacy root id.
+    assert_eq!(server.requests_matching("POST", "/page-view"), 3);
+    let space_children = server.child_names(&server.space_id);
+    assert_eq!(space_children, vec!["My daily meetings".to_string(), "My daily meetings".to_string()], "the legacy root is left in place; a second, working root is created alongside it");
+
+    let legacy_row = fixture.store.get_page(&root_key_str).unwrap().unwrap();
+    assert_eq!(legacy_row.remote_view_id.as_deref(), Some("legacy-root-id"), "the legacy row itself must be untouched");
+    assert_eq!(legacy_row.status, "created", "never touched, moved, or re-marked");
+
+    let all_pages = fixture.store.all_pages().unwrap();
+    let fresh_root_row = all_pages.iter().find(|p| p.kind == "root" && p.remote_view_id.as_deref() != Some("legacy-root-id")).unwrap();
+    assert!(!fresh_root_row.is_legacy());
+    assert_ne!(fresh_root_row.key, root_key_str, "the fresh root must be planned under a different local key");
+}
+
+#[test]
+fn a_name_matched_page_whose_content_fails_to_load_is_skipped_in_favor_of_a_fresh_page() {
+    // A page named "My daily meetings" really exists under the Space (not
+    // tracked in our own journal at all -- e.g. left over from some other
+    // cause), but its document collab is missing, so opening it in AppFlowy
+    // would show "Record not found". Adoption-by-name must not trust it.
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    server.seed_broken_existing_page(&server.space_id, "broken-root-id", "My daily meetings");
+
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+
+    let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
+    assert_eq!(job.status, "completed", "{:?}", job.error);
+    assert_eq!(server.requests_matching("POST", "/page-view"), 3, "root/date/meeting all created fresh rather than adopting the broken page");
+    let space_children = server.child_names(&server.space_id);
+    assert_eq!(space_children.len(), 2, "the broken page is left in place alongside a fresh, working duplicate");
+    assert!(space_children.iter().all(|n| n.as_str() == "My daily meetings"));
+    let root_record = fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap();
+    assert_ne!(root_record.remote_view_id.as_deref(), Some("broken-root-id"), "the broken page must never be adopted");
+}
+
+#[test]
+fn a_page_whose_content_fails_to_load_right_after_creation_fails_the_job() {
+    // Guards the "Record not found: Collab not found" bug even for a
+    // brand-new page: creating and listing it successfully is not enough --
+    // its content must actually open before the export is reported as
+    // completed.
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    server.force_missing_collab();
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+    let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
+    assert_eq!(job.status, "failed", "the export must never report success for a page whose content does not load");
+    assert!(job.error.as_deref().unwrap_or_default().contains("content failed to load"), "{:?}", job.error);
+}
+
+#[test]
 fn auto_export_proceeds_when_speaker_models_are_not_imported() {
     let fixture = Fixture::new();
     let server = FakeAppFlowyServer::start();

@@ -132,7 +132,7 @@ export function appflowySettingsSectionHtml(): string {
 /// This app itself never moves, renames, or deletes anything listed here.
 function appflowyPreviouslyCreatedPagesHtml(): string {
   if (!store.appflowyPages.length) return "";
-  const rows = store.appflowyPages.map((p) => `<li><span>${escapeHtml(p.name)}</span><small>${escapeHtml(p.kind)} · ${escapeHtml(p.status)}</small>${p.url ? `<button type="button" class="secondary" data-open-appflowy-page="${escapeAttr(p.url)}">Open</button>` : ""}</li>`).join("");
+  const rows = store.appflowyPages.map((p) => `<li><span>${escapeHtml(p.name)}</span><small>${escapeHtml(p.kind)} · ${escapeHtml(p.status)}${p.legacy ? " · created by an earlier version — content may not open; you can delete it in AppFlowy" : ""}</small>${p.url ? `<button type="button" class="secondary" data-open-appflowy-page="${escapeAttr(p.url)}">Open</button>` : ""}</li>`).join("");
   return `<details id="appflowy-previous-pages"><summary>Previously created pages (${store.appflowyPages.length})</summary><ul>${rows}</ul></details>`;
 }
 
