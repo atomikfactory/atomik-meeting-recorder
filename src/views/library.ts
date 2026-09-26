@@ -8,7 +8,7 @@ import { refreshDeviceSection } from "../settings/audio";
 import { transcriptionJob, refreshTranscriptionState } from "../settings/transcription";
 import { diarizationSummary, refreshDiarizationState } from "../settings/speakers";
 import { summaryJob, summarySummary } from "../settings/summary";
-import { appflowyJob, appflowySummary } from "../settings/appflowy";
+import { appflowyJob, appflowySummary, openAppFlowyUrl } from "../settings/appflowy";
 import { audioStorageLine, compressionSummary } from "../settings/compression";
 
 export function recordingIssues(recording: Recording) {
@@ -109,7 +109,7 @@ export function recentRecordings() {
       : appflowyJobFor?.status === "queued" || appflowyJobFor?.status === "exporting"
       ? `<button class="secondary" disabled>${appflowyJobFor.status === "exporting" ? "Exporting to AppFlowy…" : "AppFlowy export queued"}</button>`
       : appflowyJobFor?.status === "completed"
-        ? `<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy again</button>`
+        ? `${appflowyJobFor.page_url ? `<button class="secondary" data-open-appflowy-page="${escapeAttr(appflowyJobFor.page_url)}">Open in AppFlowy</button>` : ""}<button class="secondary" data-appflowy-export-again="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy again</button>`
         : appflowyJobFor?.status === "failed"
           ? `<button class="secondary" data-appflowy-retry="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Retry AppFlowy export</button>`
           : !appflowyJobFor && store.appflowyState.connected
@@ -248,6 +248,7 @@ export function updateRecordingUI() {
     document.querySelector("#appflowy-settings-section")?.scrollIntoView({ block: "start" });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-retry]").forEach(button => button.onclick = () => runAppFlowyAction(button.dataset.appflowyRetry!, "appflowy_retry"));
+  document.querySelectorAll<HTMLButtonElement>("[data-open-appflowy-page]").forEach(button => button.onclick = () => openAppFlowyUrl(button.dataset.openAppflowyPage!));
   document.querySelectorAll<HTMLButtonElement>("[data-appflowy-export-again]").forEach(button => button.onclick = () => {
     const id = button.dataset.appflowyExportAgain!;
     if (!window.confirm("Export again? This creates a new page in AppFlowy alongside the existing one -- the earlier export is never modified.")) return;

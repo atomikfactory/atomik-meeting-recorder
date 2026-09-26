@@ -3,7 +3,7 @@
 //! socket to prove the refusal. `appflowy_fake_server_tests.rs` separately
 //! proves the *allowed* calls actually reach a server correctly; this file
 //! only proves the hard safety rule's negative space.
-use super::allowlist::{check, Method};
+use super::allowlist::{check, Method, ALLOWED_COUNT};
 
 #[test]
 fn every_mutating_or_deleting_page_view_route_is_refused() {
@@ -88,6 +88,11 @@ fn allowed_routes_are_exactly_the_documented_set() {
     assert!(check(Method::Get, "/api/workspace/w1/folder").is_ok());
     assert!(check(Method::Get, "/api/workspace/w1/page-view/v1").is_ok());
     assert!(check(Method::Post, "/api/workspace/w1/page-view").is_ok());
+    // The seven checks above are each present -- this additionally proves
+    // the table holds *exactly* these seven and nothing else snuck in (e.g.
+    // while adding the space-resolution/destination-picker/verification work
+    // in this change, none of which needed a new AppFlowy Cloud route).
+    assert_eq!(ALLOWED_COUNT, 7, "the create-only allowlist must still hold exactly the seven documented routes");
 }
 
 #[test]

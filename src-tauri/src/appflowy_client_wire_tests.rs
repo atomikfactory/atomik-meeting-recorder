@@ -45,7 +45,7 @@ fn list_workspaces_and_get_folder_round_trip() {
     assert_eq!(workspaces[0].workspace_id, server.workspace_id);
     let folder = client.get_folder(&server.workspace_id, None).unwrap();
     assert_eq!(folder.view_id, server.workspace_id);
-    assert!(folder.children.is_empty());
+    assert!(folder.child_named("General").is_some(), "the fake server seeds a default Space");
 }
 
 #[test]

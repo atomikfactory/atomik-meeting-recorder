@@ -15,7 +15,7 @@ import { refreshDetectionState } from "../views/dashboard";
 import { refreshTranscriptionState } from "./transcription";
 import { refreshDiarizationState } from "./speakers";
 import { refreshSummaryState } from "./summary";
-import { refreshAppFlowyState } from "./appflowy";
+import { refreshAppFlowyState, refreshAppFlowyDestinations, refreshAppFlowyPages } from "./appflowy";
 
 export function settingsSectionHtml(): string {
   return `<section id="settings" class="page hidden">
@@ -182,6 +182,7 @@ export function wireSettingsSection() {
       appflowy_base_url: String(form.get("appflowy_base_url") ?? "https://beta.appflowy.cloud").trim(),
       appflowy_use_native_block: form.get("appflowy_use_native_block") === "on",
       appflowy_workspace_id: (form.get("appflowy_workspace_id") as string) || store.settings.appflowy_workspace_id || null,
+      appflowy_parent_view_id: (form.get("appflowy_parent_view_id") as string) || null,
       audio_sources: store.settings.audio_sources,
     };
     try {
@@ -193,6 +194,8 @@ export function wireSettingsSection() {
       refreshDiarizationState();
       refreshSummaryState();
       refreshAppFlowyState();
+      refreshAppFlowyDestinations();
+      refreshAppFlowyPages();
     } catch (error) {
       notice(`Could not save preferences: ${String(error)}`, "error");
     }

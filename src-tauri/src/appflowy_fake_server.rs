@@ -20,6 +20,7 @@ use std::{
 #[derive(Clone, Debug)]
 struct FakeNode {
     name: String,
+    is_space: bool,
     children: Vec<String>,
 }
 struct FakeState {
@@ -32,6 +33,13 @@ struct FakeState {
     otp_code: String,
     refresh_count: u32,
     fail_next_page_view: Option<(u16, String)>,
+    /// When set, a newly-created page is stored (so `page_data_for` and a
+    /// later `create_page` retry still see it) but never linked into its
+    /// parent's `children` list -- simulating a server that accepted a page
+    /// creation yet doesn't (yet) list it under its parent, to exercise
+    /// `appflowy.rs`'s post-create verification failing the job instead of
+    /// reporting success.
+    hide_created_children: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +51,11 @@ pub struct RecordedRequest {
 pub struct FakeAppFlowyServer {
     pub base_url: String,
     pub workspace_id: String,
+    /// The id of the default "General" Space seeded by `start()` /
+    /// `start_with_existing_top_level_page()` -- the destination
+    /// `resolve_root_parent` should land on when settings don't pin an
+    /// explicit `parent_view_id`.
+    pub space_id: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     state: Arc<Mutex<FakeState>>,
     stop: Arc<AtomicBool>,
@@ -60,33 +73,27 @@ impl Drop for FakeAppFlowyServer {
 }
 
 impl FakeAppFlowyServer {
-    /// A fresh server with an empty workspace (no "My daily meetings" page
-    /// yet) and a valid initial session (`access-1`/`refresh-1`).
+    /// A fresh server with one Space ("General", so it's picked as the
+    /// default destination) and no "My daily meetings" page yet, with a
+    /// valid initial session (`access-1`/`refresh-1`).
     pub fn start() -> Self {
-        let workspace_id = "workspace-1".to_string();
-        let mut nodes = HashMap::new();
-        nodes.insert(workspace_id.clone(), FakeNode { name: "Workspace".into(), children: vec![] });
-        Self::start_with_state(FakeState {
-            nodes,
-            page_data: HashMap::new(),
-            fail_next_page_view: None,
-            workspace_id,
-            access_token: "access-1".into(),
-            refresh_token: "refresh-1".into(),
-            otp_email: None,
-            otp_code: "123456".into(),
-            refresh_count: 0,
-        })
+        Self::start_with_spaces(&["General"])
     }
-    /// A server that already has a top-level page named `name` (e.g. "My
-    /// daily meetings"), simulating one the user created themselves.
-    pub fn start_with_existing_top_level_page(name: &str) -> Self {
+    /// A fresh server whose workspace root has exactly the given Spaces (in
+    /// order), none of them named "General" unless included -- for testing
+    /// the "first space by order" fallback and multi-space workspaces. The
+    /// first Space's id is `self.space_id`.
+    pub fn start_with_spaces(space_names: &[&str]) -> Self {
         let workspace_id = "workspace-1".to_string();
         let mut nodes = HashMap::new();
-        let existing_id = "existing-daily-meetings".to_string();
-        nodes.insert(existing_id.clone(), FakeNode { name: name.to_string(), children: vec![] });
-        nodes.insert(workspace_id.clone(), FakeNode { name: "Workspace".into(), children: vec![existing_id] });
-        Self::start_with_state(FakeState {
+        let mut space_ids = Vec::new();
+        for (i, name) in space_names.iter().enumerate() {
+            let id = format!("space-{i}");
+            nodes.insert(id.clone(), FakeNode { name: name.to_string(), is_space: true, children: vec![] });
+            space_ids.push(id);
+        }
+        nodes.insert(workspace_id.clone(), FakeNode { name: "Workspace".into(), is_space: false, children: space_ids.clone() });
+        let mut server = Self::start_with_state(FakeState {
             nodes,
             page_data: HashMap::new(),
             fail_next_page_view: None,
@@ -96,7 +103,23 @@ impl FakeAppFlowyServer {
             otp_email: None,
             otp_code: "123456".into(),
             refresh_count: 0,
-        })
+            hide_created_children: false,
+        });
+        server.space_id = space_ids.first().cloned().unwrap_or_default();
+        server
+    }
+    /// A server whose workspace has no Space at all -- exercises the "no
+    /// space found" failure path.
+    pub fn start_with_no_space() -> Self {
+        Self::start_with_spaces(&[])
+    }
+    /// A server that already has a page named `name` (e.g. "My daily
+    /// meetings") directly under the default "General" Space, simulating one
+    /// the user created themselves.
+    pub fn start_with_existing_top_level_page(name: &str) -> Self {
+        let server = Self::start();
+        server.seed_existing_page(&server.space_id, "existing-daily-meetings", name);
+        server
     }
     fn start_with_state(state: FakeState) -> Self {
         let workspace_id = state.workspace_id.clone();
@@ -116,7 +139,7 @@ impl FakeAppFlowyServer {
                 handle_connection(&mut stream, &requests_bg, &state_bg);
             }
         });
-        Self { base_url: format!("http://{addr}"), workspace_id, requests, state, stop, handle: Some(handle) }
+        Self { base_url: format!("http://{addr}"), workspace_id, space_id: String::new(), requests, state, stop, handle: Some(handle) }
     }
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().unwrap().clone()
@@ -160,10 +183,16 @@ impl FakeAppFlowyServer {
     }
     pub fn seed_existing_page(&self, parent_id: &str, id: &str, name: &str) {
         let mut state = self.state.lock().unwrap();
-        state.nodes.insert(id.to_string(), FakeNode { name: name.to_string(), children: vec![] });
+        state.nodes.insert(id.to_string(), FakeNode { name: name.to_string(), is_space: false, children: vec![] });
         if let Some(parent) = state.nodes.get_mut(parent_id) {
             parent.children.push(id.to_string());
         }
+    }
+    /// After this call, every subsequent `create_page` succeeds (the page is
+    /// stored) but is not linked into its parent's children -- see
+    /// `FakeState::hide_created_children`.
+    pub fn omit_created_children(&self) {
+        self.state.lock().unwrap().hide_created_children = true;
     }
 }
 
@@ -219,7 +248,7 @@ fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
 fn folder_json(nodes: &HashMap<String, FakeNode>, id: &str) -> serde_json::Value {
     let node = nodes.get(id);
     let (name, is_space, children) = match node {
-        Some(n) => (n.name.clone(), id == "workspace-1", n.children.clone()),
+        Some(n) => (n.name.clone(), n.is_space, n.children.clone()),
         None => (String::new(), false, vec![]),
     };
     serde_json::json!({
@@ -299,9 +328,12 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
                 respond(stream, "404 Not Found", &serde_json::json!({"message": "parent not found"}));
                 return;
             }
-            s.nodes.insert(view_id.clone(), FakeNode { name, children: vec![] });
-            if let Some(parent) = s.nodes.get_mut(&parent_id) {
-                parent.children.push(view_id.clone());
+            let hide = s.hide_created_children;
+            s.nodes.insert(view_id.clone(), FakeNode { name, is_space: false, children: vec![] });
+            if !hide {
+                if let Some(parent) = s.nodes.get_mut(&parent_id) {
+                    parent.children.push(view_id.clone());
+                }
             }
             if let Some(page_data) = body.get("page_data") {
                 s.page_data.insert(view_id.clone(), page_data.clone());

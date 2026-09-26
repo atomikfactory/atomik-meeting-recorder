@@ -16,10 +16,16 @@ enforced, the page structure, idempotency, and known limitations.
    Keychain, or Linux Secret Service via the `keyring` crate) -- never in
    SQLite, the settings file, or logs.
 4. Pick a workspace from the dropdown.
-5. Optionally check **Export automatically** (off by default -- see
+5. Optionally pick a **Destination** -- a Space, or a page inside one -- from
+   the dropdown below it; the chosen path is shown as
+   "Workspace › Space › My daily meetings". Leaving it as **Automatic
+   (General space)** (the default) makes "My daily meetings" land in the
+   workspace's "General" Space if one exists, or its first Space otherwise
+   (see [Where pages are created](#where-pages-are-created) below).
+6. Optionally check **Export automatically** (off by default -- see
    [Privacy defaults](#privacy-defaults)). Otherwise use the **Export to
    AppFlowy** button that appears on each eligible meeting.
-6. Optionally point **AppFlowy server** at a self-hosted deployment instead
+7. Optionally point **AppFlowy server** at a self-hosted deployment instead
    of the default `https://beta.appflowy.cloud` (https required, except a
    loopback address, which only this codebase's own tests use).
 
@@ -105,10 +111,70 @@ convention, in `src-tauri/src/appflowy_client.rs`:
 
 ```
 Workspace
-└── My daily meetings                (created once, top level of the workspace/space)
-    └── 2026-09-25                   (created once per date)
-        └── 14:00 — Weekly sync      (one per meeting, local start time)
+└── General (or another Space)       (a Space -- see below)
+    └── My daily meetings             (created once, top level of the Space)
+        └── 2026-09-25                (created once per date)
+            └── 14:00 — Weekly sync   (one per meeting, local start time)
 ```
+
+### Where pages are created
+
+AppFlowy's own sidebar only ever shows **Spaces** (`FolderView.is_space`) and
+their descendants -- a page created directly under the workspace root itself
+is never shown there, even though it really was created and the API reports
+success. An earlier version of this integration did exactly that (it used
+`settings.parent_view_id.unwrap_or(workspace_id)`, so with no destination
+chosen "My daily meetings" landed directly under the workspace root), which
+is why an export could report success while nothing appeared to the user.
+
+The destination is resolved once per export, in this order:
+
+1. **An explicit Destination** chosen in Settings (`appflowy_parent_view_id`)
+   is always honoured as-is -- it can be a Space or a page inside one.
+2. Otherwise, the workspace's own folder tree is read (read-only) and a
+   Space is picked: one named "General" (case-insensitive) if any exists,
+   else the first Space in the workspace's own order.
+3. If the workspace has **no Space at all**, the export fails with a clear
+   message ("No space found in this AppFlowy workspace; choose a parent in
+   Settings") rather than falling back to the invisible workspace root.
+
+After creating each page (root, date, or meeting -- never when *reusing* an
+existing one, which is already known-visible), the parent's folder tree is
+read back once more to confirm the new page is actually listed as a child.
+If it isn't, the export is marked **failed** with a clear message instead of
+"completed" -- this app never reports success for a page the user cannot
+find. Both checks are read-only (`get_folder`); neither adds a new route to
+the create-only allowlist below.
+
+### Open in AppFlowy / previously created pages
+
+A completed export shows an **Open in AppFlowy** button that opens the
+created meeting page in your system browser (see
+[URL format](#appflowy-web-url-format) below). Settings also lists
+**Previously created pages** -- every page this integration has ever
+planned or created, read straight from the local journal, each with an
+**Open** link. This is read-only and lets you find (and, if you want,
+manually move in AppFlowy) a page left behind by an older version of this
+app, including one orphaned directly under the workspace root by the bug
+described above -- this app itself never moves, renames, or deletes
+anything listed here.
+
+### AppFlowy Web URL format
+
+"Open in AppFlowy" and the previously-created-pages list both link to
+`appflowy_client::web_page_url(base_url, workspace_id, view_id)`. This is an
+**assumption**, not independently confirmed against AppFlowy's source: for
+the official cloud, the web app is understood to live at a different
+domain (`https://appflowy.com/app/<workspace_id>/<view_id>`) than the
+`beta.appflowy.cloud` API/auth host this integration talks to; for a
+self-hosted deployment, the web app is assumed to be served from the same
+configured base URL under `/app/...` (the typical single-domain,
+nginx-reverse-proxied self-host layout), since a self-host has no separate
+published web domain to reference instead. If this assumption is wrong for
+a given deployment, only that one function needs to change. Opening a URL is
+restricted, defense-in-depth, to `https://` and to either the AppFlowy Web
+public domain or the host of the configured AppFlowy server -- never an
+arbitrary caller-supplied URL.
 
 Each meeting page's content is one of two formats, controlled by the **Use
 the native AI Meeting Notes block** setting (default: on):
@@ -144,6 +210,12 @@ after the user confirms in the dashboard -- the prior page is never touched.
 
 ## Limitations
 
+- Pages created by a version of this app before the Space-resolution fix
+  described in [Where pages are created](#where-pages-are-created) may be
+  hidden under the workspace root, invisible in AppFlowy's own sidebar. Use
+  Settings' **Previously created pages** list to open one directly and, if
+  you want, move it into a Space yourself -- this app never moves anything
+  on its own.
 - The native `ai_meeting` block currently renders correctly in AppFlowy Web
   (and any client that has shipped this feature); it may render as a blank
   or "unsupported block" placeholder elsewhere. Use the standard-blocks
@@ -168,12 +240,22 @@ All AppFlowy tests run against an in-process fake HTTP server
 (`appflowy_fake_server.rs`, bound to `127.0.0.1:0`) or purely in-memory --
 **no test in this codebase ever makes a real request to `beta.appflowy.cloud`
 or any other real AppFlowy server.** Coverage includes: the allowlist
-refusal tests described above; first-export page creation (root/date/meeting,
-schema-checked `page_data`) in both block formats; a second same-day meeting
-reusing the existing date page; an existing "My daily meetings" page being
-found and reused; crash-then-retry recovery; 401-triggered token refresh;
-the OTP sign-in flow; permanent (4xx) vs. transient (5xx/network) failure
+refusal tests described above, plus an assertion that the allowlist table
+still holds exactly the seven documented routes; first-export page creation
+(root/date/meeting, schema-checked `page_data`) in both block formats; a
+second same-day meeting reusing the existing date page; an existing "My
+daily meetings" page being found and reused; crash-then-retry recovery; a
+stale journal root keyed under the workspace root (the pre-fix orphan shape)
+never being reused, with a fresh root created under the Space instead;
+Space resolution (a Space named "General" preferred, the first Space by
+order otherwise, an explicit `parent_view_id` always honoured, and a
+workspace with no Space failing the job with a clear message); post-create
+verification failing the job when the fake server accepts a create but
+doesn't list the new page under its parent; 401-triggered token refresh; the
+OTP sign-in flow; permanent (4xx) vs. transient (5xx/network) failure
 handling; disabled/auto-export gating; "Export again" confirmation and
 suffixing; and French-language UTF-8 content. `tests/appflowy.spec.ts`
-covers the Settings sign-in flow and the per-meeting export button with
-mocked IPC.
+covers the Settings sign-in flow, the per-meeting export button, the
+Destination picker (including surviving background polling), the "Open in
+AppFlowy" button, and the previously-created-pages list (escaped names, and
+its Open links), all with mocked IPC.

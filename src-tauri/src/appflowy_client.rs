@@ -46,6 +46,12 @@ mod allowlist {
         (Method::Get, "/api/workspace/{}/page-view/{}"),
         (Method::Post, "/api/workspace/{}/page-view"),
     ];
+    /// Test-only: the exact size of the allowlist table, so a test can prove
+    /// this fix (or any future change) never grew it beyond the seven
+    /// documented, audited routes -- rather than only checking that each of
+    /// the seven is present, which wouldn't catch an eighth route sneaking in.
+    #[cfg(test)]
+    pub const ALLOWED_COUNT: usize = ALLOWED.len();
     fn path_matches(pattern: &str, path: &str) -> bool {
         let pattern_segments: Vec<&str> = pattern.split('/').collect();
         let path_segments: Vec<&str> = path.split('/').collect();
@@ -105,6 +111,19 @@ impl FolderView {
     /// since a near-miss must never be silently adopted or duplicated.
     pub fn child_named(&self, name: &str) -> Option<&FolderView> {
         self.children.iter().find(|c| c.name == name)
+    }
+    /// Picks the Space (`is_space`) that "My daily meetings" should live
+    /// under when the user hasn't chosen an explicit destination: a Space
+    /// named "General" (case-insensitive) if one exists, otherwise the first
+    /// Space in the workspace's own child order. `None` means the workspace
+    /// has no Space at all -- AppFlowy's sidebar only ever shows Spaces and
+    /// their children, so creating anything directly under the workspace
+    /// root (this integration's original bug) would be invisible.
+    pub fn pick_space(&self) -> Option<&FolderView> {
+        self.children
+            .iter()
+            .find(|c| c.is_space && c.name.eq_ignore_ascii_case("general"))
+            .or_else(|| self.children.iter().find(|c| c.is_space))
     }
 }
 #[derive(Debug, Deserialize)]
@@ -212,6 +231,44 @@ pub fn validate_base_url(url: &str) -> Result<(), String> {
         return Err("AppFlowy base URL must use https:// (plain http:// is only allowed for a loopback test server).".into());
     }
     Err("AppFlowy base URL must start with https:// or http://.".into())
+}
+
+/// The officially-hosted AppFlowy Cloud's web app lives on a different
+/// domain (`appflowy.com`) than its API/auth host (`beta.appflowy.cloud`,
+/// `AppFlowyClient::new`'s default `base_url`) -- per this integration's
+/// research pass (see `docs/appflowy.md` and the research notes it links).
+/// Used only to build a human-facing "Open in AppFlowy" link, never for an
+/// API call.
+pub const APPFLOWY_WEB_PUBLIC_BASE: &str = "https://appflowy.com";
+const APPFLOWY_CLOUD_API_BASE: &str = "https://beta.appflowy.cloud";
+
+/// Builds the AppFlowy Web URL for a page. ASSUMPTION, not independently
+/// confirmed against source (documented here and in `docs/appflowy.md`):
+/// for the official cloud, the web app is `https://appflowy.com/app/<workspace_id>/<view_id>`,
+/// distinct from the `beta.appflowy.cloud` API host this client talks to;
+/// for a self-hosted deployment, the web app is assumed to be served from
+/// the same configured base URL under `/app/...` (the typical single-domain,
+/// nginx-reverse-proxied self-host layout), since self-hosts have no
+/// separate published web domain to reference instead. If this assumption
+/// turns out to be wrong for a given deployment, only this function needs
+/// to change.
+pub fn web_page_url(base_url: &str, workspace_id: &str, view_id: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let app_base = if trimmed == APPFLOWY_CLOUD_API_BASE { APPFLOWY_WEB_PUBLIC_BASE } else { trimmed };
+    format!("{app_base}/app/{workspace_id}/{view_id}")
+}
+
+/// The scheme+host (no path/port normalization beyond what's present) of a
+/// URL, for the "Open in AppFlowy" allowlist check in `lib.rs` -- kept next
+/// to `validate_base_url` since both parse the same URL shape.
+pub fn scheme_and_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        None
+    } else {
+        Some(format!("https://{host}"))
+    }
 }
 
 pub struct AppFlowyClient {
@@ -456,5 +513,53 @@ mod tests {
         assert!(root.child_named("My daily meetings").is_some());
         assert!(root.child_named("my daily meetings").is_none());
         assert!(root.child_named("My daily meeting").is_none());
+    }
+    fn space(view_id: &str, name: &str) -> FolderView {
+        FolderView { view_id: view_id.into(), parent_view_id: None, name: name.into(), is_space: true, children: vec![] }
+    }
+    #[test]
+    fn pick_space_prefers_general_case_insensitively() {
+        let root = FolderView {
+            view_id: "root".into(),
+            parent_view_id: None,
+            name: "Workspace".into(),
+            is_space: true,
+            children: vec![space("s1", "Marketing"), space("s2", "gENERAL"), space("s3", "Engineering")],
+        };
+        assert_eq!(root.pick_space().unwrap().view_id, "s2");
+    }
+    #[test]
+    fn pick_space_falls_back_to_first_space_by_order() {
+        let root = FolderView {
+            view_id: "root".into(),
+            parent_view_id: None,
+            name: "Workspace".into(),
+            is_space: true,
+            children: vec![space("s1", "Marketing"), space("s2", "Engineering")],
+        };
+        assert_eq!(root.pick_space().unwrap().view_id, "s1");
+    }
+    #[test]
+    fn pick_space_ignores_non_space_children() {
+        let mut page = space("p1", "Some Page");
+        page.is_space = false;
+        let root = FolderView { view_id: "root".into(), parent_view_id: None, name: "Workspace".into(), is_space: true, children: vec![page] };
+        assert!(root.pick_space().is_none());
+    }
+    #[test]
+    fn web_page_url_uses_the_public_web_domain_for_the_official_cloud() {
+        assert_eq!(web_page_url("https://beta.appflowy.cloud", "ws1", "v1"), "https://appflowy.com/app/ws1/v1");
+        assert_eq!(web_page_url("https://beta.appflowy.cloud/", "ws1", "v1"), "https://appflowy.com/app/ws1/v1");
+    }
+    #[test]
+    fn web_page_url_uses_the_configured_host_for_self_hosted_servers() {
+        assert_eq!(web_page_url("https://flowy.example.com", "ws1", "v1"), "https://flowy.example.com/app/ws1/v1");
+    }
+    #[test]
+    fn scheme_and_host_extracts_https_origin_only() {
+        assert_eq!(scheme_and_host("https://appflowy.com/app/ws1/v1"), Some("https://appflowy.com".into()));
+        assert_eq!(scheme_and_host("https://flowy.example.com/app/x"), Some("https://flowy.example.com".into()));
+        assert_eq!(scheme_and_host("http://appflowy.com/app/ws1/v1"), None);
+        assert_eq!(scheme_and_host("javascript:alert(1)"), None);
     }
 }

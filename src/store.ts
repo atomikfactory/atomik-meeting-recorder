@@ -9,6 +9,8 @@
 // plain module-level `const` exports next to the code that owns them.
 import { preview } from "./api";
 import type {
+  AppFlowyDestination,
+  AppFlowyPageInfo,
   AppFlowyState,
   AppFlowyWorkspace,
   AppState,
@@ -53,6 +55,7 @@ export const store = {
     appflowy_base_url: "https://beta.appflowy.cloud",
     appflowy_use_native_block: true,
     appflowy_workspace_id: null,
+    appflowy_parent_view_id: null,
   } as Settings,
 
   inventory: null as AudioInventory | null,
@@ -87,6 +90,8 @@ export const store = {
   appflowyOtpSent: false,
   appflowyAuthBusy: false,
   appflowyAuthError: null as string | null,
+  appflowyDestinations: [] as AppFlowyDestination[],
+  appflowyPages: [] as AppFlowyPageInfo[],
 
   compressionState: {enabled:true,inhibited:false,jobs:[],error:null} as CompressionState,
   compressionPoll: false,

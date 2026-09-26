@@ -95,6 +95,22 @@ impl AppFlowyStore {
             status: row.get(7)?,
         })
     }
+    /// Every page this integration has ever planned or created, for the
+    /// read-only "Previously created pages" list in Settings -- lets a user
+    /// find (and manually move) a page created before a fix such as the
+    /// orphaned-root bug, without this app ever moving anything itself.
+    pub fn all_pages(&self) -> Result<Vec<PageRecord>, String> {
+        let c = self.c.lock().map_err(|_| "store lock")?;
+        let mut stmt = c
+            .prepare("SELECT key,kind,parent_key,workspace_id,name,planned_view_id,remote_view_id,status FROM appflowy_pages ORDER BY rowid")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], Self::row_to_page)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
     pub fn get_page(&self, key: &str) -> Result<Option<PageRecord>, String> {
         self.c
             .lock()

@@ -133,9 +133,14 @@ fn first_export_creates_root_date_and_meeting_with_exactly_three_posts() {
     let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
     assert_eq!(job.status, "completed");
 
-    let root_names = server.child_names(&server.workspace_id);
+    // "My daily meetings" must land inside the default Space, never
+    // directly under the workspace root -- that's the orphaned-page bug
+    // this fix closes (AppFlowy's sidebar only shows Spaces and their
+    // descendants).
+    assert_eq!(server.child_names(&server.workspace_id), vec!["General".to_string()], "nothing should be created directly under the workspace root");
+    let root_names = server.child_names(&server.space_id);
     assert_eq!(root_names, vec!["My daily meetings".to_string()]);
-    let root_id = fixture.store.get_page(&root_key(&server.workspace_id, &server.workspace_id)).unwrap().unwrap().remote_view_id.unwrap();
+    let root_id = fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap().remote_view_id.unwrap();
     let date_names = server.child_names(&root_id);
     assert_eq!(date_names, vec![fixture.date()]);
     let date_page = fixture.store.get_page(&date_key(&server.workspace_id, &root_id, &fixture.date())).unwrap().unwrap();
@@ -180,7 +185,7 @@ fn second_meeting_same_day_only_creates_the_meeting_page() {
     let posts_after_second = server.requests_matching("POST", "/page-view");
 
     assert_eq!(posts_after_second - posts_after_first, 1, "only the new meeting page should be created");
-    let root_id = fixture.store.get_page(&root_key(&server.workspace_id, &server.workspace_id)).unwrap().unwrap().remote_view_id.unwrap();
+    let root_id = fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap().remote_view_id.unwrap();
     assert_eq!(server.child_names(&root_id), vec![fixture.date()], "no duplicate date page");
 }
 
@@ -193,7 +198,7 @@ fn an_existing_daily_meetings_page_is_found_and_reused() {
 
     // Only 2 POSTs: date + meeting -- the root page was never created.
     assert_eq!(server.requests_matching("POST", "/page-view"), 2);
-    assert_eq!(server.child_names(&server.workspace_id), vec!["My daily meetings".to_string()], "no second root page appeared");
+    assert_eq!(server.child_names(&server.space_id), vec!["My daily meetings".to_string()], "no second root page appeared");
 }
 
 #[test]
@@ -204,8 +209,8 @@ fn crash_between_page_creation_and_journal_update_is_recovered_on_retry() {
     // Simulate: the root page was already created on the server in a
     // previous run, but the process crashed before `mark_created` ran, so
     // the local journal still shows "creating" with no remote id.
-    fixture.store.find_or_plan(&root_key(&server.workspace_id, &server.workspace_id), "root", None, &server.workspace_id, "My daily meetings").unwrap();
-    server.seed_existing_page(&server.workspace_id, "root-created-before-crash", "My daily meetings");
+    fixture.store.find_or_plan(&root_key(&server.workspace_id, &server.space_id), "root", None, &server.workspace_id, "My daily meetings").unwrap();
+    server.seed_existing_page(&server.space_id, "root-created-before-crash", "My daily meetings");
 
     fixture.export_recording(&server, &fixture.recording.recording_id);
 
@@ -213,9 +218,87 @@ fn crash_between_page_creation_and_journal_update_is_recovered_on_retry() {
     // second one: only 2 POSTs (date + meeting), and the journal now points
     // at the pre-existing remote id.
     assert_eq!(server.requests_matching("POST", "/page-view"), 2);
-    assert_eq!(server.child_names(&server.workspace_id), vec!["My daily meetings".to_string()]);
-    let root_record = fixture.store.get_page(&root_key(&server.workspace_id, &server.workspace_id)).unwrap().unwrap();
+    assert_eq!(server.child_names(&server.space_id), vec!["My daily meetings".to_string()]);
+    let root_record = fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap();
     assert_eq!(root_record.remote_view_id.as_deref(), Some("root-created-before-crash"));
+}
+
+#[test]
+fn stale_orphan_root_keyed_under_the_workspace_root_is_never_reused() {
+    // Simulates a journal left over from the pre-fix version of this
+    // integration, which planned/created "My daily meetings" directly under
+    // the workspace root (parent = workspace id) -- exactly the orphaned
+    // page from the real bug this fix closes. That row's key embeds the old
+    // parent, so it is a different key from the one the fixed
+    // `resolve_root_parent` now plans under (parent = the Space): the stale
+    // row must be left untouched and a fresh root created under the Space.
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    let stale_key = root_key(&server.workspace_id, &server.workspace_id);
+    fixture.store.find_or_plan(&stale_key, "root", None, &server.workspace_id, "My daily meetings").unwrap();
+    server.seed_existing_page(&server.workspace_id, "orphaned-under-workspace-root", "My daily meetings");
+
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+
+    // A brand-new root was created under the Space -- 3 POSTs, not 2.
+    assert_eq!(server.requests_matching("POST", "/page-view"), 3);
+    assert_eq!(server.child_names(&server.space_id), vec!["My daily meetings".to_string()], "the new root must be visible under the Space");
+    // The pre-existing orphaned page is left exactly where it was (never
+    // touched, moved, or deleted) -- only "General" is a genuinely new
+    // sibling from server setup, and no *new* page was added here.
+    assert_eq!(server.child_names(&server.workspace_id), vec!["General".to_string(), "My daily meetings".to_string()]);
+    let fresh_root = fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap();
+    assert_ne!(fresh_root.remote_view_id.as_deref(), Some("orphaned-under-workspace-root"), "the fresh root must not adopt the orphaned page");
+    let stale = fixture.store.get_page(&stale_key).unwrap().unwrap();
+    assert_eq!(stale.status, "creating", "the stale orphan row is left exactly as it was -- never touched, never adopted");
+}
+
+#[test]
+fn explicit_parent_view_id_is_always_honoured_even_with_spaces_present() {
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start_with_spaces(&["General", "Engineering"]);
+    fixture.sign_in();
+    let mut settings = fixture.settings(&server);
+    settings.parent_view_id = Some("space-1".to_string()); // "Engineering", not the default
+    fixture.store.enqueue(&fixture.recording.recording_id).unwrap();
+    tick(&fixture.root, &fixture.store, &settings, &fixture.credentials, &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(server.child_names("space-1"), vec!["My daily meetings".to_string()]);
+    assert!(server.child_names(&server.space_id).is_empty(), "the default Space must be untouched");
+}
+
+#[test]
+fn first_space_is_used_when_no_space_is_named_general() {
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start_with_spaces(&["Marketing", "Engineering"]);
+    fixture.sign_in();
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+    assert_eq!(server.child_names("space-0"), vec!["My daily meetings".to_string()], "Marketing (first by order) is picked, since none is named General");
+}
+
+#[test]
+fn a_workspace_with_no_space_fails_the_job_with_a_clear_message() {
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start_with_no_space();
+    fixture.sign_in();
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+    let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
+    assert_eq!(job.status, "failed");
+    assert!(job.error.as_deref().unwrap_or_default().contains("No space found"), "{:?}", job.error);
+    assert!(server.requests_matching("POST", "/page-view") == 0, "nothing should ever be created without a resolved space");
+}
+
+#[test]
+fn a_page_the_server_does_not_list_after_creating_fails_the_job_instead_of_reporting_success() {
+    let fixture = Fixture::new();
+    let server = FakeAppFlowyServer::start();
+    fixture.sign_in();
+    server.omit_created_children();
+    fixture.export_recording(&server, &fixture.recording.recording_id);
+    let job = fixture.store.get_job(&fixture.recording.recording_id).unwrap().unwrap();
+    assert_eq!(job.status, "failed", "the export must never report success for a page AppFlowy doesn't actually list");
+    assert!(job.error.as_deref().unwrap_or_default().contains("not visible"), "{:?}", job.error);
 }
 
 #[test]
@@ -305,7 +388,7 @@ fn export_again_requires_confirmation_and_creates_a_new_suffixed_page() {
 
     let date_id = fixture
         .store
-        .get_page(&date_key(&server.workspace_id, &fixture.store.get_page(&root_key(&server.workspace_id, &server.workspace_id)).unwrap().unwrap().remote_view_id.unwrap(), &fixture.date()))
+        .get_page(&date_key(&server.workspace_id, &fixture.store.get_page(&root_key(&server.workspace_id, &server.space_id)).unwrap().unwrap().remote_view_id.unwrap(), &fixture.date()))
         .unwrap()
         .unwrap()
         .remote_view_id

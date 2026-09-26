@@ -3,10 +3,13 @@ test.beforeEach(async({page})=>{await page.addInitScript(()=>{
   const rec=(id:string)=>({recording_id:id,started_at:1,ended_at:2,duration_ms:1,status:"recorded",tracks:[],error:null,transcription_status:"",appflowy_status:""});
   const f:any={
     calls:[],
-    settings:{auto_record:true,start_debounce_seconds:10,end_grace_seconds:30,whisper_model:"base",diarization_enabled:true,audio_sources:[],summary_enabled:true,ollama_url:"http://127.0.0.1:11434",summary_model:"qwen3:8b",appflowy_enabled:false,appflowy_auto_export:false,appflowy_base_url:"https://beta.appflowy.cloud",appflowy_use_native_block:true,appflowy_workspace_id:null},
+    settings:{auto_record:true,start_debounce_seconds:10,end_grace_seconds:30,whisper_model:"base",diarization_enabled:true,audio_sources:[],summary_enabled:true,ollama_url:"http://127.0.0.1:11434",summary_model:"qwen3:8b",appflowy_enabled:false,appflowy_auto_export:false,appflowy_base_url:"https://beta.appflowy.cloud",appflowy_use_native_block:true,appflowy_workspace_id:null,appflowy_parent_view_id:null},
     appflowy:{enabled:false,auto_export:false,connected:false,email:null,base_url:"https://beta.appflowy.cloud",jobs:[],inhibited:false,error:null},
     workspaces:[{workspace_id:"ws1",workspace_name:"Test Workspace"}],
+    destinations:[{view_id:"space-1",name:"General",depth:0},{view_id:"page-1",name:"Roadmap",depth:1}],
+    pages:[],
     otpOk:true,
+    openedUrls:[] as string[],
   };
   Object.assign(window,{__af:f,__TAURI_INTERNALS__:{transformCallback:()=>1,invoke:async(c:string,a:any)=>{
     f.calls.push([c,a]);
@@ -24,12 +27,15 @@ test.beforeEach(async({page})=>{await page.addInitScript(()=>{
     if(c==="get_audio_devices")return{backend:"x",devices:[],errors:[]};
     if(c==="get_appflowy_state")return f.appflowy;
     if(c==="appflowy_list_workspaces")return f.workspaces;
+    if(c==="appflowy_list_destinations")return f.destinations;
+    if(c==="appflowy_list_pages")return f.pages;
+    if(c==="open_appflowy_url"){f.openedUrls.push(a.url);return null}
     if(c==="appflowy_request_otp"){if(!f.otpOk)throw Error("AppFlowy Cloud is not reachable right now.");f.otpEmail=a.email;return null}
     if(c==="appflowy_verify_otp"){if(a.code!=="123456")throw Error("invalid code");f.appflowy={...f.appflowy,connected:true,email:a.email};return null}
     if(c==="appflowy_sign_out"){f.appflowy={...f.appflowy,connected:false,email:null};return null}
-    if(c==="appflowy_export_now"){f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"completed",error:null,export_index:1}]};return null}
-    if(c==="appflowy_export_again"){if(!a.confirm)throw Error("Exporting again requires confirmation.");f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"completed",error:null,export_index:2}]};return null}
-    if(c==="appflowy_retry"){f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"queued",error:null,export_index:1}]};return null}
+    if(c==="appflowy_export_now"){f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"completed",error:null,export_index:1,page_url:"https://appflowy.com/app/ws1/v1"}]};return null}
+    if(c==="appflowy_export_again"){if(!a.confirm)throw Error("Exporting again requires confirmation.");f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"completed",error:null,export_index:2,page_url:"https://appflowy.com/app/ws1/v2"}]};return null}
+    if(c==="appflowy_retry"){f.appflowy={...f.appflowy,jobs:[{recording_id:a.recordingId,status:"queued",error:null,export_index:1,page_url:null}]};return null}
     throw Error(c)
   }}})
 });await page.goto("/")});
@@ -196,6 +202,38 @@ test("full path: enable, sign in, then export from the meeting card",async({page
   await expect(exportButton).toBeVisible({timeout:5000});
   await exportButton.click();
   await expect(page.getByRole("button",{name:"Export to AppFlowy again"})).toBeVisible({timeout:5000});
+});
+
+test("destination picker survives polling while signed in",async({page})=>{
+  await page.evaluate(()=>{(window as any).__af.appflowy={...(window as any).__af.appflowy,connected:true,email:"user@example.com"}});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await expect(page.locator('[name="appflowy_parent_view_id"] option')).toHaveCount(3,{timeout:5000});
+  await page.locator('[name="appflowy_parent_view_id"]').selectOption("page-1");
+  await expect(page.locator("#appflowy-destination-path")).toContainText("Roadmap");
+  await page.waitForTimeout(5000);
+  await expect(page.locator('[name="appflowy_parent_view_id"]')).toHaveValue("page-1");
+});
+
+test("a completed export offers an Open in AppFlowy button that opens the created page",async({page})=>{
+  await page.evaluate(()=>{(window as any).__af.appflowy={...(window as any).__af.appflowy,enabled:true,connected:true,email:"user@example.com",jobs:[{recording_id:"a",status:"completed",error:null,export_index:1,page_url:"https://appflowy.com/app/ws1/v1"}]}});
+  await page.waitForTimeout(2100);
+  await page.getByRole("button",{name:"Open in AppFlowy"}).click();
+  expect(await page.evaluate(()=> (window as any).__af.calls.find((x:any)=>x[0]==="open_appflowy_url"))).toEqual(["open_appflowy_url",{url:"https://appflowy.com/app/ws1/v1"}]);
+  expect(await page.evaluate(()=> (window as any).__af.openedUrls)).toEqual(["https://appflowy.com/app/ws1/v1"]);
+});
+
+test("previously created pages list renders escaped names with working open links",async({page})=>{
+  await page.evaluate(()=>{
+    const f=(window as any).__af;
+    f.appflowy={...f.appflowy,connected:true,email:"user@example.com"};
+    f.pages=[{key:"root:ws1:space1",kind:"root",name:"<img src=x onerror=alert(1)>",status:"created",url:"https://appflowy.com/app/ws1/root1"}];
+  });
+  await page.getByRole("button",{name:"Settings"}).click();
+  await expect(page.locator("#appflowy-previous-pages")).toContainText("<img src=x onerror=alert(1)>");
+  await expect(page.locator("#appflowy-previous-pages img")).toHaveCount(0);
+  await page.locator("#appflowy-previous-pages").locator("summary").click();
+  await page.locator("#appflowy-previous-pages").getByRole("button",{name:"Open"}).click();
+  expect(await page.evaluate(()=> (window as any).__af.openedUrls)).toEqual(["https://appflowy.com/app/ws1/root1"]);
 });
 
 test("meetings without a finished transcript show no AppFlowy action",async({page})=>{

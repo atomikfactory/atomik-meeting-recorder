@@ -8,7 +8,7 @@
 //! module docs and `appflowy_allowlist_tests.rs`).
 use crate::{
     appflowy_blocks::{build_page_document, MeetingExportData, SpeakerTurn},
-    appflowy_client::{AppFlowyClient, ClientError, FolderView, Workspace},
+    appflowy_client::{self, AppFlowyClient, ClientError, FolderView, Workspace},
     appflowy_credentials::SharedCredentialStore,
     appflowy_store::{date_key, meeting_key, root_key, AppFlowyJob, AppFlowyStore},
     diarization_store::DiarizationStore,
@@ -73,6 +73,34 @@ pub struct JobSummary {
     pub status: String,
     pub error: Option<String>,
     pub export_index: u32,
+    /// The AppFlowy Web URL of this meeting's created page, once completed
+    /// (see `appflowy_client::web_page_url`) -- lets the UI offer an "Open in
+    /// AppFlowy" button. `None` until the export has completed.
+    pub page_url: Option<String>,
+}
+/// One row of the local create-only journal, surfaced read-only in Settings
+/// as "Previously created pages" so a user can find (and, if they choose,
+/// manually move in AppFlowy) a page this integration created -- including
+/// one left orphaned under a workspace root by a version of this app that
+/// had the space-resolution bug this module now fixes. This app itself never
+/// moves, renames, or deletes anything it lists here.
+#[derive(Serialize, Clone, Debug)]
+pub struct PageInfo {
+    pub key: String,
+    pub kind: String,
+    pub name: String,
+    pub status: String,
+    pub url: Option<String>,
+}
+/// A candidate destination for "My daily meetings": a workspace Space, or
+/// (indented one level, `depth: 1`) a top-level page inside one. Read-only,
+/// built from `get_folder` -- never a route this integration could use to
+/// create or change anything by itself.
+#[derive(Serialize, Clone, Debug)]
+pub struct Destination {
+    pub view_id: String,
+    pub name: String,
+    pub depth: u8,
 }
 #[derive(Serialize)]
 pub struct AppFlowyState {
@@ -172,7 +200,14 @@ impl AppFlowyService {
         let jobs = match self.store().and_then(|s| s.all_jobs()) {
             Ok(jobs) => jobs
                 .into_iter()
-                .map(|j| JobSummary { recording_id: j.recording_id, status: j.status, error: j.error, export_index: j.export_index })
+                .map(|j| {
+                    let page_url = (j.status == "completed")
+                        .then(|| self.store().ok())
+                        .flatten()
+                        .and_then(|s| s.get_page(&meeting_key(&j.recording_id, j.export_index)).ok().flatten())
+                        .and_then(|p| p.remote_view_id.map(|id| appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, &id)));
+                    JobSummary { recording_id: j.recording_id, status: j.status, error: j.error, export_index: j.export_index, page_url }
+                })
                 .collect(),
             Err(e) => {
                 error = Some(e);
@@ -196,6 +231,35 @@ impl AppFlowyService {
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, String> {
         let settings = (self.settings)()?;
         self.client(&settings)?.list_workspaces().map_err(|e| e.to_string())
+    }
+    /// Read-only: the workspace's Spaces (and, indented, their top-level
+    /// pages) for the Settings "Destination" picker. Never creates or
+    /// changes anything -- a single `get_folder` call.
+    pub fn list_destinations(&self) -> Result<Vec<Destination>, String> {
+        let settings = (self.settings)()?;
+        let workspace_id = settings.workspace_id.clone().ok_or("AppFlowy workspace is not selected.")?;
+        let root = self.client(&settings)?.get_folder(&workspace_id, None).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for space in root.children.iter().filter(|c| c.is_space) {
+            out.push(Destination { view_id: space.view_id.clone(), name: space.name.clone(), depth: 0 });
+            for page in space.children.iter().filter(|c| !c.is_space) {
+                out.push(Destination { view_id: page.view_id.clone(), name: page.name.clone(), depth: 1 });
+            }
+        }
+        Ok(out)
+    }
+    /// Read-only: every page this integration has ever planned/created, for
+    /// the Settings "Previously created pages" list.
+    pub fn list_pages(&self) -> Result<Vec<PageInfo>, String> {
+        let settings = (self.settings)()?;
+        let pages = self.store()?.all_pages()?;
+        Ok(pages
+            .into_iter()
+            .map(|p| {
+                let url = p.remote_view_id.as_ref().map(|id| appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, id));
+                PageInfo { key: p.key, kind: p.kind, name: p.name, status: p.status, url }
+            })
+            .collect())
     }
     /// Manual per-meeting export, independent of the `auto_export` toggle
     /// (still requires `enabled`, checked here rather than only in the
@@ -352,6 +416,18 @@ struct PagePlan<'a> {
 /// exact-name child is adopted if found (covers both a user's pre-existing
 /// page and a crash after a successful remote create but before the local
 /// journal was updated) -- only creating a new page when neither is true.
+///
+/// After creating a brand-new page (not when adopting an existing one --
+/// that page is already known-visible), the parent's folder tree is
+/// re-read once more to confirm AppFlowy actually lists the new page as a
+/// child. AppFlowy's own sidebar only shows Spaces and their descendants
+/// (`FolderView.is_space`); a page created under something that never
+/// resolves to a Space-descended parent is exactly the bug this module
+/// fixes elsewhere (`resolve_root_parent`), so this check exists as a
+/// second, independent safety net: if the server ever accepts a create but
+/// the page doesn't show up under its parent, the job is failed with a
+/// clear message instead of reporting "completed" for a page the user will
+/// never see.
 fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) -> Result<String, ExportError> {
     let PagePlan { workspace_id, key, kind, parent_remote_id, name, page_data } = plan;
     let record = store.find_or_plan(key, kind, Some(parent_remote_id), workspace_id, name).map_err(|e| (e, false))?;
@@ -367,8 +443,34 @@ fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) 
     let page = client
         .create_page(workspace_id, parent_remote_id, &record.planned_view_id, name, page_data)
         .map_err(classify_client_error)?;
+    let verify: FolderView = client.get_folder(workspace_id, Some(parent_remote_id)).map_err(classify_client_error)?;
+    if !verify.children.iter().any(|c| c.view_id == page.view_id) {
+        return Err((format!(
+            "AppFlowy accepted \"{name}\" but it is not visible under its parent afterward; the export was marked failed rather than reported as completed for a page you would not be able to find."
+        ), false));
+    }
     store.mark_created(key, &page.view_id).map_err(|e| (e, false))?;
     Ok(page.view_id)
+}
+
+/// Resolves the parent view id "My daily meetings" is found or created
+/// under. An explicit `settings.parent_view_id` (a Space or a page the user
+/// chose in Settings) is always honoured as-is. Otherwise the workspace's
+/// own root folder is read and a Space is picked (see
+/// `FolderView::pick_space`): AppFlowy's sidebar only ever shows Spaces and
+/// their descendants, so creating "My daily meetings" directly under the
+/// workspace root -- this integration's original bug -- makes it invisible
+/// even though the page really was created. A workspace with no Space at
+/// all fails the job with a clear, actionable message rather than silently
+/// falling back to the invisible workspace root.
+fn resolve_root_parent(client: &AppFlowyClient, settings: &AppFlowySettings, workspace_id: &str) -> Result<String, ExportError> {
+    if let Some(parent) = &settings.parent_view_id {
+        return Ok(parent.clone());
+    }
+    let root: FolderView = client.get_folder(workspace_id, None).map_err(classify_client_error)?;
+    root.pick_space()
+        .map(|space| space.view_id.clone())
+        .ok_or_else(|| ("No space found in this AppFlowy workspace; choose a parent in Settings.".to_string(), false))
 }
 
 fn empty_document() -> serde_json::Value {
@@ -405,7 +507,7 @@ fn export_one(
 ) -> Result<(), ExportError> {
     let client = AppFlowyClient::new(&settings.base_url, credentials.clone()).map_err(|e| (e, false))?;
     let workspace_id = settings.workspace_id.clone().ok_or_else(|| ("AppFlowy workspace is not selected.".to_string(), false))?;
-    let root_parent_id = settings.parent_view_id.clone().unwrap_or_else(|| workspace_id.clone());
+    let root_parent_id = resolve_root_parent(&client, settings, &workspace_id)?;
     let (recording, meeting) = load_meeting_export_data(root, settings, &job.recording_id).map_err(|e| (e, false))?;
 
     let root_page_id = resolve_page(

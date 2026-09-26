@@ -922,6 +922,53 @@ async fn appflowy_retry(recording_id: String, app: tauri::AppHandle) -> Result<(
         .map_err(app_error)?
 }
 #[tauri::command]
+async fn appflowy_list_destinations(app: tauri::AppHandle) -> Result<Vec<appflowy::Destination>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().list_destinations())
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn appflowy_list_pages(app: tauri::AppHandle) -> Result<Vec<appflowy::PageInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().list_pages())
+        .await
+        .map_err(app_error)?
+}
+/// Opens a URL this backend itself constructed (an AppFlowy Web page link,
+/// see `appflowy_client::web_page_url`) in the system browser -- never a URL
+/// supplied by, or influenced by, arbitrary caller/page-content input.
+/// Restricted to `https://` and to the AppFlowy Web public domain or the
+/// user's own configured (self-hosted) AppFlowy server host, the same
+/// defense-in-depth spirit as the API client's create-only allowlist: a bug
+/// elsewhere in this codebase cannot smuggle an arbitrary URL out to the
+/// system browser through this command.
+#[tauri::command]
+async fn open_appflowy_url(url: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        let allowed = [
+            Some(appflowy_client::APPFLOWY_WEB_PUBLIC_BASE.to_string()),
+            appflowy_client::scheme_and_host(&settings.appflowy_base_url),
+        ];
+        let host = appflowy_client::scheme_and_host(&url).ok_or("Refused to open a non-https URL.")?;
+        if !allowed.iter().any(|a| a.as_deref() == Some(host.as_str())) {
+            return Err(format!("Refused to open {host}: not the AppFlowy Web domain or the configured AppFlowy server."));
+        }
+        open_url(&url)
+    })
+    .await
+    .map_err(app_error)?
+}
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(url).spawn().map_err(app_error)?;
+    Ok(())
+}
+#[tauri::command]
 async fn get_compression_state(
     app: tauri::AppHandle,
 ) -> Result<audio_compress::CompressionState, String> {
@@ -1566,7 +1613,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

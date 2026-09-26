@@ -30,6 +30,22 @@ fn mark_created_is_idempotent() {
 }
 
 #[test]
+fn all_pages_lists_every_planned_and_created_page() {
+    let store = store();
+    let root = root_key("w1", "space1");
+    let date = date_key("w1", "root-remote", "2026-09-26");
+    store.find_or_plan(&root, "root", None, "w1", "My daily meetings").unwrap();
+    store.mark_created(&root, "root-remote").unwrap();
+    store.find_or_plan(&date, "date", Some(&root), "w1", "2026-09-26").unwrap();
+    let pages = store.all_pages().unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].key, root);
+    assert_eq!(pages[0].remote_view_id.as_deref(), Some("root-remote"));
+    assert_eq!(pages[1].key, date);
+    assert!(pages[1].remote_view_id.is_none());
+}
+
+#[test]
 fn job_lifecycle_enqueue_claim_complete() {
     let store = store();
     store.enqueue("rec-1").unwrap();

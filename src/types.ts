@@ -21,6 +21,7 @@ export type Settings = {
   appflowy_base_url?: string;
   appflowy_use_native_block?: boolean;
   appflowy_workspace_id?: string | null;
+  appflowy_parent_view_id?: string | null;
 };
 export type BrowserExtensionStatus = { connected: boolean; last_message_seconds_ago: number | null; registered: boolean; browsers: string[] };
 export type MoveResult = { recording_id: string; moved: boolean; error: string | null };
@@ -78,9 +79,11 @@ export type CompressionJob = { recording_id:string; status:string; progress:numb
 export type CompressionState = { enabled:boolean; inhibited:boolean; jobs:CompressionJob[]; error:string|null };
 export type RecordingAudioStorage = { recording_id:string; bytes:number; original_bytes:number; format:"wav"|"flac"|"mixed"|"none" };
 export type AudioStorageSummary = { total_bytes:number; total_original_bytes:number; recordings:RecordingAudioStorage[] };
-export type AppFlowyJob = { recording_id:string; status:string; error:string|null; export_index:number };
+export type AppFlowyJob = { recording_id:string; status:string; error:string|null; export_index:number; page_url:string|null };
 export type AppFlowyState = { enabled:boolean; auto_export:boolean; connected:boolean; email:string|null; base_url:string; jobs:AppFlowyJob[]; inhibited:boolean; error:string|null };
 export type AppFlowyWorkspace = { workspace_id:string; workspace_name:string|null };
+export type AppFlowyDestination = { view_id:string; name:string; depth:number };
+export type AppFlowyPageInfo = { key:string; kind:string; name:string; status:string; url:string|null };
 export type SearchHit = { kind: string; seq: number; start_ms: number | null; end_ms: number | null; speaker: string | null; snippet_html: string };
 export type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
 export type SearchResults = { meetings: SearchMeeting[]; took_ms: number };
