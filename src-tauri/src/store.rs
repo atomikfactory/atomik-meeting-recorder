@@ -116,9 +116,22 @@ pub struct Settings {
     /// named space inside it.
     #[serde(default)]
     pub appflowy_parent_view_id: Option<String>,
+    /// Global OS-wide shortcut (see `hotkey.rs`) that toggles recording even
+    /// while the window is hidden in the tray. Registered from Rust, not the
+    /// webview. Missing/legacy payloads default to enabled.
+    #[serde(default = "enabled_by_default")]
+    pub hotkey_enabled: bool,
+    /// An accelerator string, e.g. "CommandOrControl+Alt+R" (see
+    /// `hotkey::validate_accelerator`). Missing/legacy payloads default to
+    /// the built-in default shortcut.
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
 }
 fn default_appflowy_base_url() -> String {
     "https://beta.appflowy.cloud".into()
+}
+pub fn default_hotkey() -> String {
+    "CommandOrControl+Alt+R".into()
 }
 /// Longest accepted `legacy_library_roots` list -- generous for anyone who
 /// changes folders occasionally, bounded so the settings payload cannot grow
@@ -194,6 +207,8 @@ impl Default for Settings {
             appflowy_use_native_block: enabled_by_default(),
             appflowy_workspace_id: None,
             appflowy_parent_view_id: None,
+            hotkey_enabled: enabled_by_default(),
+            hotkey: default_hotkey(),
         }
     }
 }
@@ -256,6 +271,7 @@ impl Settings {
         }
         crate::appflowy_client::validate_base_url(&self.appflowy_base_url)
             .map_err(StoreError::Validation)?;
+        crate::hotkey::validate_accelerator(&self.hotkey).map_err(StoreError::Validation)?;
         Ok(())
     }
 }
@@ -384,6 +400,8 @@ mod tests {
             appflowy_use_native_block: false,
             appflowy_workspace_id: Some("workspace-1".into()),
             appflowy_parent_view_id: Some("space-1".into()),
+            hotkey_enabled: false,
+            hotkey: "Control+Shift+M".into(),
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -613,6 +631,41 @@ mod tests {
                 ..good
             })
             .is_ok());
+    }
+    #[test]
+    fn legacy_payload_without_hotkey_fields_defaults_to_enabled_default_shortcut() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#,
+        )
+        .unwrap();
+        assert!(parsed.hotkey_enabled);
+        assert_eq!(parsed.hotkey, "CommandOrControl+Alt+R");
+    }
+    #[test]
+    fn invalid_hotkey_does_not_replace_saved_value() {
+        let p = path("hotkey.db");
+        let store = SettingsStore::open(p).unwrap();
+        let good = store.get().unwrap();
+        assert!(store
+            .save(Settings {
+                hotkey: "Ctrl+Alt+Delete".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert!(store
+            .save(Settings {
+                hotkey: "NotAModifier".into(),
+                ..good.clone()
+            })
+            .is_err());
+        assert_eq!(store.get().unwrap(), good);
+        assert!(store
+            .save(Settings {
+                hotkey: "Ctrl+Shift+P".into(),
+                ..good
+            })
+            .is_ok());
+        assert_eq!(store.get().unwrap().hotkey, "Ctrl+Shift+P");
     }
     #[test]
     fn recordings_folder_defaults_to_none_and_is_none_by_default() {

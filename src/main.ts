@@ -13,6 +13,7 @@ import { refreshSummaryState, refreshSummaryModels, updateSummarySettingsUI } fr
 import { refreshCompressionState, refreshAudioStorage } from "./settings/compression";
 import { refreshBrowserExtensionState } from "./settings/extension";
 import { refreshAppFlowyState, refreshAppFlowyWorkspaces } from "./settings/appflowy";
+import { refreshHotkeyState, updateHotkeyUI } from "./settings/hotkey";
 import { settingsSectionHtml, wireSettingsSection } from "./settings/index";
 import { recentRecordings, refreshRecordingState, recordingLabel } from "./views/library";
 import { dashboardSectionHtml, refreshDetectionState, updateDetectionUI, wireDashboardSection } from "./views/dashboard";
@@ -28,6 +29,7 @@ async function loadDesktop() {
     store.settings = { ...saved, audio_sources: saved.audio_sources ?? [] };
     store.selectedSourceIds = new Set(store.settings.audio_sources.map((source) => source.id));
     store.draftSources = new Map(store.settings.audio_sources.map((source) => [source.id, source]));
+    store.hotkeyDraft = store.settings.hotkey ?? store.hotkeyDraft;
     store.appState = app;
     store.backendReady = true;
     render();
@@ -42,6 +44,7 @@ async function loadDesktop() {
     refreshBrowserExtensionState();
     refreshAppFlowyState().then(refreshAppFlowyWorkspaces);
     refreshSummaryModels(store.settings.ollama_url ?? "http://127.0.0.1:11434");
+    refreshHotkeyState();
   } catch (error) {
     store.backendReady = false;
     render();
@@ -107,6 +110,7 @@ function render() {
   updateDetectionUI();
   updateTranscriptionUI();
   updateSummarySettingsUI();
+  updateHotkeyUI();
   wireSettingsSection();
   wireTranscriptSearch();
 }
@@ -140,8 +144,9 @@ if (!preview) {
   window.setInterval(refreshDetectionState, 1000);
   window.setInterval(refreshBrowserExtensionState, 5000);
   window.setInterval(refreshAppFlowyState, 2000);
+  window.setInterval(refreshHotkeyState, 1000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); } });
 } else render();

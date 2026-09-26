@@ -96,6 +96,22 @@ Every audio reader -- transcription decode, speaker identification, restart, and
 
 Every place that resolves a recording's folder -- transcription, diarization, summarization, compression, the search indexer (including its summary-text and speaker-label enrichment), "Open folder", and crash recovery -- validates a recording's saved library root against the *known* roots (the default location, the currently configured folder, and any folder it replaced) rather than trusting an arbitrary path from the database; the existing symlink/parent/basename checks in `recording_paths::resolved_recording_directory` still apply on top of that. If the configured folder becomes unreachable (its drive unplugged, a network share dropped), starting a new recording fails with a clear error rather than silently falling back to the default, and existing recordings that live under it simply show that folder's operations (open, transcribe, ...) as unavailable -- their database rows, and the folder's own files, are never touched or forgotten.
 
+## Global recording shortcut
+
+A single OS-wide keyboard shortcut toggles recording, registered from Rust (`tauri-plugin-global-shortcut`) rather than the webview, so it works even while the main window is hidden in the tray. Default: **Ctrl+Alt+R** (`CommandOrControl+Alt+R`). Change it in **Settings → Global recording shortcut**: click the shortcut button, then press the new combination (Escape cancels; Backspace clears it), or turn the feature off entirely with the checkbox next to it. Saving re-registers (or unregisters) the shortcut immediately -- no restart needed.
+
+Pressing the shortcut looks at meeting detection's current state and does exactly what the Start/Stop button or tray menu item would do in that state:
+
+- **Idle** (nothing recording, no meeting awaiting approval) -- starts a manual recording with the currently saved sources, the same path as Start. If no sources are saved (or another start error occurs), the window is brought forward and the same error the Start button would show is displayed.
+- **Recording** -- stops and finalizes, the same path as Stop.
+- **A detected meeting is awaiting your approval** -- pressing the shortcut approves it (starts that recording) instead of starting an unrelated manual one.
+
+Repeated presses within one second of an accepted press are ignored, so a single physical key-down that the OS reports more than once (or a user holding the combination down) cannot fire the toggle twice.
+
+The accelerator must include at least one modifier (Ctrl/Alt/Shift/Win, or Cmd on macOS) plus exactly one non-modifier key, and a small set of OS/window-manager reserved combinations (Ctrl+Alt+Delete, Alt+F4, Win+L) are always rejected. If the OS refuses to register the shortcut -- most commonly because another application already owns it -- Settings shows that error text directly under the shortcut field; every other saved preference is unaffected.
+
+**Linux/Wayland caveat**: `tauri-plugin-global-shortcut` is built on OS global-hotkey APIs that X11 supports directly; Wayland compositors frequently do not expose a portal for arbitrary global shortcuts. Where registration is unsupported, it fails the same way a shortcut conflict does -- reported as a clear error in Settings, not silently ignored -- and manual recording from the window or tray remains fully available either way.
+
 ## Meeting management and status meaning
 
 **Rename** changes only the saved display title. It never renames a recording folder, moves WAV files, changes the stable recording ID, or invalidates a transcript checksum.

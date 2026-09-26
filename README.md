@@ -26,6 +26,7 @@ npm run build
 - Windows WASAPI loopback capture, and Linux PulseAudio/PipeWire monitor-source capture of system output; other platform limits are explicit
 - Local SQLite preferences; no runtime cloud requests
 - Manual start/stop from the window or tray, recording timer and active tray indicator
+- Global keyboard shortcut (default Ctrl+Alt+R, configurable in Settings) toggles recording from anywhere, even while the window is hidden in the tray; approves a detected meeting awaiting approval instead of starting an unrelated recording. Registered from Rust; a registration failure (e.g. another app owns the shortcut) is surfaced in Settings rather than silently ignored. See [global recording shortcut](docs/recording.md#global-recording-shortcut)
 - Separate PCM16 WAV tracks, UUID recording IDs, SQLite metadata, and restart recovery
 - Local Windows meeting hints, configurable confirmation/end grace, and approval before each detected recording
 - Optional local-only browser extension (Chrome/Edge/Firefox) for Google Meet, Microsoft Teams web, and Zoom web detection, including background tabs, connected via native messaging (no network port) from Settings; extends meeting detection to Linux/macOS for the platforms it covers. Same ask-first approval as native detection; see [browser extension](docs/browser-extension.md)

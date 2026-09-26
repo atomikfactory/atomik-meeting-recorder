@@ -22,7 +22,10 @@ export type Settings = {
   appflowy_use_native_block?: boolean;
   appflowy_workspace_id?: string | null;
   appflowy_parent_view_id?: string | null;
+  hotkey_enabled?: boolean;
+  hotkey?: string;
 };
+export type HotkeyStatus = { enabled: boolean; hotkey: string; registered: boolean; error: string | null };
 export type BrowserExtensionStatus = { connected: boolean; last_message_seconds_ago: number | null; registered: boolean; browsers: string[] };
 export type MoveResult = { recording_id: string; moved: boolean; error: string | null };
 export type MoveSummary = { results: MoveResult[] };

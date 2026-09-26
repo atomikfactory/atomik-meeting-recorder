@@ -21,6 +21,7 @@ import type {
   CompressionState,
   DetectionState,
   DiarizationState,
+  HotkeyStatus,
   Recording,
   RecordingState,
   SearchResults,
@@ -59,6 +60,8 @@ export const store = {
     appflowy_use_native_block: true,
     appflowy_workspace_id: null,
     appflowy_parent_view_id: null,
+    hotkey_enabled: true,
+    hotkey: "CommandOrControl+Alt+R",
   } as Settings,
 
   inventory: null as AudioInventory | null,
@@ -102,6 +105,16 @@ export const store = {
   browserExtensionState: {connected:false,last_message_seconds_ago:null,registered:false,browsers:[]} as BrowserExtensionStatus,
   browserExtensionPoll: false,
   browserExtensionActionInFlight: false,
+
+  hotkeyState: {enabled:true,hotkey:"CommandOrControl+Alt+R",registered:false,error:null} as HotkeyStatus,
+  hotkeyPoll: false,
+  // Capture-field UI state: whether the user has clicked "Record shortcut"
+  // and we are listening for key-down, plus the in-progress display value
+  // (kept out of the DOM's own state so Escape/Backspace can cleanly revert
+  // it -- see settings/hotkey.ts).
+  hotkeyListening: false,
+  hotkeyDraft: "CommandOrControl+Alt+R",
+  hotkeyCaptureError: null as string | null,
 
   audioStorage: {total_bytes:0,total_original_bytes:0,recordings:[]} as AudioStorageSummary,
   audioStoragePoll: false,

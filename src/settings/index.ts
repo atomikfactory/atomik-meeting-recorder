@@ -11,6 +11,7 @@ import { audioStorageSummaryText } from "./compression";
 import { appflowySettingsSectionHtml, wireAppFlowySettingsSection } from "./appflowy";
 import { browserExtensionStatusText, wireExtensionSection } from "./extension";
 import { wireFolderSection, refreshAppState, refreshRecordingsFolderSection } from "./folder";
+import { hotkeySettingsSectionHtml, wireHotkeySection, refreshHotkeyState, syncHotkeyDraftFromSettings, DEFAULT_HOTKEY } from "./hotkey";
 import { refreshDetectionState } from "../views/dashboard";
 import { refreshTranscriptionState } from "./transcription";
 import { refreshDiarizationState } from "./speakers";
@@ -58,7 +59,9 @@ export function settingsSectionHtml(): string {
                 step="5"
                 value="${store.settings.end_grace_seconds}"
                 ${disabled()} /></label
-            ><label
+            >
+            ${hotkeySettingsSectionHtml()}
+            <label
               >Whisper model<select name="whisper_model" ${disabled()}>
                 ${(["tiny", "base", "small", "medium", "large", "turbo"] as Model[]).map((x) => `<option value="${x}" ${store.settings.whisper_model === x ? "selected" : ""}>${x}${x === "turbo" ? " (recommended)" : ""}${(store.transcriptionState.imported_models ?? []).includes(x) ? "" : " (not imported)"}</option>`).join("")}</select
               ><small
@@ -184,10 +187,16 @@ export function wireSettingsSection() {
       appflowy_workspace_id: (form.get("appflowy_workspace_id") as string) || store.settings.appflowy_workspace_id || null,
       appflowy_parent_view_id: (form.get("appflowy_parent_view_id") as string) || null,
       audio_sources: store.settings.audio_sources,
+      hotkey_enabled: form.get("hotkey_enabled") === "on",
+      // A cleared-but-never-repicked capture field (Backspace, then Save
+      // without pressing a new combination) falls back to the last saved
+      // shortcut rather than silently submitting an empty string.
+      hotkey: String(form.get("hotkey") ?? "").trim() || store.settings.hotkey || DEFAULT_HOTKEY,
     };
     try {
       const saved = await invoke<Settings>("save_settings", { settings: next });
       store.settings = { ...saved, audio_sources: saved.audio_sources.map((source) => store.draftSources.get(source.id) ?? source) };
+      syncHotkeyDraftFromSettings();
       notice("Preferences saved locally.");
       refreshDetectionState();
       refreshTranscriptionState();
@@ -196,6 +205,7 @@ export function wireSettingsSection() {
       refreshAppFlowyState();
       refreshAppFlowyDestinations();
       refreshAppFlowyPages();
+      refreshHotkeyState();
     } catch (error) {
       notice(`Could not save preferences: ${String(error)}`, "error");
     }
@@ -207,6 +217,7 @@ export function wireSettingsSection() {
   wireAudioSourcesSection();
   wireTranscriptionSection();
   wireSpeakersSection();
+  wireHotkeySection();
 }
 
 export { refreshAppState, refreshRecordingsFolderSection };

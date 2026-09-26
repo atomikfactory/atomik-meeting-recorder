@@ -15,6 +15,7 @@ mod browser_registration;
 mod capture_meter;
 mod detection;
 mod diarization;
+mod hotkey;
 mod echo_cancel;
 mod echo_dedup;
 mod diarization_engine;
@@ -76,6 +77,8 @@ use detection::{
 use audio_compress::{CompressionService, CompressionSettings};
 use diarization::DiarizationService;
 use diarization_store::DiarizationStore;
+use hotkey::HotkeyStatus;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use meeting_signals::{MeetingDetector as NativeDetectorTrait, NativeMeetingDetector};
 use recording::{RecordingService, RecordingState};
 use recording_paths::{library_directory, resolved_recording_directory};
@@ -417,6 +420,44 @@ fn detection_settings(app: &tauri::AppHandle) -> Result<DetectionSettings, Strin
         settings.end_grace_seconds,
     ))
 }
+/// (Re-)registers the global recording-toggle shortcut against the OS from
+/// the current settings, replacing whatever was previously registered.
+/// Never fails the caller: a bad accelerator or a registration conflict
+/// (another application already owns it) is recorded in `HotkeyStatus`
+/// (see `get_hotkey_status`) instead, so the rest of a settings save is
+/// unaffected. Called once at startup and again every time settings are
+/// saved, so enabling/disabling or changing the shortcut takes effect
+/// without a restart.
+fn apply_hotkey_settings(app: &tauri::AppHandle, settings: &Settings) {
+    let manager = app.global_shortcut();
+    let _ = manager.unregister_all();
+    let mut status = HotkeyStatus {
+        enabled: settings.hotkey_enabled,
+        hotkey: settings.hotkey.clone(),
+        registered: false,
+        error: None,
+    };
+    if settings.hotkey_enabled {
+        match hotkey::validate_accelerator(&settings.hotkey) {
+            Ok(canonical) => match manager.register(canonical.as_str()) {
+                Ok(()) => status.registered = true,
+                Err(error) => {
+                    status.error = Some(format!(
+                        "Could not register {canonical}: {error}. Another application may already be using this shortcut."
+                    ));
+                }
+            },
+            Err(error) => status.error = Some(error),
+        }
+    }
+    if let Ok(mut current) = app.state::<Mutex<HotkeyStatus>>().lock() {
+        *current = status;
+    }
+}
+#[tauri::command]
+fn get_hotkey_status(status: State<'_, Mutex<HotkeyStatus>>) -> Result<HotkeyStatus, String> {
+    status.lock().map_err(app_error).map(|s| s.clone())
+}
 struct AppRecordingBoundary(tauri::AppHandle);
 impl RecordingBoundary for AppRecordingBoundary {
     fn active_id(&self) -> Option<String> {
@@ -456,6 +497,7 @@ fn get_settings(store: State<'_, Mutex<SettingsStorage>>) -> Result<Settings, St
 #[tauri::command]
 fn save_settings(
     settings: Settings,
+    app: tauri::AppHandle,
     store: State<'_, Mutex<SettingsStorage>>,
     summary: State<'_, SummaryService>,
 ) -> Result<Settings, String> {
@@ -473,6 +515,11 @@ fn save_settings(
     // A user who just enabled summaries, or fixed the URL/model, expects a
     // waiting job to resume immediately rather than sit out its backoff.
     let _ = summary.wake_waiting();
+    // Re-register (or unregister) the global hotkey immediately, without a
+    // restart. A registration failure is surfaced via `get_hotkey_status`
+    // rather than failing this save -- every other preference above is
+    // already durably saved by this point.
+    apply_hotkey_settings(&app, &saved);
     Ok(saved)
 }
 #[tauri::command]
@@ -1579,8 +1626,62 @@ fn install_tray(app: &tauri::App) -> Result<TrayControls, tauri::Error> {
     Ok(TrayControls { tray, start, stop })
 }
 
+/// Runs on every OS-level key-down of the registered shortcut (not a
+/// release, and not while another press is still debounced -- see
+/// `hotkey::Debounce`). Decides idle/recording/awaiting-approval purely via
+/// `hotkey::decide_toggle_action` and then drives the exact same
+/// `DetectionService` methods the Start/Stop buttons and tray menu use, so
+/// behavior (including the "already in progress"/"no recording" guards) is
+/// identical regardless of trigger.
+fn handle_hotkey_event(
+    app: &tauri::AppHandle,
+    event: tauri_plugin_global_shortcut::ShortcutEvent,
+) {
+    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+        return;
+    }
+    if !app
+        .state::<hotkey::Debounce>()
+        .try_fire(std::time::Instant::now(), Duration::from_secs(1))
+    {
+        return;
+    }
+    let app = app.clone();
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        let detection = app.state::<DetectionService>();
+        let current = detection.state();
+        match hotkey::decide_toggle_action(&current.phase, current.approval_id.as_deref()) {
+            hotkey::ToggleAction::Start => {
+                show(&app);
+                match detection.manual_start() {
+                    Ok(()) => {
+                        let _ = app.emit("recording-started", ());
+                    }
+                    Err(error) => {
+                        let _ = app.emit("recording-failed", error);
+                    }
+                }
+            }
+            hotkey::ToggleAction::Stop => {
+                if let Err(error) = detection.manual_stop() {
+                    let _ = app.emit("recording-failed", error);
+                }
+            }
+            hotkey::ToggleAction::Approve(id) => {
+                if let Err(error) = detection.approve_pending(&id) {
+                    let _ = app.emit("recording-failed", error);
+                }
+            }
+        }
+    }));
+}
+
 pub fn run() {
-    let app = tauri::Builder::default().plugin(single_instance(|app, _, _| show(app))).plugin(tauri_plugin_dialog::init()).setup(|app| {
+    let app = tauri::Builder::default().plugin(single_instance(|app, _, _| show(app))).plugin(tauri_plugin_dialog::init()).plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|app, _shortcut, event| handle_hotkey_event(app, event))
+            .build(),
+    ).setup(|app| {
     let database = app.path().app_config_dir()?.join("settings.sqlite3");
     let recording_dir = recordings_dir(app.handle()).map_err(std::io::Error::other)?;
     app.manage(Mutex::new(SettingsStorage::new(database)));
@@ -1611,6 +1712,10 @@ pub fn run() {
     }));
     app.manage(detection);
     app.manage(ModelImportGate::default());
+    app.manage(Mutex::new(HotkeyStatus::default()));
+    app.manage(hotkey::Debounce::new());
+    let initial_settings = app_settings(app.handle()).map_err(std::io::Error::other)?;
+    apply_hotkey_settings(app.handle(), &initial_settings);
     let transcription_app = app.handle().clone();
     app.manage(TranscriptionService::new(recording_dir.clone(), Arc::new(move || {
         let settings = transcription_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
@@ -1684,7 +1789,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

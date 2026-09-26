@@ -36,6 +36,9 @@ realfft = "3.5"
 rustfft = "6.4"
 whisper-rs = "0.16.0"
 tauri-plugin-dialog = "2"
+# Registers the recording toggle shortcut from Rust (not the webview) so it
+# works while the main window is hidden in the tray; see hotkey.rs.
+tauri-plugin-global-shortcut = "2"
 # Local meeting summaries call a local Ollama server only (see
 # ollama_client.rs) over plain http://; the AppFlowy Cloud client
 # (appflowy_client.rs) is the only user of the "tls" feature below, since it
