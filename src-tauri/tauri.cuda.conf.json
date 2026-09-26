@@ -4,7 +4,11 @@
     "resources": {
       "target/release/cudart64_13.dll": ".",
       "target/release/cublas64_13.dll": ".",
-      "target/release/cublasLt64_13.dll": "."
+      "target/release/cublasLt64_13.dll": ".",
+      "target/release/onnxruntime.dll": ".",
+      "target/release/onnxruntime_providers_shared.dll": ".",
+      "target/release/sherpa-onnx-c-api.dll": ".",
+      "target/release/sherpa-onnx-cxx-api.dll": "."
     }
   }
 }
