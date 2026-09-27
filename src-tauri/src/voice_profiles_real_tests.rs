@@ -14,12 +14,16 @@
 //!   VOICE_PROFILES_REAL=1 \
 //!   VOICE_PROFILES_REAL_SEGMENTATION_MODEL="<path to pyannote segmentation model.onnx>" \
 //!   VOICE_PROFILES_REAL_EMBEDDING_MODEL="<path to nemo_en_titanet_small.onnx>" \
-//!   VOICE_PROFILES_REAL_RECORDINGS_METADATA_ROOT="<recordings root with recordings.sqlite3>" \
+//!   VOICE_PROFILES_REAL_RECORDINGS_METADATA_ROOT="<app data recordings folder containing recordings.sqlite3>" \
 //!   VOICE_PROFILES_REAL_AUDIO_DIR="<dir of subfolders named by recording id, each containing that recording's track-*.wav files>" \
 //!     cargo test --release --manifest-path src-tauri/Cargo.toml --locked -- --ignored real_voice_profiles
+//!
+//! Reads the raw `recordings` row for each ID directly (bypassing the normal
+//! tombstone filter): a recording used for this kind of one-off local
+//! verification may well have already been removed from the visible library
+//! while its metadata and audio remain on disk for inspection.
 use crate::{
     diarization_engine::create_diarizer,
-    recording_store::RecordingStore,
     transcription_engine::load_wav_16k_mono,
     voice_profiles::{
         candidate_scores, speaker_centroid, ClusterCentroid, EmbeddingExtractor,
@@ -72,12 +76,22 @@ fn diarize_recording(
     segmentation_model: &std::path::Path,
     embedding_model: &std::path::Path,
 ) -> Vec<SpeakerSamples> {
-    let recordings = RecordingStore::open(metadata_root)
+    // Reads the raw row directly rather than through `RecordingStore::get_by_id`,
+    // which hides tombstoned (soft-deleted-from-the-library) recordings -- these
+    // verification recordings may well have been cleaned up from the visible
+    // library already while their metadata/audio still exist for this
+    // read-only check.
+    let connection = rusqlite::Connection::open(metadata_root.join("recordings.sqlite3"))
         .unwrap_or_else(|e| panic!("could not open recordings metadata at {metadata_root:?}: {e}"));
-    let recording = recordings
-        .get_by_id(recording_id)
-        .unwrap_or_else(|e| panic!("could not read recording {recording_id}: {e}"))
-        .unwrap_or_else(|| panic!("recording {recording_id} is not in this metadata store"));
+    let payload: String = connection
+        .query_row(
+            "SELECT payload FROM recordings WHERE recording_id=?1",
+            [recording_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("recording {recording_id} is not in this metadata store: {e}"));
+    let recording: crate::recording::Recording = serde_json::from_str(&payload)
+        .unwrap_or_else(|e| panic!("recording {recording_id} metadata did not parse: {e}"));
     let output_tracks: Vec<_> = recording
         .tracks
         .iter()
