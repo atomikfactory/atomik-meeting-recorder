@@ -13,3 +13,36 @@ dist-portable/
 Thumbs.db
 tmp/
 browser-extension/key/extension-key.pem
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crx
+
+# Editor / tooling / local agent settings
+.vscode/
+.idea/
+*.swp
+.claude/settings.local.json
+coverage/
+
+# Personal data that must never be committed: meeting audio, transcripts,
+# and local models (the app stores these under %APPDATA%, but guard against
+# copies dropped into the working tree while testing)
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+*.opus
+*.webm
+ggml-*.bin
+*.onnx
+*.sqlite
+*.sqlite3
+*.db

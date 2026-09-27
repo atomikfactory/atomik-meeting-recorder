@@ -55,7 +55,7 @@ See [audio device management](docs/audio-devices.md) for platform differences an
 - The browser extension covers Google Meet, Microsoft Teams web, and Zoom web only; it must be connected from Settings and then loaded unpacked/temporarily in the browser (unsigned Firefox add-ons don't persist across a Firefox restart -- see [browser extension limitations](docs/browser-extension.md#limitations))
 - Speaker identification is optional, runs only on remote (loopback) audio, and labels an uncertain turn "Remote" rather than guessing; it does not infer real names or merge identities across audio sources or recordings
 - Whisper and diarization models must be imported explicitly; native diarization inference has been verified on Windows against real recordings, but not yet on macOS/Linux
-- Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added. The Linux path is compile-checked and unit-tested in CI but not yet verified against a real PulseAudio/PipeWire session
+- Native system-output capture is Windows- and Linux-native (WASAPI loopback; PulseAudio/PipeWire monitor sources); macOS still requires exposed input/virtual devices until a ScreenCaptureKit adapter is added. The Linux path is unit-tested but not yet verified against a real PulseAudio/PipeWire session
 - Independent device clocks are not mixed; each source retains its own track. Acoustic echo cancellation now estimates and corrects for delay/drift between the microphone and loopback clocks when cancelling echo, but this does not merge or align the tracks themselves
 - AppFlowy export sends the native "AI Meeting Notes" block, which currently renders in AppFlowy Web (and any client that has shipped it); a standard-blocks fallback setting exists for clients that render it blank. A single meeting's exported content is capped (very long transcripts are truncated in the exported page only; the local transcript/summary files are always complete)
 - No cloud requests, analytics, telemetry, or downloaded fonts, other than the AppFlowy Cloud requests this integration makes once a user explicitly enables and signs in to it
@@ -77,7 +77,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
 npm run tauri -- build --debug --no-bundle
 ```
 
-`cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required; a CI matrix is provided for those platforms.
+`cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required.
 
 This repo also supports a project-local Rust toolchain under `.tools` (Cargo, rustup, and libclang), set up so contributors don't need a system-wide install; `scripts/dev.ps1` discovers it automatically and falls back to your normal `PATH` otherwise.
 

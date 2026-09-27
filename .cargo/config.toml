@@ -11,6 +11,6 @@ GGML_AVX2 = "ON"
 GGML_FMA = "ON"
 GGML_F16C = "ON"
 # Harmless when CUDA is not enabled (GGML_CUDA=OFF ignores it); cuts CUDA
-# compile time by building only for this dev machine's RTX 3060 Ti (sm_86)
+# compile time by building only for Ampere consumer GPUs (sm_86, e.g. RTX 30xx)
 # instead of every architecture nvcc knows about. Override for other GPUs.
 CMAKE_CUDA_ARCHITECTURES = "86"
