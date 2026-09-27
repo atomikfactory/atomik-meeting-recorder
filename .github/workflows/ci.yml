@@ -19,7 +19,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: src-tauri }
+        with:
+          prefix-key: v2-sherpa
+          workspaces: src-tauri
+          # sherpa-onnx's build script downloads prebuilt libraries here; without
+          # caching it, restored build-script outputs point at missing files.
+          cache-directories: src-tauri/target/sherpa-onnx-prebuilt
       - uses: actions/setup-python@v7
         with: { python-version: '3.12' }
       - name: Build-time libclang
