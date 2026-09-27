@@ -26,8 +26,10 @@ import type {
   RecordingState,
   SearchResults,
   Settings,
+  SpeakerLabelInfo,
   SummaryState,
   TranscriptionState,
+  VoiceProfileInfo,
 } from "./types";
 
 export type ManagementTask = { kind: "rename" | "delete" | "restart"; id: string; title: string };
@@ -62,6 +64,7 @@ export const store = {
     appflowy_parent_view_id: null,
     hotkey_enabled: true,
     hotkey: "CommandOrControl+Alt+R",
+    recognize_known_voices: true,
   } as Settings,
 
   inventory: null as AudioInventory | null,
@@ -152,6 +155,28 @@ export const store = {
   detectionState: { supported: false, enabled: false, phase: "unsupported", provider: null, detail: "Meeting detection is available in the desktop app on supported platforms.", error: null, seconds_remaining: null, automation_inhibited: false } as DetectionState,
   detectionPollInFlight: false,
   detectionActionInFlight: false,
+
+  // Per-recording "Speakers" panel (see views/speakerPanel.ts): which cards
+  // are expanded, their last-fetched label list, in-progress edits, and
+  // transient UI state -- all keyed by recording id, none of it reset by a
+  // background poll's re-render (see the file header note above).
+  speakerPanelOpen: new Set<string>(),
+  speakerLabels: new Map<string, SpeakerLabelInfo[]>(),
+  speakerNameDrafts: new Map<string, Map<string, string>>(),
+  speakerRememberDrafts: new Map<string, Map<string, boolean>>(),
+  speakerPanelBusy: new Set<string>(),
+  speakerPanelError: new Map<string, string>(),
+  speakerRegenerateHint: new Set<string>(),
+  speakerReidentifyBusy: new Set<string>(),
+  renderedSpeakerPanel: new Map<string, string>(),
+
+  // Settings → "Voice profiles" section.
+  voiceProfiles: [] as VoiceProfileInfo[],
+  voiceProfilesLoaded: false,
+  voiceProfilesError: null as string | null,
+  voiceProfileRenameDrafts: new Map<string, string>(),
+  voiceProfilesBusy: new Set<string>(),
+  voiceProfilesForgetBusy: false,
 
   appState: {
     status: "idle",

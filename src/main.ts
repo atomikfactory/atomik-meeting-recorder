@@ -14,8 +14,10 @@ import { refreshCompressionState, refreshAudioStorage } from "./settings/compres
 import { refreshBrowserExtensionState } from "./settings/extension";
 import { refreshAppFlowyState, refreshAppFlowyWorkspaces } from "./settings/appflowy";
 import { refreshHotkeyState, updateHotkeyUI } from "./settings/hotkey";
+import { refreshVoiceProfiles, updateVoiceProfilesUI } from "./settings/voiceProfiles";
 import { settingsSectionHtml, wireSettingsSection } from "./settings/index";
 import { recentRecordings, refreshRecordingState, recordingLabel } from "./views/library";
+import { refreshOpenSpeakerPanels } from "./views/speakerPanel";
 import { dashboardSectionHtml, refreshDetectionState, updateDetectionUI, wireDashboardSection } from "./views/dashboard";
 import { wireTranscriptSearch } from "./views/search";
 import { deviceRows, refreshDevices } from "./settings/audio";
@@ -45,6 +47,7 @@ async function loadDesktop() {
     refreshAppFlowyState().then(refreshAppFlowyWorkspaces);
     refreshSummaryModels(store.settings.ollama_url ?? "http://127.0.0.1:11434");
     refreshHotkeyState();
+    refreshVoiceProfiles();
   } catch (error) {
     store.backendReady = false;
     render();
@@ -111,6 +114,7 @@ function render() {
   updateTranscriptionUI();
   updateSummarySettingsUI();
   updateHotkeyUI();
+  updateVoiceProfilesUI();
   wireSettingsSection();
   wireTranscriptSearch();
 }
@@ -145,8 +149,10 @@ if (!preview) {
   window.setInterval(refreshBrowserExtensionState, 5000);
   window.setInterval(refreshAppFlowyState, 2000);
   window.setInterval(refreshHotkeyState, 1000);
+  window.setInterval(refreshVoiceProfiles, 2000);
+  window.setInterval(refreshOpenSpeakerPanels, 1000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); refreshVoiceProfiles(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); refreshVoiceProfiles(); } });
 } else render();

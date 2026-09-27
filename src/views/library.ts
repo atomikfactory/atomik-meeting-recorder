@@ -11,6 +11,7 @@ import { diarizationSummary, refreshDiarizationState } from "../settings/speaker
 import { summaryJob, summarySummary } from "../settings/summary";
 import { appflowyJob, appflowySummary, openAppFlowyUrl } from "../settings/appflowy";
 import { audioStorageLine, compressionSummary } from "../settings/compression";
+import { speakerPanelHtml, wireSpeakerPanels } from "./speakerPanel";
 
 export function recordingIssues(recording: Recording) {
   if (recording.error) return recording.error;
@@ -179,7 +180,7 @@ export function recentRecordings() {
             ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>`
             : "";
     const checkbox = `<label class="select-row"><input type="checkbox" data-select="${escapeAttr(recording.recording_id)}" aria-label="Select ${escapeAttr(recording.meeting_title || "Meeting")}" ${store.selectedRecordingIds.has(recording.recording_id) ? "checked" : ""}/></label>`;
-    return `<article class="recording-row">${checkbox}<div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}</article>`;
+    return `<article class="recording-row">${checkbox}<div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}${speakerPanelHtml(recording)}</article>`;
   }).join("")}</div>`;
 }
 
@@ -331,6 +332,7 @@ export function updateRecordingUI() {
   wireManagementDialog();
   wireLibrarySelection();
   wireBulkDialog();
+  wireSpeakerPanels();
 }
 
 function selectedIdsInList(): string[] {

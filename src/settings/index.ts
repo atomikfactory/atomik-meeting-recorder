@@ -6,6 +6,7 @@ import { escapeAttr, escapeHtml } from "../util/escape";
 import { deviceRows, wireAudioSourcesSection } from "./audio";
 import { wireTranscriptionSection } from "./transcription";
 import { wireSpeakersSection } from "./speakers";
+import { voiceProfilesSectionHtml, wireVoiceProfilesSection } from "./voiceProfiles";
 import { wireSummarySection } from "./summary";
 import { audioStorageSummaryText } from "./compression";
 import { appflowySettingsSectionHtml, wireAppFlowySettingsSection } from "./appflowy";
@@ -109,6 +110,7 @@ export function settingsSectionHtml(): string {
             >
             <section class="model-settings"><b>Local transcription model</b><p id="model-status">No local model selected</p><p id="backend-status">Backend: ${escapeHtml(store.transcriptionState.backend)}</p><button type="button" class="secondary" id="choose-model" ${disabled()}>Choose local Whisper model</button><small>Choose a GGML .bin file; model and audio stay local. No model downloads occur automatically.</small></section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="diarization_enabled" ${store.settings.diarization_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Identify speakers locally</b><small>Runs on remote (loopback) audio only, labeling distinct voices "Speaker 1", "Speaker 2", … by first appearance, or "Remote" for uncertain turns. Numbers are not named identities and are not comparable across recordings.</small></span></label><p id="diarization-status">Choose both local models to identify speakers. Transcription remains available.</p><div><button type="button" class="secondary" data-diarization-kind="segmentation" ${disabled()}>Choose segmentation model</button> <button type="button" class="secondary" data-diarization-kind="embedding" ${disabled()}>Choose voice model</button></div></section>
+            <section id="voice-profiles-section" class="model-settings" aria-labelledby="voice-profiles-heading">${voiceProfilesSectionHtml()}</section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="summary_enabled" ${store.settings.summary_enabled !== false ? "checked" : ""} ${disabled()}/><span><b>Summarize meetings locally with Ollama</b><small>Sends the finished transcript to a local Ollama server only (never the internet) for a title, summary, key points, decisions, action items, and open questions. Harmless when Ollama isn't running — summaries simply wait.</small></span></label>
               <label>Ollama URL<input type="text" name="ollama_url" value="${escapeAttr(store.settings.ollama_url ?? "http://127.0.0.1:11434")}" ${disabled()}/><small>Must be loopback (localhost/127.0.0.1/[::1]) so summaries can never leave this device.</small></label>
               <label>Summary model<select name="summary_model" ${disabled()}>${[...new Set([...store.summaryModels, store.settings.summary_model ?? "qwen3:8b"])].map((name) => `<option value="${escapeAttr(name)}" ${(store.settings.summary_model ?? "qwen3:8b") === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
@@ -192,6 +194,7 @@ export function wireSettingsSection() {
       // without pressing a new combination) falls back to the last saved
       // shortcut rather than silently submitting an empty string.
       hotkey: String(form.get("hotkey") ?? "").trim() || store.settings.hotkey || DEFAULT_HOTKEY,
+      recognize_known_voices: form.get("recognize_known_voices") === "on",
     };
     try {
       const saved = await invoke<Settings>("save_settings", { settings: next });
@@ -217,6 +220,7 @@ export function wireSettingsSection() {
   wireAudioSourcesSection();
   wireTranscriptionSection();
   wireSpeakersSection();
+  wireVoiceProfilesSection();
   wireHotkeySection();
 }
 

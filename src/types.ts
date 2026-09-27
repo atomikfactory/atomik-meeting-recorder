@@ -24,6 +24,7 @@ export type Settings = {
   appflowy_parent_view_id?: string | null;
   hotkey_enabled?: boolean;
   hotkey?: string;
+  recognize_known_voices?: boolean;
 };
 export type HotkeyStatus = { enabled: boolean; hotkey: string; registered: boolean; error: string | null };
 export type BrowserExtensionStatus = { connected: boolean; last_message_seconds_ago: number | null; registered: boolean; browsers: string[] };
@@ -90,6 +91,9 @@ export type AppFlowyPageInfo = { key:string; kind:string; name:string; status:st
 export type SearchHit = { kind: string; seq: number; start_ms: number | null; end_ms: number | null; speaker: string | null; snippet_html: string };
 export type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
 export type SearchResults = { meetings: SearchMeeting[]; took_ms: number };
+export type SpeakerLabelInfo = { label: string; name: string | null; auto_identified: boolean };
+export type VoiceProfileInfo = { id: string; name: string; sample_seconds: number; updated_at: number };
+export type ReidentifyOutcome = { speaker: number; name: string; score: number };
 export type DetectionState = {
   supported: boolean;
   enabled: boolean;
