@@ -25,3 +25,35 @@ Native inference (release build, real sherpa-onnx 1.13.8, the two models above) 
 Clustering uses sherpa-onnx's own defaults (automatic cluster count, 0.5 distance threshold, 0.3s/0.5s minimum turn-on/off durations), which produced sensible turn boundaries on every real recording tested and were left untouched rather than hand-tuned against a handful of samples. macOS and Linux native inference remain unverified in this pass (Windows-only environment); both use their own platform-appropriate static Sherpa linkage and should behave identically, but have not been run.
 
 Windows uses Sherpa shared-library companion DLLs; packaged builds must ship those DLLs beside the executable. macOS and Linux use their platform-appropriate static helper linkage.
+
+## Named speakers and voice profiles
+
+Speaker *numbers* (above) are per-recording and not identities. On top of them, a meeting card's "Speakers" control lets you give any label ("You", "Speaker 1", ..., "Remote") a real display name for that recording. A name is stored durably in a small app-state SQLite database (`speaker_names.sqlite3`, WAL + full synchronous, like every other pipeline store in this app) keyed by `(recording_id, label)` -- never in the recordings folder itself, so it survives moving or reconfiguring where recordings are stored. Saving a name:
+
+- regenerates that recording's `transcript.md` (and `transcript-speakers.md` once diarization has completed) from the existing `transcript.json`/`speakers.json` checkpoints -- Whisper and diarization are never rerun;
+- reindexes the recording for search, so search results show the name;
+- does **not** auto-regenerate an existing summary (an Ollama call is expensive); instead the summary view shows a "Speaker names changed -- Regenerate summary to use them" hint once the summary predates the name change, and "Regenerate" then uses the current names;
+- does **not** touch an AppFlowy page already exported for that recording -- AppFlowy export is create-only. Only a *new* export uses the current names.
+
+### Voice profiles ("remember this voice")
+
+When you name a remote speaker, you can also check "Remember this voice for future meetings" (default checked, with a one-line note that the fingerprint stays only on this device). If checked, the app computes that speaker's embedding centroid from their diarized turns on the loopback track, using the same sherpa-onnx speaker-embedding model diarization itself uses:
+
+- turns shorter than ~1 second are skipped (too short for a reliable embedding);
+- at least ~5 seconds of total usable speech is required, else the app explains "not enough speech to remember this voice" and does not create a profile;
+- naming the same person again later updates their existing profile with a running weighted mean (weighted by each observation's total usable speech), rather than creating a duplicate.
+
+A profile records the hash of the embedding model that produced it; a profile built with a different model is reported as incompatible rather than silently compared, since embeddings from different models are not comparable.
+
+### Recognition
+
+After diarization completes for a new meeting (and on an explicit "Re-identify speakers" action for an existing one, gated on Settings → "Recognize known voices in new meetings", on by default), each detected speaker cluster's centroid is matched against saved profiles by cosine similarity. A name is only assigned when the best match reaches a similarity of **0.6** *and* beats the second-best candidate profile by a margin of **0.08** (`voice_profiles::DEFAULT_MATCH_THRESHOLD`/`DEFAULT_MATCH_MARGIN`); the same profile is never assigned to two clusters in one meeting (greedy, strongest-match-first assignment). Unmatched clusters stay "Speaker N". An automatically assigned name is marked as such in the UI and can be corrected; correcting it saves a user-set name that a later recognition pass will never overwrite.
+
+**Real-data basis for the defaults.** `src-tauri/src/voice_profiles_real_tests.rs` is an ignored, env-gated test (no private audio or model paths committed) that names speakers in one real "Sprint Ceremonies" recording and runs recognition against two more recordings from the same series plus one unrelated French recording, using the real pyannote segmentation + NeMo TitaNet embedding models. On the recordings available for this pass (each of the follow-up clips only 6-7 seconds long in total), the cross-meeting same-series match scored 0.24 (well under the 0.6 threshold) and the unrelated French recording scored essentially zero -- i.e. the defaults correctly produced **no false positive**, but these particular clips were too short to also demonstrate a confident true-positive match. The 0.6/0.08 defaults are intentionally conservative given that; revisit them once longer same-speaker samples are available, using the same harness (it prints a `recording,speaker,best_profile,best_score,second_best_score` table for exactly this kind of tuning).
+
+### Limits
+
+- A short clip (well under the ~5s minimum, or a recognition pass over a speaker with little speech in the new meeting) will not build or match a profile.
+- Very similar-sounding voices can score close together; the margin check is what keeps a close call from being assigned rather than left as "Speaker N".
+- A profile is permanently tied to the embedding model that created it. Switching to a different local embedding model makes existing profiles unusable for recognition (reported as incompatible) -- they are not deleted, but a new profile must be built under the new model.
+- None of this is a security or legal identity claim -- it is a best-effort local convenience, entirely offline, and always correctable by the person using the app.
