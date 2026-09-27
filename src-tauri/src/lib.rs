@@ -33,6 +33,8 @@ mod summary_real_ollama_tests;
 #[cfg(test)]
 mod diarization_real_tests;
 #[cfg(test)]
+mod voice_profiles_real_tests;
+#[cfg(test)]
 mod residual_echo_gate_real_tests;
 #[cfg(test)]
 mod speakers_end_to_end_tests;
@@ -820,6 +822,7 @@ async fn delete_recordings_from_disk(
         let summary = SummaryStore::open(&root.join("summary.sqlite3"))?;
         let compression = CompressionStore::open(&root.join("compression.sqlite3"))?;
         let appflowy = AppFlowyStore::open(&root.join("appflowy.sqlite3"))?;
+        let speaker_names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
         let active_recording_id = service.state().active.map(|r| r.recording_id);
         let stores = recording_delete::DeleteStores {
             recordings: &recordings_store,
@@ -828,6 +831,7 @@ async fn delete_recordings_from_disk(
             summary: &summary,
             compression: &compression,
             appflowy: &appflowy,
+            speaker_names: &speaker_names,
         };
         let summary = recording_delete::delete_recordings_from_disk(
             &recording_ids,
@@ -933,6 +937,391 @@ fn open_file(path: &std::path::Path) -> Result<(), String> {
     command.arg(path).spawn().map_err(app_error)?;
     Ok(())
 }
+
+// --- Named speakers and voice profiles -------------------------------------
+
+#[derive(Serialize)]
+struct SpeakerLabelInfo {
+    label: String,
+    name: Option<String>,
+    auto_identified: bool,
+}
+
+/// Every speaker label this recording currently has (from the local
+/// user's own track, and from completed speaker identification), each
+/// overlaid with its saved display name if one was set. A recording whose
+/// speaker identification has not completed yet only ever has "You"
+/// (and/or "Remote" once an output track exists), matching what
+/// `transcription::presentation_label` would render right now.
+#[tauri::command]
+async fn list_speaker_labels(
+    recording_id: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<SpeakerLabelInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let recordings = RecordingStore::open(&root)?;
+        let recording = recordings
+            .get_by_id(&recording_id)?
+            .ok_or("Recording metadata is unavailable.")?;
+        let mut labels: Vec<String> = Vec::new();
+        if recording.tracks.iter().any(|t| t.direction == "input") {
+            labels.push("You".into());
+        }
+        let has_output = recording.tracks.iter().any(|t| t.direction == "output");
+        let diarization = DiarizationStore::open(&root.join("diarization.sqlite3"))?;
+        let speaker_count = diarization
+            .get(&recording_id)?
+            .filter(|job| job.status == "completed")
+            .and_then(|job| job.speaker_count)
+            .unwrap_or(0);
+        for n in 1..=speaker_count {
+            labels.push(format!("Speaker {n}"));
+        }
+        if has_output {
+            labels.push(transcription::DEFAULT_REMOTE_LABEL.to_string());
+        }
+        let names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
+        let saved = names.list(&recording_id)?;
+        for saved in &saved {
+            if !labels.contains(&saved.label) {
+                labels.push(saved.label.clone());
+            }
+        }
+        Ok(labels
+            .into_iter()
+            .map(|label| {
+                let found = saved.iter().find(|n| n.label == label);
+                SpeakerLabelInfo {
+                    label,
+                    name: found.map(|n| n.name.clone()),
+                    auto_identified: found.is_some_and(|n| n.auto_identified),
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(app_error)?
+}
+
+/// Sets (or renames) the display name for one speaker label in one
+/// recording, then regenerates that recording's presentation Markdown and
+/// search index rows to use it. When `remember` is set and `label` is a
+/// remote ("Speaker N") label with a completed local speaker-identification
+/// checkpoint, also computes that speaker's voice embedding centroid from
+/// this meeting's audio and creates or updates a saved voice profile with
+/// that name (see docs/diarization.md "Named speakers and voice profiles").
+#[tauri::command]
+async fn set_speaker_name(
+    recording_id: String,
+    label: String,
+    name: String,
+    remember: bool,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        let names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
+        names.set(&recording_id, &label, &name, false)?;
+        if remember {
+            remember_voice(&root, &extra, &recording_id, &label, &name)?;
+        }
+        let _ = speaker_names::regenerate_presentation(&root, &extra, &recording_id);
+        app.state::<SearchService>().reindex(&recording_id);
+        Ok(())
+    })
+    .await
+    .map_err(app_error)?
+}
+
+/// Builds/updates a voice profile for one remote speaker label in one
+/// recording from that speaker's diarized turns. A profile is matched by
+/// exact (trimmed, case-insensitive) name: naming the same person again
+/// updates their existing profile with a running weighted mean rather than
+/// creating a duplicate.
+fn remember_voice(
+    root: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    recording_id: &str,
+    label: &str,
+    name: &str,
+) -> Result<(), String> {
+    let speaker: u32 = label
+        .strip_prefix("Speaker ")
+        .and_then(|n| n.parse().ok())
+        .ok_or("Only a detected remote speaker's voice can be remembered.")?;
+    let recordings = RecordingStore::open(root)?;
+    let recording = recordings
+        .get_by_id(recording_id)?
+        .ok_or("Recording metadata is unavailable.")?;
+    let registry = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
+    let transcript_job = registry
+        .get(recording_id)?
+        .filter(|j| j.status == "completed")
+        .ok_or("This recording has no completed transcript yet.")?;
+    let json = transcription::output_path(
+        &transcription::recording_directory(root, extra, recording_id)?,
+        "transcript.json",
+    )?;
+    let bytes = transcription::read_checkpoint(&json)?;
+    if Some(transcription::checksum(&bytes)) != transcript_job.checksum {
+        return Err("Transcript checkpoint checksum mismatch; files preserved.".into());
+    }
+    let transcript: transcription_types::Transcript =
+        serde_json::from_slice(&bytes).map_err(app_error)?;
+    let checkpoint = diarization::read_completed_checkpoint(root, extra, &recording, &transcript)
+        .ok_or("Speaker identification has not completed for this recording yet.")?;
+    let (model_path, model_hash) = diarization::registered_model(root, &registry, "embedding")?
+        .ok_or("Choose a local speaker embedding model in Settings first.")?;
+    let extractor = voice_profiles::SherpaEmbeddingExtractor::create(
+        std::path::Path::new(&model_path),
+        &model_hash,
+    )?;
+    let model_hash = voice_profiles::EmbeddingExtractor::model_hash(&extractor);
+    let turn_samples =
+        voice_profiles::load_speaker_samples(&recording, root, extra, &checkpoint.output.turns)?;
+    let (embedding, seconds) =
+        voice_profiles::speaker_centroid(&extractor, &turn_samples, speaker)?;
+    let profiles = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(root))?;
+    let existing = profiles
+        .list()?
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name.trim()));
+    match existing {
+        Some(profile) => {
+            profiles.update_running_mean(&profile.id, &embedding, &model_hash, seconds)?;
+        }
+        None => {
+            profiles.create(name, &embedding, &model_hash, seconds)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes a per-recording name, reverting that label to its default
+/// presentation, and regenerates the recording's presentation Markdown and
+/// search index rows to match. Never deletes any voice profile.
+#[tauri::command]
+async fn delete_speaker_name(
+    recording_id: String,
+    label: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        let names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
+        names.delete(&recording_id, &label)?;
+        let _ = speaker_names::regenerate_presentation(&root, &extra, &recording_id);
+        app.state::<SearchService>().reindex(&recording_id);
+        Ok(())
+    })
+    .await
+    .map_err(app_error)?
+}
+
+/// `true` if this recording has a generated summary that predates its most
+/// recent speaker-name change -- drives the "Speaker names changed --
+/// Regenerate summary to use them" hint. `false` (never an error) whenever
+/// there is no summary yet or nothing has been named, since there is then
+/// nothing to hint about. Uses `summary.json`'s own last-modified time as
+/// "when the summary was generated" -- it is only ever replaced atomically
+/// (a fresh temp file renamed over it) by a real summarize/regenerate run,
+/// so its mtime is exactly that event, without needing a new timestamp
+/// column purely for this cosmetic hint.
+#[tauri::command]
+async fn speaker_names_changed_since_summary(
+    recording_id: String,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        if summary::read_completed_summary(&root, &extra, &recording_id).is_none() {
+            return Ok(false);
+        }
+        let Ok(directory) = transcription::recording_directory(&root, &extra, &recording_id)
+        else {
+            return Ok(false);
+        };
+        let Ok(summary_json) = transcription::output_path(&directory, "summary.json") else {
+            return Ok(false);
+        };
+        let Ok(generated_at) = std::fs::metadata(&summary_json).and_then(|m| m.modified()) else {
+            return Ok(false);
+        };
+        let generated_at_unix = generated_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Ok(speaker_names::names_changed_since(
+            &root,
+            &recording_id,
+            generated_at_unix,
+        ))
+    })
+    .await
+    .map_err(app_error)?
+}
+
+#[derive(Serialize)]
+struct VoiceProfileInfo {
+    id: String,
+    name: String,
+    sample_seconds: f64,
+    updated_at: i64,
+}
+impl From<voice_profiles::VoiceProfile> for VoiceProfileInfo {
+    fn from(p: voice_profiles::VoiceProfile) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            sample_seconds: p.sample_seconds,
+            updated_at: p.updated_at,
+        }
+    }
+}
+#[tauri::command]
+async fn list_voice_profiles(app: tauri::AppHandle) -> Result<Vec<VoiceProfileInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let store = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
+        Ok(store.list()?.into_iter().map(Into::into).collect())
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn rename_voice_profile(id: String, name: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?.rename(&id, &name)
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Deletes only the local voice fingerprint; the meetings it was built from
+/// (and any name already saved on them) are untouched.
+#[tauri::command]
+async fn delete_voice_profile(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?.delete(&id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn forget_all_voice_profiles(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?.delete_all()
+    })
+    .await
+    .map_err(app_error)?
+}
+
+#[derive(Serialize)]
+struct ReidentifyOutcome {
+    speaker: u32,
+    name: String,
+    score: f32,
+}
+/// Recognition pass: matches this recording's detected speaker clusters
+/// against saved voice profiles and auto-assigns a name to any cluster that
+/// scores a confident, unambiguous match (see
+/// `voice_profiles::match_clusters`). Never overwrites a name the user
+/// already typed for that label -- only labels with no name, or with a
+/// previous *auto*-assigned name, are touched. Gated on the "Recognize
+/// known voices" setting, same as the automatic pass would be.
+#[tauri::command]
+async fn reidentify_speakers(
+    recording_id: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<ReidentifyOutcome>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !app_settings(&app)?.recognize_known_voices {
+            return Err("Recognizing known voices is turned off in Settings.".into());
+        }
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        let recordings = RecordingStore::open(&root)?;
+        let recording = recordings
+            .get_by_id(&recording_id)?
+            .ok_or("Recording metadata is unavailable.")?;
+        let registry = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
+        let transcript_job = registry
+            .get(&recording_id)?
+            .filter(|j| j.status == "completed")
+            .ok_or("This recording has no completed transcript yet.")?;
+        let json = transcription::output_path(
+            &transcription::recording_directory(&root, &extra, &recording_id)?,
+            "transcript.json",
+        )?;
+        let bytes = transcription::read_checkpoint(&json)?;
+        if Some(transcription::checksum(&bytes)) != transcript_job.checksum {
+            return Err("Transcript checkpoint checksum mismatch; files preserved.".into());
+        }
+        let transcript: transcription_types::Transcript =
+            serde_json::from_slice(&bytes).map_err(app_error)?;
+        let checkpoint =
+            diarization::read_completed_checkpoint(&root, &extra, &recording, &transcript)
+                .ok_or("Speaker identification has not completed for this recording yet.")?;
+        let (model_path, model_hash) =
+            diarization::registered_model(&root, &registry, "embedding")?
+                .ok_or("Choose a local speaker embedding model in Settings first.")?;
+        let extractor = voice_profiles::SherpaEmbeddingExtractor::create(
+            std::path::Path::new(&model_path),
+            &model_hash,
+        )?;
+        let model_hash = voice_profiles::EmbeddingExtractor::model_hash(&extractor);
+        let turn_samples = voice_profiles::load_speaker_samples(
+            &recording,
+            &root,
+            &extra,
+            &checkpoint.output.turns,
+        )?;
+        let clusters = voice_profiles::all_speaker_centroids(&extractor, &turn_samples);
+        let profile_store =
+            voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
+        let profiles: Vec<_> = profile_store
+            .list()?
+            .into_iter()
+            .filter(|p| p.model_hash == model_hash)
+            .collect();
+        let matches = voice_profiles::match_clusters(
+            &clusters,
+            &profiles,
+            voice_profiles::DEFAULT_MATCH_THRESHOLD,
+            voice_profiles::DEFAULT_MATCH_MARGIN,
+        );
+        let names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
+        let existing = names.list(&recording_id)?;
+        let mut applied = Vec::new();
+        for candidate in matches {
+            let label = format!("Speaker {}", candidate.speaker);
+            let user_set = existing
+                .iter()
+                .any(|n| n.label == label && !n.auto_identified);
+            if user_set {
+                continue;
+            }
+            names.set(&recording_id, &label, &candidate.profile_name, true)?;
+            applied.push(ReidentifyOutcome {
+                speaker: candidate.speaker,
+                name: candidate.profile_name,
+                score: candidate.best_score,
+            });
+        }
+        let _ = speaker_names::regenerate_presentation(&root, &extra, &recording_id);
+        app.state::<SearchService>().reindex(&recording_id);
+        Ok(applied)
+    })
+    .await
+    .map_err(app_error)?
+}
+
 #[tauri::command]
 async fn get_summary_state(app: tauri::AppHandle) -> Result<summary::SummaryState, String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<SummaryService>().state())
@@ -1790,7 +2179,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status, list_speaker_labels, set_speaker_name, delete_speaker_name, speaker_names_changed_since_summary, list_voice_profiles, rename_voice_profile, delete_voice_profile, forget_all_voice_profiles, reidentify_speakers]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

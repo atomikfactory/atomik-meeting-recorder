@@ -50,6 +50,7 @@ struct Fixture {
     summary: SummaryStore,
     compression: CompressionStore,
     appflowy: AppFlowyStore,
+    speaker_names: crate::speaker_names::SpeakerNameStore,
 }
 impl Fixture {
     fn new(name: &str) -> Self {
@@ -61,7 +62,11 @@ impl Fixture {
         let summary = SummaryStore::open(&root.join("summary.sqlite3")).unwrap();
         let compression = CompressionStore::open(&root.join("compression.sqlite3")).unwrap();
         let appflowy = AppFlowyStore::open(&root.join("appflowy.sqlite3")).unwrap();
-        Self { root, recordings, transcription, diarization, summary, compression, appflowy }
+        let speaker_names = crate::speaker_names::SpeakerNameStore::open(
+            crate::speaker_names::store_path(&root),
+        )
+        .unwrap();
+        Self { root, recordings, transcription, diarization, summary, compression, appflowy, speaker_names }
     }
     fn stores(&self) -> DeleteStores<'_> {
         DeleteStores {
@@ -71,6 +76,7 @@ impl Fixture {
             summary: &self.summary,
             compression: &self.compression,
             appflowy: &self.appflowy,
+            speaker_names: &self.speaker_names,
         }
     }
     /// Creates a real, finished recording folder (one track WAV) under this

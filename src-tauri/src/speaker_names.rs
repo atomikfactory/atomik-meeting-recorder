@@ -229,9 +229,168 @@ pub fn store_path(root: &Path) -> PathBuf {
     root.join("speaker_names.sqlite3")
 }
 
+/// Regenerates a recording's presentation Markdown (`transcript.md`, and
+/// `transcript-speakers.md` if speaker identification has completed) from
+/// their already-durable checkpoints (`transcript.json`/`speakers.json`) so
+/// they reflect the current name overlay -- without re-running Whisper or
+/// diarization. Called after a rename; also safe to call when nothing
+/// changed (it simply rewrites the same bytes). Never touches the
+/// checkpoints themselves.
+pub fn regenerate_presentation(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    recording_id: &str,
+) -> Result<(), String> {
+    use crate::{
+        diarization::{read_completed_checkpoint, speaker_markdown},
+        recording_store::RecordingStore,
+        transcription::{
+            atomic_replace, checksum, markdown_document_labeled, output_path, read_checkpoint,
+            recording_directory, validate_transcript,
+        },
+        transcription_store::TranscriptionStore,
+        transcription_types::Transcript,
+    };
+    let recordings = RecordingStore::open(root)?;
+    let recording = recordings
+        .get_by_id(recording_id)?
+        .ok_or("Recording metadata is unavailable.")?;
+    let registry = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
+    let job = registry
+        .get(recording_id)?
+        .ok_or("This recording has no transcript yet.")?;
+    if job.status != "completed" {
+        return Err("Transcript is not complete yet.".into());
+    }
+    let directory = recording_directory(root, extra_roots, recording_id)?;
+    let json = output_path(&directory, "transcript.json")?;
+    let bytes = read_checkpoint(&json)?;
+    if Some(checksum(&bytes)) != job.checksum {
+        return Err("Transcript checkpoint checksum mismatch; files preserved.".into());
+    }
+    let transcript: Transcript =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    validate_transcript(&transcript, &job, &recording)?;
+    let names = names_for(root, recording_id);
+    let md = output_path(&directory, "transcript.md")?;
+    atomic_replace(
+        &md,
+        markdown_document_labeled(&recording, &transcript, None, Some(&names)).as_bytes(),
+    )?;
+    if let Some(checkpoint) = read_completed_checkpoint(root, extra_roots, &recording, &transcript)
+    {
+        let speakers_md = output_path(&directory, "transcript-speakers.md")?;
+        if speakers_md.exists() {
+            atomic_replace(
+                &speakers_md,
+                speaker_markdown(&recording, &transcript, &checkpoint, Some(&names)).as_bytes(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        recording::{Recording, Track},
+        recording_store::RecordingStore,
+        transcription::{checksum as transcript_checksum, markdown_document},
+        transcription_store::TranscriptionStore,
+        transcription_types::{Transcript, TranscriptSegment},
+    };
+
+    fn fixture() -> (PathBuf, Recording) {
+        let root = std::env::temp_dir().join(format!("speaker-names-regen-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let recordings = RecordingStore::open(&root).unwrap();
+        let registry = TranscriptionStore::open(&root.join("transcription.sqlite3")).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = root.join(&id);
+        fs::create_dir(&dir).unwrap();
+        let recording = Recording {
+            recording_id: id.clone(),
+            started_at: 0,
+            ended_at: Some(1000),
+            duration_ms: 1000,
+            status: "recorded".into(),
+            meeting_title: None,
+            storage_path: None,
+            library_root: None,
+            auto_transcribe: true,
+            error: None,
+            transcription_status: "pending".into(),
+            appflowy_status: "pending".into(),
+            tracks: vec![Track {
+                source_id: "mic".into(),
+                name: "Microphone".into(),
+                direction: "input".into(),
+                sample_rate: 16000,
+                channels: 1,
+                file_path: dir.join("track-00.wav").display().to_string(),
+                frames_written: 16000,
+                dropped_samples: 0,
+                error: None,
+            }],
+        };
+        recordings.save(&recording).unwrap();
+        let transcript = Transcript {
+            recording_id: id.clone(),
+            model_key: "base".into(),
+            model_hash: "a".repeat(64),
+            warnings: vec![],
+            languages_used: vec![],
+            local_speaker_name: Some("You".into()),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "hello".into(),
+                source_id: "mic".into(),
+                source_name: "Microphone".into(),
+            }],
+        };
+        let json = serde_json::to_vec_pretty(&transcript).unwrap();
+        fs::write(dir.join("transcript.json"), &json).unwrap();
+        fs::write(dir.join("transcript.md"), markdown_document(&recording, &transcript)).unwrap();
+        registry.enqueue(&id, "base", &transcript.model_hash).unwrap();
+        assert!(registry.claim(&id, "unused-fake-model", &transcript.model_hash).unwrap());
+        registry
+            .complete(
+                &id,
+                &dir.join("transcript.json").display().to_string(),
+                &dir.join("transcript.md").display().to_string(),
+                &transcript_checksum(&json),
+            )
+            .unwrap();
+        (root, recording)
+    }
+
+    #[test]
+    fn regenerate_presentation_rewrites_transcript_markdown_with_the_new_name() {
+        let (root, recording) = fixture();
+        let names = SpeakerNameStore::open(store_path(&root)).unwrap();
+        names.set(&recording.recording_id, "You", "Ben", false).unwrap();
+        regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
+        let md = fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
+        assert!(md.contains("Ben:"));
+        assert!(!md.contains("You:"));
+    }
+
+    #[test]
+    fn regenerate_presentation_is_idempotent_and_crash_safe_to_repeat() {
+        let (root, recording) = fixture();
+        let names = SpeakerNameStore::open(store_path(&root)).unwrap();
+        names.set(&recording.recording_id, "You", "Ben", false).unwrap();
+        regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
+        // Calling it again (as if a crash happened right after the first
+        // regeneration and the caller retries) must not error just because
+        // the file already exists with the same content.
+        regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
+        let md = fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
+        assert!(md.contains("Ben:"));
+    }
 
     fn store() -> SpeakerNameStore {
         SpeakerNameStore::open(std::env::temp_dir().join(format!(

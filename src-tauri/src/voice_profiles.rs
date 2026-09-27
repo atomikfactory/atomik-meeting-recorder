@@ -38,6 +38,53 @@ pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.6;
 /// silently confused.
 pub const DEFAULT_MATCH_MARGIN: f32 = 0.08;
 
+/// Real embedding extractor wrapping sherpa-onnx's standalone
+/// `SpeakerEmbeddingExtractor` -- the same model file diarization uses (see
+/// `diarization_engine.rs`'s `create_diarizer`), fed the whole segment's
+/// waveform in one shot via a fresh `OnlineStream` per call. Not part of the
+/// diarization worker's own clustering: this extracts one embedding per
+/// caller-chosen span of audio (a diarized turn), for building/matching
+/// voice profiles, which is a separate concern from segmentation+clustering.
+pub struct SherpaEmbeddingExtractor {
+    extractor: sherpa_onnx::SpeakerEmbeddingExtractor,
+    model_hash: String,
+}
+impl SherpaEmbeddingExtractor {
+    pub fn create(model_path: &Path, model_hash: &str) -> Result<Self, String> {
+        let config = sherpa_onnx::SpeakerEmbeddingExtractorConfig {
+            model: Some(model_path.to_string_lossy().into_owned()),
+            num_threads: 2,
+            debug: false,
+            provider: Some("cpu".into()),
+        };
+        let extractor = sherpa_onnx::SpeakerEmbeddingExtractor::create(&config)
+            .ok_or_else(|| "Could not initialize the local voice embedding model.".to_string())?;
+        Ok(Self {
+            extractor,
+            model_hash: model_hash.to_string(),
+        })
+    }
+}
+impl EmbeddingExtractor for SherpaEmbeddingExtractor {
+    fn model_hash(&self) -> String {
+        self.model_hash.clone()
+    }
+    fn extract(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
+        let stream = self
+            .extractor
+            .create_stream()
+            .ok_or("Could not create a voice embedding stream.")?;
+        stream.accept_waveform(16_000, samples);
+        stream.input_finished();
+        if !self.extractor.is_ready(&stream) {
+            return Err("Not enough audio to compute a voice embedding.".into());
+        }
+        self.extractor
+            .compute(&stream)
+            .ok_or_else(|| "Could not compute a voice embedding.".to_string())
+    }
+}
+
 pub trait EmbeddingExtractor: Send + Sync {
     /// Identifies the exact model producing embeddings from this extractor;
     /// profiles store the hash of the model that created them and are never
@@ -91,8 +138,10 @@ fn encode(v: &[f32]) -> Vec<u8> {
 }
 fn decode(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -374,67 +423,33 @@ pub fn match_clusters(
     if profiles.is_empty() {
         return Vec::new();
     }
-    let mut candidates: Vec<MatchCandidate> = clusters
-        .iter()
-        .filter_map(|cluster| {
-            let mut scored: Vec<(f32, &VoiceProfile)> = profiles
-                .iter()
-                .map(|p| (cosine_similarity(&cluster.embedding, &p.embedding), p))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let (best_score, best_profile) = *scored.first()?;
-            let second_best_score = scored.get(1).map(|(s, _)| *s).unwrap_or(f32::NEG_INFINITY);
-            Some(MatchCandidate {
-                speaker: cluster.speaker,
-                profile_id: best_profile.id.clone(),
-                profile_name: best_profile.name.clone(),
-                best_score,
-                second_best_score,
-            })
-        })
-        .collect();
-    // Assign clusters with the strongest best-score first, so a profile
-    // that is the top choice for two clusters goes to whichever one it
-    // matches best, and the loser falls through to its next-best profile
-    // (recomputed) or stays unmatched.
-    candidates.sort_by(|a, b| b.best_score.partial_cmp(&a.best_score).unwrap_or(std::cmp::Ordering::Equal));
     let mut used_profiles: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut used_clusters: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut accepted = Vec::new();
     // Re-derive per remaining cluster/profile pool until no more accepted
     // matches can be found -- a simple, small-N-friendly greedy fixed point
     // rather than a full Hungarian assignment (meetings have a handful of
-    // speakers and a handful of profiles).
+    // speakers and a handful of profiles). Each round scores every
+    // still-unassigned cluster against every still-unassigned profile (via
+    // `candidate_scores`) and accepts only the single strongest qualifying
+    // match, so a profile that is the top choice for two clusters goes to
+    // whichever one it matches best; the loser is rescored next round
+    // against whatever profiles remain.
     loop {
-        let mut best: Option<MatchCandidate> = None;
-        for cluster in clusters {
-            if used_clusters.contains(&cluster.speaker) {
-                continue;
-            }
-            let mut scored: Vec<(f32, &VoiceProfile)> = profiles
-                .iter()
-                .filter(|p| !used_profiles.contains(&p.id))
-                .map(|p| (cosine_similarity(&cluster.embedding, &p.embedding), p))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let Some((best_score, best_profile)) = scored.first().copied() else {
-                continue;
-            };
-            let second_best_score = scored.get(1).map(|(s, _)| *s).unwrap_or(f32::NEG_INFINITY);
-            if best_score < threshold || best_score - second_best_score < margin {
-                continue;
-            }
-            let candidate = MatchCandidate {
-                speaker: cluster.speaker,
-                profile_id: best_profile.id.clone(),
-                profile_name: best_profile.name.clone(),
-                best_score,
-                second_best_score,
-            };
-            if best.as_ref().is_none_or(|b| candidate.best_score > b.best_score) {
-                best = Some(candidate);
-            }
-        }
+        let remaining_clusters: Vec<ClusterCentroid> = clusters
+            .iter()
+            .filter(|c| !used_clusters.contains(&c.speaker))
+            .cloned()
+            .collect();
+        let remaining_profiles: Vec<VoiceProfile> = profiles
+            .iter()
+            .filter(|p| !used_profiles.contains(&p.id))
+            .cloned()
+            .collect();
+        let best = candidate_scores(&remaining_clusters, &remaining_profiles)
+            .into_iter()
+            .filter(|c| c.best_score >= threshold && c.best_score - c.second_best_score >= margin)
+            .max_by(|a, b| a.best_score.partial_cmp(&b.best_score).unwrap_or(std::cmp::Ordering::Equal));
         match best {
             Some(candidate) => {
                 used_clusters.insert(candidate.speaker);
@@ -534,6 +549,49 @@ pub fn all_speaker_centroids(
         .collect()
 }
 
+/// Loads 16 kHz mono samples for each usable (>= `MIN_TURN_SECONDS`)
+/// diarization turn, from the recording's own tracks -- one WAV decode per
+/// source track, reused across every turn on that track. Errors only on a
+/// genuine I/O/track problem; a turn with no matching track is skipped
+/// rather than failing the whole batch, since `turns` may in principle
+/// reference a track that has since been removed from `recording.tracks`.
+pub fn load_speaker_samples(
+    recording: &crate::recording::Recording,
+    recordings_root: &Path,
+    extra_roots: &[PathBuf],
+    turns: &[crate::diarization_types::SpeakerTurn],
+) -> Result<Vec<SpeakerSamples>, String> {
+    use crate::transcription_engine::{load_wav_16k_mono, validated_recording_tracks};
+    const MAX_SOURCE_SECONDS: u64 = 30 * 60;
+    let tracks = validated_recording_tracks(recording, recordings_root, extra_roots)?;
+    let mut by_source: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for turn in turns {
+        let seconds = turn.end_ms.saturating_sub(turn.start_ms) as f64 / 1000.0;
+        if seconds < MIN_TURN_SECONDS {
+            continue;
+        }
+        if !by_source.contains_key(&turn.source_id) {
+            let Some((_, path)) = tracks.iter().find(|(t, _)| t.source_id == turn.source_id) else {
+                continue;
+            };
+            by_source.insert(turn.source_id.clone(), load_wav_16k_mono(path, MAX_SOURCE_SECONDS)?);
+        }
+        let samples = &by_source[&turn.source_id];
+        let start = ((turn.start_ms as f64 / 1000.0) * 16_000.0) as usize;
+        let end = (((turn.end_ms as f64 / 1000.0) * 16_000.0) as usize).min(samples.len());
+        if start >= end {
+            continue;
+        }
+        out.push(SpeakerSamples {
+            speaker: turn.speaker,
+            seconds,
+            samples: samples[start..end].to_vec(),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +619,12 @@ mod tests {
 
     fn profile(store: &VoiceProfileStore, name: &str, embedding: Vec<f32>, hash: &str, seconds: f64) -> VoiceProfile {
         store.create(name, &embedding, hash, seconds).unwrap()
+    }
+
+    #[test]
+    fn fake_extractor_reports_its_configured_model_hash() {
+        let extractor = FakeExtractor { hash: "hash-a".into(), fixed: vec![1.0] };
+        assert_eq!(extractor.model_hash(), "hash-a");
     }
 
     #[test]
@@ -660,7 +724,7 @@ mod tests {
             ClusterCentroid { speaker: 1, embedding: vec![1.0, 0.0] },
             ClusterCentroid { speaker: 2, embedding: vec![0.95, 0.05] },
         ];
-        let matches = match_clusters(&clusters, &[alice.clone()], DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
+        let matches = match_clusters(&clusters, std::slice::from_ref(&alice), DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].speaker, 1);
         assert_eq!(matches[0].profile_id, alice.id);

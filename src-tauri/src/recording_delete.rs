@@ -76,6 +76,7 @@ pub struct DeleteStores<'a> {
     pub summary: &'a SummaryStore,
     pub compression: &'a CompressionStore,
     pub appflowy: &'a AppFlowyStore,
+    pub speaker_names: &'a crate::speaker_names::SpeakerNameStore,
 }
 
 fn now_ms() -> u64 {
@@ -221,6 +222,10 @@ fn delete_one(
     if let Err(e) = stores.appflowy.remove_job_if_idle(id) {
         leftovers.push(format!("AppFlowy export: {e}"));
     }
+    // Best-effort: per-recording speaker names are pure presentation
+    // metadata with no job state of its own, so it is simply cleared rather
+    // than gated on an "idle" check like the pipeline stores above.
+    let _ = stores.speaker_names.delete_recording(id);
     DeleteOutcome {
         recording_id: id.to_string(),
         deleted: true,

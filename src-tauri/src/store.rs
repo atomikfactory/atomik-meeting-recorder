@@ -126,6 +126,14 @@ pub struct Settings {
     /// the built-in default shortcut.
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// Match newly detected speakers in a meeting against saved voice
+    /// profiles (see `voice_profiles.rs`) and auto-assign a name when
+    /// confident. Off does not delete any saved profile -- it only stops
+    /// new automatic assignments; a user can still name speakers manually
+    /// and choose to remember their voice. Missing/legacy payloads default
+    /// to enabled.
+    #[serde(default = "enabled_by_default")]
+    pub recognize_known_voices: bool,
 }
 fn default_appflowy_base_url() -> String {
     "https://beta.appflowy.cloud".into()
@@ -209,6 +217,7 @@ impl Default for Settings {
             appflowy_parent_view_id: None,
             hotkey_enabled: enabled_by_default(),
             hotkey: default_hotkey(),
+            recognize_known_voices: enabled_by_default(),
         }
     }
 }
@@ -402,6 +411,7 @@ mod tests {
             appflowy_parent_view_id: Some("space-1".into()),
             hotkey_enabled: false,
             hotkey: "Control+Shift+M".into(),
+            recognize_known_voices: false,
         };
         store.save(expected.clone()).unwrap();
         drop(store);
@@ -631,6 +641,14 @@ mod tests {
                 ..good
             })
             .is_ok());
+    }
+    #[test]
+    fn legacy_payload_without_recognize_known_voices_defaults_to_enabled() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#,
+        )
+        .unwrap();
+        assert!(parsed.recognize_known_voices);
     }
     #[test]
     fn legacy_payload_without_hotkey_fields_defaults_to_enabled_default_shortcut() {

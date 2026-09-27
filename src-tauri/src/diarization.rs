@@ -62,12 +62,12 @@ pub struct DiarizationState {
     error: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct SpeakerCheckpoint {
+pub(crate) struct SpeakerCheckpoint {
     recording_id: String,
     parent_checksum: String,
     models: ModelPair,
-    output: DiarizationOutput,
-    labels: Vec<Option<u32>>,
+    pub(crate) output: DiarizationOutput,
+    pub(crate) labels: Vec<Option<u32>>,
 }
 
 pub struct DiarizationService {
@@ -358,7 +358,7 @@ fn managed_model(
     }
     Ok(expected)
 }
-fn registered_model(
+pub(crate) fn registered_model(
     root: &Path,
     registry: &TranscriptionStore,
     kind: &str,
@@ -461,7 +461,7 @@ fn validate_checkpoint(
     }
     Ok(checkpoint)
 }
-fn speaker_markdown(
+pub(crate) fn speaker_markdown(
     recording: &Recording,
     transcript: &Transcript,
     checkpoint: &SpeakerCheckpoint,
@@ -488,6 +488,20 @@ pub(crate) fn read_completed_speaker_labels(
     recording: &Recording,
     transcript: &Transcript,
 ) -> Option<Vec<Option<u32>>> {
+    read_completed_checkpoint(root, extra_roots, recording, transcript).map(|c| c.labels)
+}
+
+/// As `read_completed_speaker_labels`, but returns the whole validated
+/// checkpoint (including its diarization warnings) -- used by
+/// `speaker_names::regenerate_presentation` to rebuild
+/// `transcript-speakers.md` byte-for-byte the same way the diarization
+/// worker itself would, just with a different name overlay.
+pub(crate) fn read_completed_checkpoint(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    recording: &Recording,
+    transcript: &Transcript,
+) -> Option<SpeakerCheckpoint> {
     let store = DiarizationStore::open(&root.join("diarization.sqlite3")).ok()?;
     let job = store.get(&recording.recording_id).ok().flatten()?;
     if job.status != "completed" {
@@ -499,9 +513,7 @@ pub(crate) fn read_completed_speaker_labels(
     if job.output_hash.as_deref() != Some(checksum(&bytes).as_str()) {
         return None;
     }
-    validate_checkpoint(&bytes, &job, recording, transcript)
-        .ok()
-        .map(|checkpoint| checkpoint.labels)
+    validate_checkpoint(&bytes, &job, recording, transcript).ok()
 }
 
 fn tick(
