@@ -1275,48 +1275,19 @@ async fn reidentify_speakers(
             std::path::Path::new(&model_path),
             &model_hash,
         )?;
-        let model_hash = voice_profiles::EmbeddingExtractor::model_hash(&extractor);
-        let turn_samples = voice_profiles::load_speaker_samples(
-            &recording,
+        let applied = voice_profiles::recognize_speakers(
             &root,
             &extra,
+            &recording,
             &checkpoint.output.turns,
+            &extractor,
         )?;
-        let clusters = voice_profiles::all_speaker_centroids(&extractor, &turn_samples);
-        let profile_store =
-            voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
-        let profiles: Vec<_> = profile_store
-            .list()?
-            .into_iter()
-            .filter(|p| p.model_hash == model_hash)
-            .collect();
-        let matches = voice_profiles::match_clusters(
-            &clusters,
-            &profiles,
-            voice_profiles::DEFAULT_MATCH_THRESHOLD,
-            voice_profiles::DEFAULT_MATCH_MARGIN,
-        );
-        let names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
-        let existing = names.list(&recording_id)?;
-        let mut applied = Vec::new();
-        for candidate in matches {
-            let label = format!("Speaker {}", candidate.speaker);
-            let user_set = existing
-                .iter()
-                .any(|n| n.label == label && !n.auto_identified);
-            if user_set {
-                continue;
-            }
-            names.set(&recording_id, &label, &candidate.profile_name, true)?;
-            applied.push(ReidentifyOutcome {
-                speaker: candidate.speaker,
-                name: candidate.profile_name,
-                score: candidate.best_score,
-            });
-        }
         let _ = speaker_names::regenerate_presentation(&root, &extra, &recording_id);
         app.state::<SearchService>().reindex(&recording_id);
-        Ok(applied)
+        Ok(applied
+            .into_iter()
+            .map(|(speaker, name, score)| ReidentifyOutcome { speaker, name, score })
+            .collect())
     })
     .await
     .map_err(app_error)?
@@ -2121,8 +2092,8 @@ pub fn run() {
     }), Arc::new(transcription_engine::LocalWhisperEngine::new())));
     let speaker_app = app.handle().clone();
     app.manage(DiarizationService::new(recording_dir.clone(), Arc::new(move || {
-        let enabled = speaker_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?.diarization_enabled;
-        Ok(diarization::DiarizationSettings { enabled, extra_library_roots: extra_library_roots(&speaker_app) })
+        let settings = speaker_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        Ok(diarization::DiarizationSettings { enabled: settings.diarization_enabled, recognize_known_voices: settings.recognize_known_voices, extra_library_roots: extra_library_roots(&speaker_app) })
     }), Arc::new(diarization_engine::LocalDiarizationEngine::new())));
     let summary_app = app.handle().clone();
     app.manage(SummaryService::new(recording_dir.clone(), Arc::new(move || {

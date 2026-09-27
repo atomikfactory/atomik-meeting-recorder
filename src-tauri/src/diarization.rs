@@ -32,6 +32,13 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct DiarizationSettings {
     pub enabled: bool,
+    /// Mirrors the "Recognize known voices in new meetings" setting: when
+    /// true, a newly completed speaker-identification job is immediately
+    /// matched against saved voice profiles (see
+    /// `voice_profiles::recognize_speakers`), the same pass the explicit
+    /// "Re-identify speakers" command runs, without ever overwriting a name
+    /// the user already typed.
+    pub recognize_known_voices: bool,
     /// Extra known library roots (the currently configured recordings folder
     /// and any it replaced) so a recording created under a custom folder can
     /// still be located; see `recording_paths::resolved_recording_directory`.
@@ -132,7 +139,7 @@ impl DiarizationService {
                             let result = s().and_then(|settings| {
                                 if settings.enabled {
                                     let _guard = processing_guard().lock().map_err(|_| "Processing guard failed.".to_string())?;
-                                    tick(&r, &settings.extra_library_roots, &d, &t, &recordings, engine.as_ref(), &c)
+                                    tick(&r, &settings.extra_library_roots, &d, &t, &recordings, engine.as_ref(), &c, settings.recognize_known_voices, &real_embedding_extractor)
                                 } else { Ok(()) }
                             });
                             set_error(&e, result.err());
@@ -174,6 +181,7 @@ impl DiarizationService {
                 error = Some(e);
                 DiarizationSettings {
                     enabled: false,
+                    recognize_known_voices: false,
                     extra_library_roots: Vec::new(),
                 }
             })
@@ -516,6 +524,24 @@ pub(crate) fn read_completed_checkpoint(
     validate_checkpoint(&bytes, &job, recording, transcript).ok()
 }
 
+/// Builds the real speaker-embedding extractor for the automatic recognition
+/// pass. Split out from `tick` as a factory function (rather than calling
+/// `SherpaEmbeddingExtractor::create` inline) so tests can substitute a fake
+/// extractor and exercise the matching/naming logic without a real ONNX
+/// model file.
+type EmbeddingExtractorFactory =
+    dyn Fn(&Path, &str) -> Result<Box<dyn crate::voice_profiles::EmbeddingExtractor>, String>
+        + Send
+        + Sync;
+fn real_embedding_extractor(
+    path: &Path,
+    hash: &str,
+) -> Result<Box<dyn crate::voice_profiles::EmbeddingExtractor>, String> {
+    crate::voice_profiles::SherpaEmbeddingExtractor::create(path, hash)
+        .map(|e| Box::new(e) as Box<dyn crate::voice_profiles::EmbeddingExtractor>)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tick(
     root: &Path,
     extra_roots: &[PathBuf],
@@ -524,6 +550,8 @@ fn tick(
     recordings: &RecordingStore,
     engine: &dyn DiarizationEngine,
     cancel: &AtomicBool,
+    recognize_known_voices: bool,
+    embedding_extractor: &EmbeddingExtractorFactory,
 ) -> Result<(), String> {
     for parent in registry
         .all()?
@@ -638,6 +666,28 @@ fn tick(
             atomic_new(&json, &bytes)?;
             (checkpoint, bytes)
         };
+        // Automatic recognition: a newly completed speaker-identification
+        // job is matched against saved voice profiles right away, exactly
+        // like the explicit "Re-identify speakers" command, before the
+        // presentation Markdown below is built -- so any name it assigns is
+        // already reflected in `transcript-speakers.md` on first write
+        // rather than requiring a later regeneration. Best-effort only:
+        // recognition is a cosmetic overlay and must never fail or block
+        // diarization completing.
+        if recognize_known_voices {
+            if let Ok(Some((model_path, model_hash))) = registered_model(root, registry, "embedding")
+            {
+                if let Ok(extractor) = embedding_extractor(Path::new(&model_path), &model_hash) {
+                    let _ = crate::voice_profiles::recognize_speakers(
+                        root,
+                        extra_roots,
+                        &recording,
+                        &checkpoint.output.turns,
+                        extractor.as_ref(),
+                    );
+                }
+            }
+        }
         let names = crate::speaker_names::names_for(root, &job.recording_id);
         let markdown = speaker_markdown(&recording, &transcript, &checkpoint, Some(&names));
         if md.exists() {
@@ -653,7 +703,15 @@ fn tick(
             .flatten()
             .collect::<HashSet<_>>()
             .len() as u32;
-        store.complete(&job.recording_id, &checksum(&bytes), count)
+        store.complete(&job.recording_id, &checksum(&bytes), count)?;
+        if recognize_known_voices {
+            // Recognition may have just named a speaker; regenerate
+            // `transcript.md` too (the speaker-specific Markdown above
+            // already reflects it) so both presentations agree immediately,
+            // without waiting for a user-triggered rename to do it.
+            let _ = crate::speaker_names::regenerate_presentation(root, extra_roots, &job.recording_id);
+        }
+        Ok(())
     })();
     if let Err(e) = result {
         store.status(

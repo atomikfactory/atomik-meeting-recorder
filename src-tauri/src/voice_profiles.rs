@@ -592,6 +592,54 @@ pub fn load_speaker_samples(
     Ok(out)
 }
 
+/// Shared by the automatic post-diarization recognition pass
+/// (`diarization::tick`) and the explicit "Re-identify speakers" command
+/// (`reidentify_speakers` in `lib.rs`): matches this recording's detected
+/// speaker clusters against saved voice profiles compatible with
+/// `extractor`'s model, and assigns a name to any confident, unambiguous
+/// match (see `match_clusters`), skipping any label the user has already
+/// named themselves (an existing *non*-auto-identified name is never
+/// touched). Returns exactly the assignments it applied, as
+/// `(speaker, profile_name, best_score)`, for reporting to the caller.
+pub fn recognize_speakers(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    recording: &crate::recording::Recording,
+    turns: &[crate::diarization_types::SpeakerTurn],
+    extractor: &dyn EmbeddingExtractor,
+) -> Result<Vec<(u32, String, f32)>, String> {
+    let model_hash = extractor.model_hash();
+    let turn_samples = load_speaker_samples(recording, root, extra_roots, turns)?;
+    let clusters = all_speaker_centroids(extractor, &turn_samples);
+    let profile_store = VoiceProfileStore::open(store_path(root))?;
+    let profiles: Vec<_> = profile_store
+        .list()?
+        .into_iter()
+        .filter(|p| p.model_hash == model_hash)
+        .collect();
+    let matches = match_clusters(
+        &clusters,
+        &profiles,
+        DEFAULT_MATCH_THRESHOLD,
+        DEFAULT_MATCH_MARGIN,
+    );
+    let names = crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(root))?;
+    let existing = names.list(&recording.recording_id)?;
+    let mut applied = Vec::new();
+    for candidate in matches {
+        let label = format!("Speaker {}", candidate.speaker);
+        let user_set = existing
+            .iter()
+            .any(|n| n.label == label && !n.auto_identified);
+        if user_set {
+            continue;
+        }
+        names.set(&recording.recording_id, &label, &candidate.profile_name, true)?;
+        applied.push((candidate.speaker, candidate.profile_name, candidate.best_score));
+    }
+    Ok(applied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
