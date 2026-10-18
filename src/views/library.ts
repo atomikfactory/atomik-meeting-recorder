@@ -156,8 +156,11 @@ export function recentRecordings() {
       ? `<button class="secondary" data-retry-diarization="${escapeAttr(recording.recording_id)}">Retry speaker identification</button>`
       : "";
     const summaryBusy = summaryActionInFlight.has(recording.recording_id);
+    const suggestedTitle = summary?.status === "completed" && summary.title && summary.title !== (recording.meeting_title ?? "Meeting")
+      ? `<p class="suggested-title"><span>Suggested title: <b>${escapeHtml(summary.title)}</b></span><button type="button" class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" aria-label="Use suggested title: ${escapeAttr(summary.title)}" ${summaryActionInFlight.has(recording.recording_id) ? "disabled" : ""}>Use</button></p>`
+      : "";
     const summaryActions = summary?.status === "completed"
-      ? `<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Regenerate summary</button>${summary.title && summary.title !== (recording.meeting_title ?? "Meeting") ? `<button class="secondary" data-use-suggested-title="${escapeAttr(recording.recording_id)}" data-title="${escapeAttr(summary.title)}" ${summaryBusy ? "disabled" : ""}>Use suggested title: ${escapeHtml(summary.title)}</button>` : ""}`
+      ? `<button class="secondary" data-open-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Open summary</button><button class="secondary" data-regenerate-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Regenerate summary</button>`
       : summary?.status === "failed"
         ? `<button class="secondary" data-retry-summary="${escapeAttr(recording.recording_id)}" ${summaryBusy ? "disabled" : ""}>Retry summary</button>`
         : "";
@@ -180,7 +183,12 @@ export function recentRecordings() {
             ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>`
             : "";
     const checkbox = `<label class="select-row"><input type="checkbox" data-select="${escapeAttr(recording.recording_id)}" aria-label="Select ${escapeAttr(recording.meeting_title || "Meeting")}" ${store.selectedRecordingIds.has(recording.recording_id) ? "checked" : ""}/></label>`;
-    return `<article class="recording-row">${checkbox}<div><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)}</small><small>${escapeHtml(recordingSources(recording))}</small><small>${escapeHtml(audioSummary(recording))}${storageLine ? ` · ${escapeHtml(storageLine)}` : ""}${compressionLine ? ` · ${escapeHtml(compressionLine)}` : ""} · ${escapeHtml(transcriptSummary(recording))} · ${escapeHtml(diarizationSummary(recording.recording_id))} · ${escapeHtml(summarySummary(recording.recording_id))} · ${escapeHtml(appflowySummary(recording.recording_id))}</small><small>Recording ${escapeHtml(shortId)}</small></div>${folder}${action}${retry}${summaryActions}${appflowyActions}${manage}${issues ? `<p>${escapeHtml(issues)}</p>` : ""}${diarization?.error ? `<p>${escapeHtml(diarization.error)}</p>` : ""}${summary?.error ? `<p>${escapeHtml(summary.error)}</p>` : ""}${appflowyJobFor?.error ? `<p>${escapeHtml(appflowyJobFor.error)}</p>` : ""}${speakerPanelHtml(recording)}</article>`;
+    const chip = (text: string, tone = "") => `<span class="chip-status${tone ? ` ${tone}` : ""}">${escapeHtml(text)}</span>`;
+    const failedTone = (text: string) => /fail|needs model|error/i.test(text) ? "bad" : /complet|ready|exported|synced/i.test(text) ? "ok" : "";
+    const statusChips = [audioSummary(recording), ...(storageLine ? [storageLine] : []), ...(compressionLine ? [compressionLine] : []), transcriptSummary(recording), diarizationSummary(recording.recording_id), summarySummary(recording.recording_id), appflowySummary(recording.recording_id)]
+      .map((text) => chip(text, failedTone(text))).join("");
+    const errors = [issues, diarization?.error, summary?.error, appflowyJobFor?.error].filter(Boolean).map((text) => `<p>${escapeHtml(String(text))}</p>`).join("");
+    return `<article class="recording-row">${checkbox}<div class="rec-main"><div class="rec-title"><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)} · ${escapeHtml(recordingSources(recording))} · ID ${escapeHtml(shortId)}</small></div>${suggestedTitle}<div class="rec-status">${statusChips}</div></div><div class="rec-actions"><div class="rec-group">${action}${retry}</div><div class="rec-group">${summaryActions}</div><div class="rec-group">${appflowyActions}</div></div><div class="rec-manage">${folder}${manage}</div>${errors}${speakerPanelHtml(recording)}</article>`;
   }).join("")}</div>`;
 }
 
