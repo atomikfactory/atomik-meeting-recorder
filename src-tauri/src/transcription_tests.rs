@@ -975,3 +975,16 @@ fn missing_local_speaker_name_defaults_to_you_for_legacy_transcripts() {
     let md = markdown_document(&recording, &transcript);
     assert!(md.contains("**[00:00:00–00:00:01] You:**"));
 }
+
+#[test]
+fn checksum_is_lowercase_hex_sha256() {
+    assert_eq!(
+        checksum(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        checksum(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(hex_lower(&[0x00, 0x0f, 0xa0]), "000fa0");
+}

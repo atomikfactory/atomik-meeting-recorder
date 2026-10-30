@@ -486,8 +486,20 @@ fn set_error(slot: &Mutex<Option<String>>, value: Option<String>) {
 fn io_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+/// Lowercase hex of a digest. sha2 0.11 dropped `LowerHex` for digest output,
+/// so persisted checksums are formatted here; the output is identical to the
+/// old `{:x}` formatting.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
 pub(crate) fn checksum(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex_lower(&Sha256::digest(bytes))
 }
 fn safe_id(id: &str) -> Result<(), String> {
     let uuid = uuid::Uuid::parse_str(id).map_err(|_| "Invalid recording identity.")?;

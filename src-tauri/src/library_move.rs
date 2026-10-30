@@ -139,7 +139,7 @@ fn hash_file(path: &Path) -> Result<(u64, String), String> {
         len += n as u64;
         hasher.update(&buf[..n]);
     }
-    Ok((len, format!("{:x}", hasher.finalize())))
+    Ok((len, crate::transcription::hex_lower(&hasher.finalize())))
 }
 /// Recursively copies every regular file under `source` into `destination`
 /// (which must not already exist), rejecting anything that is not a plain
