@@ -31,7 +31,7 @@ thiserror = "2"
 cpal = "0.18.2"
 chrono = "0.4.45"
 uuid = { version = "1", features = ["v4"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hound = "3.5"
 rubato = "5.0"
 realfft = "3.5"
