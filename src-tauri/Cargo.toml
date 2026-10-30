@@ -58,7 +58,7 @@ trash = "5"
 # whisper-rs builds its C++ backend with /MD.  Use Sherpa's supported shared
 # Windows artifact so both native backends can coexist; its build script puts
 # the required DLLs beside the executable. Other platforms retain static.
-sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+sherpa-onnx = { version = "=2.0.1", default-features = false, features = ["shared"] }
 # Kept on the version already present transitively in Cargo.lock.
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
