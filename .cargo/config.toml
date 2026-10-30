@@ -14,3 +14,7 @@ GGML_F16C = "ON"
 # compile time by building only for Ampere consumer GPUs (sm_86, e.g. RTX 30xx)
 # instead of every architecture nvcc knows about. Override for other GPUs.
 CMAKE_CUDA_ARCHITECTURES = "86"
+# whisper.cpp's ggml uses std::filesystem, which macOS only provides from
+# 10.15; matches bundle.macOS.minimumSystemVersion in tauri.conf.json so
+# cargo test/clippy and tauri build compile it for the same target.
+MACOSX_DEPLOYMENT_TARGET = "11.0"
