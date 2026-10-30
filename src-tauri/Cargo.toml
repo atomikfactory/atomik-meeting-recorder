@@ -60,7 +60,7 @@ trash = "5"
 # the required DLLs beside the executable. Other platforms retain static.
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
 # Kept on the version already present transitively in Cargo.lock.
-windows = { version = "0.61.3", features = [
+windows = { version = "0.62.2", features = [
   "Win32_Foundation",
   "Win32_Media_Audio",
   "Win32_Security",
