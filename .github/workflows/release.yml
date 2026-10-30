@@ -1,0 +1,124 @@
+name: Release
+
+# Pushing a v* tag builds unsigned, CPU-only installers on GitHub runners and
+# attaches them to a DRAFT release. Review the draft, then publish it by hand.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Check version and create draft release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag must match the app version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          conf_version=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          if [ "${TAG#v}" != "$conf_version" ]; then
+            echo "::error::Tag $TAG does not match version $conf_version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+      - name: Create draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Created once here (not by each matrix job) so the three parallel
+          # builds cannot race and each create their own draft.
+          cat > body.md <<'BODY'
+          Unsigned, CPU-only builds. Review before sharing.
+
+          **Windows (x64, NSIS installer)**: not code-signed, so SmartScreen warns about an unrecognized publisher. Click "More info", then "Run anyway".
+
+          **macOS (Apple Silicon / arm64 only)**: not signed or notarized, so Gatekeeper blocks the first launch. Right-click the app and choose Open (or allow it under System Settings > Privacy & Security), or run `xattr -dr com.apple.quarantine "/Applications/Atomik Meeting Recorder.app"`.
+
+          **Linux (x86-64)**: `.deb`, `.rpm` and `.AppImage` (mark the AppImage executable before running it).
+
+          Transcription runs on the CPU. For GPU (CUDA) builds, build from source as described in the [README](https://github.com/atomikfactory/atomik-meeting-recorder#optional-gpu-cuda-build).
+
+          See the [README](https://github.com/atomikfactory/atomik-meeting-recorder#readme) and the [security policy](https://github.com/atomikfactory/atomik-meeting-recorder/blob/main/SECURITY.md).
+          BODY
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="$TAG" \
+            -f name="Atomik Meeting Recorder ${TAG}" \
+            -F body=@body.md \
+            -F draft=true \
+            -F prerelease=false \
+            --jq .id)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: prepare
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned so a runner-image migration can't silently change system packages.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            args: ''
+          # macos-latest is arm64: native Apple Silicon build only.
+          - os: macos-latest
+            args: ''
+          # Windows links sherpa-onnx as shared DLLs; this config bundles them
+          # beside the exe (same config `npm run tauri:build` uses).
+          - os: windows-latest
+            args: '--config src-tauri/tauri.bundle.windows.conf.json'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v3-registry-only
+          workspaces: src-tauri
+          # Cache downloaded crates only. Caching target/ restored sherpa-onnx's
+          # build-script outputs without the prebuilt libraries they point at,
+          # which broke linking; a full build is slower but always correct.
+          cache-targets: false
+      - uses: actions/setup-python@v7
+        with: { python-version: '3.12' }
+      - name: Build-time libclang
+        run: python -m pip install libclang==18.1.1
+      - name: Locate libclang
+        shell: python
+        run: |
+          import os, pathlib, clang
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('LIBCLANG_PATH=' + str(pathlib.Path(clang.__file__).parent / 'native') + '\n')
+      - name: Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev pkg-config cmake
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          args: ${{ matrix.args }}
