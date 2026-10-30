@@ -26,12 +26,12 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 thiserror = "2"
 cpal = "0.18.2"
 chrono = "0.4.45"
 uuid = { version = "1", features = ["v4"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hound = "3.5"
 rubato = "5.0"
 realfft = "3.5"
@@ -58,9 +58,9 @@ trash = "5"
 # whisper-rs builds its C++ backend with /MD.  Use Sherpa's supported shared
 # Windows artifact so both native backends can coexist; its build script puts
 # the required DLLs beside the executable. Other platforms retain static.
-sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+sherpa-onnx = { version = "=2.0.1", default-features = false, features = ["shared"] }
 # Kept on the version already present transitively in Cargo.lock.
-windows = { version = "0.61.3", features = [
+windows = { version = "0.62.2", features = [
   "Win32_Foundation",
   "Win32_Media_Audio",
   "Win32_Security",
@@ -80,7 +80,7 @@ windows = { version = "0.61.3", features = [
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(not(windows))'.dependencies]
-sherpa-onnx = "=1.13.8"
+sherpa-onnx = "=2.0.1"
 # Only for getuid() in browser_bridge.rs's short, per-user socket-directory
 # fallback (see short_private_socket_dir).
 libc = "0.2"

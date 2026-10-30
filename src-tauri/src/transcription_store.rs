@@ -123,7 +123,17 @@ impl TranscriptionStore {
             .query_row(
                 "SELECT path,hash,bytes FROM models WHERE model_key=?1",
                 params![key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| {
+                    Ok((r.get(0)?, r.get(1)?, {
+                        u64::try_from(r.get::<_, i64>(2)?).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Integer,
+                                Box::new(e),
+                            )
+                        })?
+                    }))
+                },
             )
             .optional()
             .map_err(err)

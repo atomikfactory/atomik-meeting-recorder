@@ -1321,7 +1321,7 @@ pub fn hash_model(path: &Path) -> Result<String, String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::transcription::hex_lower(&digest.finalize()))
 }
 
 /// Validates legacy Whisper GGML metadata without loading model weights.
