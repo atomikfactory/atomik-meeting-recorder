@@ -1,5 +1,7 @@
 # Atomik Meeting Recorder
 
+[![CI](https://github.com/atomikfactory/atomik-meeting-recorder/actions/workflows/ci.yml/badge.svg)](https://github.com/atomikfactory/atomik-meeting-recorder/actions/workflows/ci.yml)
+
 A local-first desktop meeting recorder MVP with multi-source capture, a native tray, saved device selection, recording history, interrupted-file recovery, and local Whisper transcription. Windows meeting detection asks before recording and manages the end grace after approval.
 
 ## Start
@@ -79,7 +81,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
 npm run tauri -- build --debug --no-bundle
 ```
 
-`cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required.
+CI (`.github/workflows/ci.yml`) runs these checks on Linux, macOS, and Windows for every push to `main` and every pull request. `cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required.
 
 This repo also supports a project-local Rust toolchain under `.tools` (Cargo, rustup, and libclang), so contributors don't need a system-wide install (the directory is git-ignored and optional); `scripts/dev.ps1` discovers it automatically and falls back to your normal `PATH` otherwise.
 
@@ -102,6 +104,10 @@ The optional Windows scripts `scripts/native-smoke.mjs`, `scripts/native-audio-s
 See [manual acceptance checks](docs/manual-checks.md) for tray, permissions, and hardware checks. Recording and transcription have synthetic lifecycle, recovery, and idempotency tests. AppFlowy export is create-only and read-before-write (see [AppFlowy export](docs/appflowy.md)); remote-side idempotency is covered by tests against a fake server, not a live AppFlowy Cloud instance.
 
 `scripts/native-recording-smoke.mjs --allow-capture` is a separate, explicitly consented five-second Windows capture check. It records from one input device and the default output device, retains the audio locally, and inspects headers only. Choose the input with `--mic <name-substring>` or the `MIC_NAME` environment variable (case-insensitive match against the device name); without either, it uses the default input device. It writes a screenshot to `artifacts/`. Do not run it during a real recording or without microphone/system-audio consent. Synthetic tests do not open hardware.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
 
 ## License
 
