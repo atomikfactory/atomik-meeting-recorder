@@ -1,6 +1,6 @@
 //! Text-level duplicate cleanup: a safety net run after transcription, on top
 //! of (not instead of) the signal-level acoustic echo cancellation in
-//! `echo_cancel.rs`. AEC reduces, but does not always fully remove, a remote
+//! `echo_cancel/mod.rs`. AEC reduces, but does not always fully remove, a remote
 //! participant's speech leaking from the loopback track into the microphone
 //! track -- and a recording with `echo_cancellation` turned off, or where AEC
 //! itself was skipped for a track (see `transcription_engine::

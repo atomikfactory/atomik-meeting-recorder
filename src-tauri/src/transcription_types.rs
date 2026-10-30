@@ -18,7 +18,7 @@ pub struct TranscriptionRequest {
     /// `None` requests automatic per-track language detection; `Some(code)` pins
     /// every chunk of every track to that lowercase ISO 639-1 code.
     pub language: Option<String>,
-    /// Whether to run acoustic echo cancellation (see `echo_cancel.rs`) on
+    /// Whether to run acoustic echo cancellation (see `echo_cancel/mod.rs`) on
     /// input (microphone) tracks against summed output (loopback) tracks
     /// before transcription, when the recording has both. A no-op when the
     /// recording lacks either track direction, regardless of this flag.

@@ -175,7 +175,7 @@ pub fn read_message<R: Read>(reader: &mut R) -> Result<Vec<u8>, FramingError> {
 /// currently called in production -- the host is fire-and-forget toward the
 /// extension -- but kept alongside `read_message` as the framing's other
 /// half, exercised directly by `browser_bridge_tests.rs`'s round-trip test.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn write_message<W: Write>(writer: &mut W, body: &[u8]) -> Result<(), FramingError> {
     if body.len() > MAX_MESSAGE_BYTES as usize {
         return Err(FramingError::OversizedMessage(body.len() as u32));

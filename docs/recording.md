@@ -122,7 +122,7 @@ Capture status and transcript status are separate. A recording can be `interrupt
 
 **Retry transcription** retries a failed job with its previously pinned model. **Restart transcription** is an explicit replacement of a completed or dormant transcript: it uses the currently selected local model, archives the previous transcript outputs first, and does not capture audio again. A queued or running transcription cannot be restarted concurrently.
 
-To choose a model, open **Settings**, select the intended **Whisper model** key, select **Choose local Whisper model**, choose a local GGML `.bin` file, then save the settings. The optional public base model can be chosen explicitly from `.tools/public-whisper/ggml-base.bin` during development. It is not imported or downloaded automatically. If a selected recording is waiting for a model, importing that matching model wakes its queued job.
+To choose a model, open **Settings**, select the intended **Whisper model** key, select **Choose local Whisper model**, choose a local GGML `.bin` file, then save the settings. During development, a public base model can optionally be kept under the git-ignored `.tools/public-whisper/` directory and chosen explicitly from there. It is not imported or downloaded automatically. If a selected recording is waiting for a model, importing that matching model wakes its queued job.
 
 Automated synthetic and mocked tests are distinct from hardware acceptance. Physical unplug, sleep/wake, long-duration drift, and macOS/Linux permission behavior require native verification. See [verification results](verification.md) for checks actually run.
 

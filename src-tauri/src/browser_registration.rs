@@ -182,7 +182,7 @@ pub fn uninstall(
 /// (used by Settings to show "connected" vs "not connected"). This checks
 /// files only (not the Windows registry, which the real registration keeps
 /// in lockstep) so it works identically for tests against a fake filesystem.
-#[allow(dead_code)] // simple boolean form of `installed_browsers`; kept for tests/API symmetry
+#[cfg(test)] // simple boolean form of `installed_browsers`; only exercised by tests
 pub fn is_installed(fs: &dyn FileWriter, home: &Path) -> bool {
     Browser::ALL
         .iter()

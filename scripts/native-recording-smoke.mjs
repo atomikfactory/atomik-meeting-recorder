@@ -1,11 +1,17 @@
 // Explicitly consented Windows hardware check: ONE five-second recording.
 // Never plays, transcribes, uploads, deletes, or reads the audio payload.
+// Input device: `--mic <name-substring>` or the MIC_NAME environment variable
+// (case-insensitive substring match); otherwise the default input device, or the
+// first selectable input if none is flagged as default. Output: the default output.
 import assert from "node:assert/strict";
 import { mkdir, open, stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 
 assert(process.argv.includes("--allow-capture"), "Requires explicit user consent and --allow-capture");
+const micArgIndex = process.argv.indexOf("--mic");
+const micName = (micArgIndex >= 0 ? process.argv[micArgIndex + 1] : process.env.MIC_NAME)?.trim().toLowerCase();
+assert(micArgIndex < 0 || micName, "--mic requires a device name substring");
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9223");
 const page = browser.contexts().flatMap((context) => context.pages()).find((item) => item.url().includes("tauri.localhost"));
 assert(page, "Expected packaged app");
@@ -19,9 +25,12 @@ let started = false;
 let recordingId;
 try {
   const inventory = await invoke("get_audio_devices");
-  const mic = inventory.devices.find((device) => device.direction === "input" && device.selectable && /C922.*Webcam/i.test(device.name));
+  const inputs = inventory.devices.filter((device) => device.direction === "input" && device.selectable);
+  const mic = micName
+    ? inputs.find((device) => device.name.toLowerCase().includes(micName))
+    : inputs.find((device) => device.is_default) ?? inputs[0];
   const output = inventory.devices.find((device) => device.direction === "output" && device.selectable && device.is_default);
-  assert(mic && output, "Only the consented webcam microphone and default output may be selected");
+  assert(mic && output, `Need a selectable input${micName ? ` matching "${micName}"` : ""} and a default output device`);
   await invoke("save_audio_selection", { sourceIds: [mic.id, output.id] });
   const captureStarted = Date.now();
   await invoke("start_recording");

@@ -81,11 +81,11 @@ npm run tauri -- build --debug --no-bundle
 
 `cargo clippy --all-targets --locked` is kept at zero warnings. On Windows the executable is `src-tauri/target/debug/meeting-recorder.exe`. It loads packaged assets and does not require a running development server. This is an unsigned development build, not an installer. Native macOS/Linux verification is still required.
 
-This repo also supports a project-local Rust toolchain under `.tools` (Cargo, rustup, and libclang), set up so contributors don't need a system-wide install; `scripts/dev.ps1` discovers it automatically and falls back to your normal `PATH` otherwise.
+This repo also supports a project-local Rust toolchain under `.tools` (Cargo, rustup, and libclang), so contributors don't need a system-wide install (the directory is git-ignored and optional); `scripts/dev.ps1` discovers it automatically and falls back to your normal `PATH` otherwise.
 
 ### Optional GPU (CUDA) build
 
-`npm run tauri:cuda` (dev) or `npm run tauri:build:cuda` (release), or `scripts/dev.ps1 -Cuda`, build with GPU (CUDA) Whisper transcription instead of CPU-only. This needs the CUDA Toolkit (12.x or 13.x, with Visual Studio integration on Windows) installed separately from the driver; it is not part of default builds, so CI and non-NVIDIA machines are unaffected. At runtime, a CUDA build needs the CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`, ...) reachable, either via the Toolkit's `bin` on `PATH` or copied beside the built executable. See [local transcription](docs/transcription.md) for the CPU-vs-GPU wall-time comparison and fallback behavior when no compatible GPU is found.
+`npm run tauri:cuda` (dev) or `npm run tauri:build:cuda` (release), or `scripts/dev.ps1 -Cuda`, build with GPU (CUDA) Whisper transcription instead of CPU-only. This needs the CUDA Toolkit (12.x or 13.x, with Visual Studio integration on Windows) installed separately from the driver; it is not part of default builds, so machines without an NVIDIA GPU are unaffected. At runtime, a CUDA build needs the CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`, ...) reachable, either via the Toolkit's `bin` on `PATH` or copied beside the built executable. See [local transcription](docs/transcription.md) for the CPU-vs-GPU wall-time comparison and fallback behavior when no compatible GPU is found.
 
 #### Packaging a Windows CUDA installer or portable build
 
@@ -99,9 +99,9 @@ Both artifacts are unsigned, so Windows SmartScreen shows an unrecognized-publis
 
 The optional Windows scripts `scripts/native-smoke.mjs`, `scripts/native-audio-smoke.mjs`, and `scripts/native-lifecycle.mjs --audio` test the actual desktop executable using WebView2's local debugging port (9223). Launch only a development test instance with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`, `MEETING_RECORDER_DISABLE_AUTOMATION=1`, and `MEETING_RECORDER_DISABLE_TRANSCRIPTION=1`. The latter two inhibit automatic capture and all transcription job execution without changing saved preferences; scripts verify both safeguards before modifying settings. The lifecycle script sets them on restarted test processes. These scripts temporarily change preferences and the lifecycle test quits/restarts the app; they are not application startup behavior. Do not enable the debugging port for normal use. Audio checks enumerate hardware and save selections without opening streams.
 
-See [manual acceptance checks](docs/manual-checks.md) for tray, permissions, and hardware checks. Recording and transcription have synthetic lifecycle, recovery, and idempotency tests. Remote-import idempotency remains future work; no AppFlowy requests are made.
+See [manual acceptance checks](docs/manual-checks.md) for tray, permissions, and hardware checks. Recording and transcription have synthetic lifecycle, recovery, and idempotency tests. AppFlowy export is create-only and read-before-write (see [AppFlowy export](docs/appflowy.md)); remote-side idempotency is covered by tests against a fake server, not a live AppFlowy Cloud instance.
 
-`scripts/native-recording-smoke.mjs --allow-capture` is a separate, explicitly consented five-second Windows capture check. It selects the C922 webcam and default output on this development machine, retains the audio locally, and inspects headers only. Do not run it during a real recording or without microphone/system-audio consent. Synthetic tests do not open hardware.
+`scripts/native-recording-smoke.mjs --allow-capture` is a separate, explicitly consented five-second Windows capture check. It records from one input device and the default output device, retains the audio locally, and inspects headers only. Choose the input with `--mic <name-substring>` or the `MIC_NAME` environment variable (case-insensitive match against the device name); without either, it uses the default input device. It writes a screenshot to `artifacts/`. Do not run it during a real recording or without microphone/system-audio consent. Synthetic tests do not open hardware.
 
 ## License
 

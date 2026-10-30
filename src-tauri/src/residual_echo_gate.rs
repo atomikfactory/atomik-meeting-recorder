@@ -1,5 +1,5 @@
 //! Signal-level gate against residual echo: mic audio that acoustic echo
-//! cancellation (`echo_cancel.rs`) reduced but did not fully remove, which
+//! cancellation (`echo_cancel/mod.rs`) reduced but did not fully remove, which
 //! Whisper then mishears as invented local-user speech (see
 //! docs/transcription.md and the real d3863b42 recording this was written
 //! against -- residual echo lines like "I can leave here and I mentioned the

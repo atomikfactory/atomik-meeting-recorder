@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A local-first Atomik meeting recorder"
 edition = "2021"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/atomikfactory/atomik-meeting-recorder"
+homepage = "https://github.com/atomikfactory/atomik-meeting-recorder"
 
 [lib]
 name = "meeting_recorder_lib"
@@ -12,8 +14,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 # Opt-in GPU transcription. Requires the CUDA Toolkit (nvcc, headers, libs) to
-# be installed and on PATH at build time; NOT enabled by default so CI and
-# non-NVIDIA machines keep building without it. See docs/transcription.md.
+# be installed and on PATH at build time; NOT enabled by default so machines
+# without an NVIDIA GPU keep building without it. See docs/transcription.md.
 cuda = ["whisper-rs/cuda"]
 
 [build-dependencies]

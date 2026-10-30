@@ -1,8 +1,8 @@
 # Atomik Meeting Recorder implementation plan
 
-## Inspection — 2026-09-23
+## Background
 
-The workspace was empty (including no Git repository or AGENTS.md). No application shell, UI, database, build configuration, or existing code needed preservation. The development host is Windows with Node 25.5.0, npm 11.8.0, Git, CMake, FFmpeg, Visual Studio Build Tools 2019 (C++ tools), and WebView2 148. Rust was absent from PATH and the usual user installation directory. Rust 1.98.1, rustfmt, and Clippy were subsequently installed inside `.tools/` without changing the system PATH; they are not application runtime dependencies. Target desktop platforms remain Windows, macOS, and Linux; only Windows can be exercised on this host.
+The project started from an empty workspace: no application shell, UI, database, build configuration, or existing code needed preservation. Development requires Node and npm, a Rust toolchain (with rustfmt and Clippy), Git, CMake, and, on Windows, Visual Studio Build Tools (C++ tools) and the WebView2 runtime. A Rust toolchain may optionally be kept project-local under the git-ignored `.tools/` directory, which `scripts/dev.ps1` uses when present; it is not an application runtime dependency and does not change the system PATH. Target desktop platforms are Windows, macOS, and Linux; the native hardware checks described in [verification](verification.md) have so far only been run on Windows.
 
 ## Architecture
 

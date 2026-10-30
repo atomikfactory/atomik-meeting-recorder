@@ -19,7 +19,7 @@ pub struct Settings {
     /// such as "en". Missing/legacy payloads default to "auto".
     #[serde(default = "default_language")]
     pub transcription_language: String,
-    /// Acoustic echo cancellation (see `echo_cancel.rs`) for recordings that
+    /// Acoustic echo cancellation (see `echo_cancel/mod.rs`) for recordings that
     /// have both an input (microphone) and an output (loopback) track --
     /// the common case where the user has speakers rather than headphones,
     /// so remote participants' audio leaks into the mic and is otherwise

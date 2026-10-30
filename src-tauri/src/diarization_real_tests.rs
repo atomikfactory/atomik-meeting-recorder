@@ -40,8 +40,8 @@ const MAX_SOURCE_SECONDS: u64 = 30 * 60;
 /// `cargo test` binary, though, lives one level down at `target/<profile>/deps/`,
 /// which is not on the default search path -- so the loader falls through to
 /// `System32`, and on a machine that happens to have an unrelated, older
-/// `onnxruntime.dll` there (observed on this machine, from another installed
-/// component), the wrong one loads and native calls crash with an ONNX Runtime API
+/// `onnxruntime.dll` there (for example, one installed by another
+/// application), the wrong one loads and native calls crash with an ONNX Runtime API
 /// version mismatch (`STATUS_ACCESS_VIOLATION`) instead of a clean error. Copying
 /// the correct DLLs beside the test binary itself -- which Windows always checks
 /// first -- fixes it without touching global `PATH` or the vendored build script.

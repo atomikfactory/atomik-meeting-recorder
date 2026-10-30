@@ -3,7 +3,6 @@ dist/
 .tools/
 src-tauri/target/
 src-tauri/target-*/
-src-tauri/gen/schemas/
 test-results/
 playwright-report/
 artifacts/
@@ -46,3 +45,14 @@ ggml-*.bin
 *.sqlite
 *.sqlite3
 *.db
+
+# Generated / build artifacts, caches and local tooling
+*.tsbuildinfo
+src-tauri/gen/
+*.exe
+*.msi
+*.zip
+*.gguf
+.venv/
+__pycache__/
+.claude/

@@ -211,7 +211,7 @@ fn cancels_echo_across_drift_a_delay_jump_and_double_talk() {
     // dependence -- see `build_fixture` and `Lcg` above): x86_64 Windows and
     // Linux both re-lock onto the post-jump echo path essentially as well as
     // the pre-jump window (Windows: erle_before ~33.5 dB, erle_after ~33.1
-    // dB), but macOS/ARM64 CI (run 36270518921, job 108483461092) measured
+    // dB), but a macOS/ARM64 run measured
     // only ~15.0 dB here specifically (erle_before there still passed its own
     // >=20 dB bar). rustfft/realfft's NEON FFT kernels are not required to be
     // bit-identical to their x86 AVX/SSE counterparts, and GCC-PHAT's
