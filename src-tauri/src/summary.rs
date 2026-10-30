@@ -368,7 +368,9 @@ fn validate_checkpoint(
         || checkpoint.recording_id != recording.recording_id
         || !checkpoint.output.is_meaningful()
     {
-        return Err("Summary checkpoint identity, model pin, or content is invalid; file preserved.".into());
+        return Err(
+            "Summary checkpoint identity, model pin, or content is invalid; file preserved.".into(),
+        );
     }
     // The checkpoint's summary output is independent of segment-level content, but
     // must still describe this exact transcript, not a stale/foreign one.
@@ -378,7 +380,10 @@ fn validate_checkpoint(
     Ok(checkpoint)
 }
 fn literal(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('*', "\\*").replace('_', "\\_")
+    value
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
 }
 /// Localized section headings for `summary.md`. Keyed off the model's own
 /// reported `output.language` (best-effort free text, e.g. "en", "French"),
@@ -450,8 +455,14 @@ pub(crate) fn summary_markdown(recording: &Recording, checkpoint: &SummaryCheckp
             markdown.push_str(&format!(
                 "- {}{}{}\n",
                 literal(&item.task),
-                item.owner.as_deref().map(|o| format!(" — {}", literal(o))).unwrap_or_default(),
-                item.due.as_deref().map(|d| format!(" ({} {})", headings.due, literal(d))).unwrap_or_default(),
+                item.owner
+                    .as_deref()
+                    .map(|o| format!(" — {}", literal(o)))
+                    .unwrap_or_default(),
+                item.due
+                    .as_deref()
+                    .map(|d| format!(" ({} {})", headings.due, literal(d)))
+                    .unwrap_or_default(),
             ));
         }
         markdown.push('\n');
@@ -509,8 +520,13 @@ fn tick(
     }
     job.model = Some(settings.model.clone());
     let result: Result<(), String> = (|| {
-        let (recording, transcript, directory) =
-            load_parent(root, &settings.extra_library_roots, registry, recordings, &job)?;
+        let (recording, transcript, directory) = load_parent(
+            root,
+            &settings.extra_library_roots,
+            registry,
+            recordings,
+            &job,
+        )?;
         let json = output_path(&directory, "summary.json")?;
         let md = output_path(&directory, "summary.md")?;
         let (checkpoint, bytes) = if json.exists() {
@@ -521,7 +537,9 @@ fn tick(
             )
         } else {
             if md.exists() {
-                return Err("Summary Markdown exists without its checkpoint; file preserved.".into());
+                return Err(
+                    "Summary Markdown exists without its checkpoint; file preserved.".into(),
+                );
             }
             let request = SummaryRequest {
                 recording: recording.clone(),
@@ -578,7 +596,11 @@ fn tick(
         } else {
             atomic_new(&md, markdown.as_bytes())?;
         }
-        store.complete(&job.recording_id, &checksum(&bytes), &checkpoint.output.title)
+        store.complete(
+            &job.recording_id,
+            &checksum(&bytes),
+            &checkpoint.output.title,
+        )
     })();
     if let Err(e) = result {
         store.status(

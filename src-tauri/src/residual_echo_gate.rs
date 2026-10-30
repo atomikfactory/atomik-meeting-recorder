@@ -308,7 +308,11 @@ pub fn is_leading_alignment_dead_zone_fragment(
     let Some(first_active) = blocks.iter().find(|b| b.far_end_active) else {
         return false;
     };
-    if first_active.start_sample.saturating_sub(first_block.start_sample) > LEADING_DEAD_ZONE_MAX_SAMPLES {
+    if first_active
+        .start_sample
+        .saturating_sub(first_block.start_sample)
+        > LEADING_DEAD_ZONE_MAX_SAMPLES
+    {
         return false;
     }
     region_end <= first_active.start_sample
@@ -364,8 +368,22 @@ fn mean(values: impl Iterator<Item = f32> + Clone) -> f32 {
 mod tests {
     use super::*;
 
-    fn block(start: usize, len: usize, far_end_active: bool, mic_rms: f32, residual_rms: f32) -> BlockEnergy {
-        block_full(start, len, far_end_active, mic_rms, residual_rms, 0.0, false)
+    fn block(
+        start: usize,
+        len: usize,
+        far_end_active: bool,
+        mic_rms: f32,
+        residual_rms: f32,
+    ) -> BlockEnergy {
+        block_full(
+            start,
+            len,
+            far_end_active,
+            mic_rms,
+            residual_rms,
+            0.0,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -446,7 +464,9 @@ mod tests {
     #[test]
     fn region_outside_all_blocks_is_kept() {
         let blocks = vec![block(0, 160, true, 0.2, 0.0005)];
-        assert!(!is_residual_echo_region(&blocks, 10_000, 10_320, 0.02, None));
+        assert!(!is_residual_echo_region(
+            &blocks, 10_000, 10_320, 0.02, None
+        ));
     }
 
     #[test]
@@ -490,11 +510,25 @@ mod tests {
         // would keep this; the coupling-based check must gate it.
         let region_start = blocks.len() * 160;
         blocks.push(block_full(region_start, 160, true, 0.19, 0.09, 0.2, false));
-        blocks.push(block_full(region_start + 160, 160, true, 0.19, 0.09, 0.2, false));
+        blocks.push(block_full(
+            region_start + 160,
+            160,
+            true,
+            0.19,
+            0.09,
+            0.2,
+            false,
+        ));
         let near_end_level_rms = derive_near_end_level_rms(&blocks);
         let coupling = estimate_echo_coupling(&blocks).expect("enough far_end_only blocks");
         assert!(
-            is_residual_echo_region(&blocks, region_start, region_start + 320, near_end_level_rms, Some(coupling)),
+            is_residual_echo_region(
+                &blocks,
+                region_start,
+                region_start + 320,
+                near_end_level_rms,
+                Some(coupling)
+            ),
             "expected the unconverged region to be gated via predicted echo (coupling {coupling})"
         );
     }
@@ -513,7 +547,15 @@ mod tests {
         // Predicted echo for reference 0.2 is ~0.18; actual mic is 0.5,
         // far beyond the coupling-explained margin and near-end excess floor.
         blocks.push(block_full(region_start, 160, true, 0.5, 0.3, 0.2, false));
-        blocks.push(block_full(region_start + 160, 160, true, 0.5, 0.3, 0.2, false));
+        blocks.push(block_full(
+            region_start + 160,
+            160,
+            true,
+            0.5,
+            0.3,
+            0.2,
+            false,
+        ));
         let near_end_level_rms = derive_near_end_level_rms(&blocks);
         let coupling = estimate_echo_coupling(&blocks);
         assert!(!is_residual_echo_region(
@@ -599,7 +641,9 @@ mod tests {
         ];
         // Region does not start at sample 0 of the track: never the leading
         // dead zone, regardless of anything else.
-        assert!(!is_leading_alignment_dead_zone_fragment(&blocks, 640, 1280, 1));
+        assert!(!is_leading_alignment_dead_zone_fragment(
+            &blocks, 640, 1280, 1
+        ));
     }
 
     #[test]
@@ -621,7 +665,10 @@ mod tests {
 
     #[test]
     fn leading_dead_zone_rule_requires_far_end_activity_somewhere() {
-        let blocks = vec![block(0, 320, false, 0.1, 0.1), block(320, 320, false, 0.1, 0.1)];
+        let blocks = vec![
+            block(0, 320, false, 0.1, 0.1),
+            block(320, 320, false, 0.1, 0.1),
+        ];
         assert!(!is_leading_alignment_dead_zone_fragment(&blocks, 0, 320, 1));
     }
 
@@ -693,6 +740,9 @@ mod tests {
         for _ in 0..20 {
             blocks.push(block(0, 160, true, 0.3, 0.01));
         }
-        assert_eq!(derive_near_end_level_rms(&blocks), CONSERVATIVE_NEAR_END_RMS);
+        assert_eq!(
+            derive_near_end_level_rms(&blocks),
+            CONSERVATIVE_NEAR_END_RMS
+        );
     }
 }

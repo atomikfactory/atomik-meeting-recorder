@@ -5,6 +5,13 @@ mod appflowy_credentials;
 #[cfg(test)]
 mod appflowy_fake_server;
 mod appflowy_store;
+mod atomik_kb;
+mod atomik_kb_client;
+mod atomik_kb_credentials;
+#[cfg(test)]
+mod atomik_kb_fake_server;
+mod atomik_kb_markdown;
+mod atomik_kb_store;
 mod audio_compress;
 mod audio_compress_store;
 mod audio_devices;
@@ -15,29 +22,21 @@ mod browser_registration;
 mod capture_meter;
 mod detection;
 mod diarization;
-mod hotkey;
-mod echo_cancel;
-mod echo_dedup;
 mod diarization_engine;
-mod diarization_store;
-mod diarization_types;
-#[cfg(target_os = "linux")]
-mod linux_pulse;
-mod library_move;
-#[cfg(test)]
-mod flac_transcription_parity_tests;
-#[cfg(test)]
-mod meeting_management_tests;
-#[cfg(test)]
-mod summary_real_ollama_tests;
 #[cfg(test)]
 mod diarization_real_tests;
+mod diarization_store;
+mod diarization_types;
+mod echo_cancel;
+mod echo_dedup;
 #[cfg(test)]
-mod voice_profiles_real_tests;
+mod flac_transcription_parity_tests;
+mod hotkey;
+mod library_move;
+#[cfg(target_os = "linux")]
+mod linux_pulse;
 #[cfg(test)]
-mod residual_echo_gate_real_tests;
-#[cfg(test)]
-mod speakers_end_to_end_tests;
+mod meeting_management_tests;
 mod meeting_signals;
 mod meeting_title;
 mod ollama_client;
@@ -47,16 +46,21 @@ mod recording_paths;
 mod recording_store;
 mod recording_wav;
 mod residual_echo_gate;
+#[cfg(test)]
+mod residual_echo_gate_real_tests;
 mod search;
 mod search_store;
 #[cfg(test)]
 mod search_tests;
 mod speaker_alignment;
 mod speaker_names;
+#[cfg(test)]
+mod speakers_end_to_end_tests;
 mod store;
-mod voice_profiles;
 mod summary;
 mod summary_engine;
+#[cfg(test)]
+mod summary_real_ollama_tests;
 mod summary_store;
 mod summary_types;
 mod system_output;
@@ -64,6 +68,9 @@ mod transcription;
 mod transcription_engine;
 mod transcription_store;
 mod transcription_types;
+mod voice_profiles;
+#[cfg(test)]
+mod voice_profiles_real_tests;
 
 use appflowy::{AppFlowyService, AppFlowySettings, AppFlowyState};
 use appflowy_client::Workspace as AppFlowyWorkspace;
@@ -71,6 +78,9 @@ use appflowy_client::Workspace as AppFlowyWorkspace;
 use appflowy_credentials::OsCredentialStore;
 use appflowy_credentials::SharedCredentialStore;
 use appflowy_store::AppFlowyStore;
+use atomik_kb::{AtomikKbService, AtomikKbSettings, AtomikKbState};
+use atomik_kb_store::AtomikKbStore;
+use audio_compress::{CompressionService, CompressionSettings};
 use audio_compress_store::CompressionStore;
 use audio_devices::{
     AudioDeviceDirection, AudioDeviceInventory, AudioInventorySnapshot, CpalAudioDeviceInventory,
@@ -78,11 +88,9 @@ use audio_devices::{
 use detection::{
     DetectionService, DetectionSettings, MeetingDetector, RecordingBoundary, SignalSnapshot,
 };
-use audio_compress::{CompressionService, CompressionSettings};
 use diarization::DiarizationService;
 use diarization_store::DiarizationStore;
 use hotkey::HotkeyStatus;
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use meeting_signals::{MeetingDetector as NativeDetectorTrait, NativeMeetingDetector};
 use recording::{RecordingService, RecordingState};
 use recording_paths::{library_directory, resolved_recording_directory};
@@ -105,6 +113,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_single_instance::init as single_instance;
 use transcription::{try_processing_guard, TranscriptionService, TranscriptionSettings};
 use transcription_store::TranscriptionStore;
@@ -245,7 +254,10 @@ fn app_settings(app: &tauri::AppHandle) -> Result<Settings, String> {
 /// to confirm a directory is actually writable by this process (permissions
 /// can look fine and still refuse writes, e.g. a read-only network share).
 fn probe_writable(dir: &std::path::Path) -> Result<(), String> {
-    let probe = dir.join(format!(".meeting-recorder-write-check-{}", uuid::Uuid::new_v4()));
+    let probe = dir.join(format!(
+        ".meeting-recorder-write-check-{}",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::write(&probe, b"ok").map_err(|e| format!("not writable: {e}"))?;
     let _ = std::fs::remove_file(&probe);
     Ok(())
@@ -290,7 +302,12 @@ fn extra_library_roots(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
         .into_iter()
         .map(std::path::PathBuf::from)
         .collect();
-    roots.extend(settings.legacy_library_roots.into_iter().map(std::path::PathBuf::from));
+    roots.extend(
+        settings
+            .legacy_library_roots
+            .into_iter()
+            .map(std::path::PathBuf::from),
+    );
     roots
 }
 /// The library ("meetings") folder used for display and "Open recordings
@@ -338,9 +355,7 @@ fn validate_new_recordings_folder_path(raw: &str) -> Result<std::path::PathBuf, 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(install_dir) = exe.parent().and_then(|p| std::fs::canonicalize(p).ok()) {
             if canonical.starts_with(&install_dir) {
-                return Err(
-                    "Choose a folder outside the application's install directory.".into(),
-                );
+                return Err("Choose a folder outside the application's install directory.".into());
             }
         }
     }
@@ -372,11 +387,17 @@ impl MeetingDetector for NativeDetectorAdapter {
             let detail = match &observation.title {
                 Some(title) => format!(
                     "The browser extension reports an active {} call: \"{title}\".",
-                    observation.platform.provider_key().trim_start_matches("browser_")
+                    observation
+                        .platform
+                        .provider_key()
+                        .trim_start_matches("browser_")
                 ),
                 None => format!(
                     "The browser extension reports an active {} call.",
-                    observation.platform.provider_key().trim_start_matches("browser_")
+                    observation
+                        .platform
+                        .provider_key()
+                        .trim_start_matches("browser_")
                 ),
             };
             return SignalSnapshot {
@@ -463,6 +484,41 @@ fn get_hotkey_status(status: State<'_, Mutex<HotkeyStatus>>) -> Result<HotkeySta
     status.lock().map_err(app_error).map(|s| s.clone())
 }
 struct AppRecordingBoundary(tauri::AppHandle);
+impl AppRecordingBoundary {
+    /// Windows can re-register a device under a new endpoint ID (another USB
+    /// port, a driver reinstall), leaving the saved ID dangling. Rebind such
+    /// sources to the live device of the same name and persist the new IDs so
+    /// Settings shows them too. Best effort: on any failure the saved sources
+    /// are used unchanged and capture reports the missing device as before.
+    fn rebind_missing_sources(
+        &self,
+        sources: Vec<AudioSourceSelection>,
+    ) -> Vec<AudioSourceSelection> {
+        let inventory = {
+            let gate = self.0.state::<AudioScanGate>();
+            let _guard = gate
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            CpalAudioDeviceInventory.snapshot()
+        };
+        let Some(rebound) = rebind_by_name(&inventory, &sources) else {
+            return sources;
+        };
+        if let Ok(mut storage) = self.0.state::<Mutex<SettingsStorage>>().lock() {
+            if let Ok(current) = storage.load() {
+                // Only persist over the exact selection we rebound, never a newer save.
+                if current.audio_sources == sources {
+                    let _ = storage.save(Settings {
+                        audio_sources: rebound.clone(),
+                        ..current
+                    });
+                }
+            }
+        }
+        rebound
+    }
+}
 impl RecordingBoundary for AppRecordingBoundary {
     fn active_id(&self) -> Option<String> {
         self.0
@@ -480,6 +536,7 @@ impl RecordingBoundary for AppRecordingBoundary {
             .load()
             .map_err(app_error)?
             .audio_sources;
+        let sources = self.rebind_missing_sources(sources);
         self.0.state::<RecordingService>().start(sources)?;
         self.active_id().ok_or_else(|| {
             "Recording stopped before startup could be confirmed; check recent recordings.".into()
@@ -510,12 +567,17 @@ fn save_settings(
     // dedicated commands run.
     let mut storage = store.lock().map_err(app_error)?;
     let existing = storage.load().map_err(app_error)?;
-    let saved = storage.save(Settings {
-        audio_sources: existing.audio_sources,
-        recordings_folder: existing.recordings_folder,
-        legacy_library_roots: existing.legacy_library_roots,
-        ..settings
-    }.normalize()).map_err(app_error)?;
+    let saved = storage
+        .save(
+            Settings {
+                audio_sources: existing.audio_sources,
+                recordings_folder: existing.recordings_folder,
+                legacy_library_roots: existing.legacy_library_roots,
+                ..settings
+            }
+            .normalize(),
+        )
+        .map_err(app_error)?;
     // A user who just enabled summaries, or fixed the URL/model, expects a
     // waiting job to resume immediately rather than sit out its backoff.
     let _ = summary.wake_waiting();
@@ -592,6 +654,72 @@ fn normalize_selection(
         }
     }
     Ok(sources)
+}
+/// Strips Windows' instance prefix ("Speakers (2- Focusrite USB Audio)" ->
+/// "Speakers (Focusrite USB Audio)"), which it adds at the start of the name
+/// or of the parenthesized driver name when a device is registered again.
+fn device_name_key(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    let mut at_boundary = true;
+    while !rest.is_empty() {
+        if at_boundary {
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits > 0 && rest[digits..].starts_with("- ") {
+                rest = &rest[digits + 2..];
+            }
+        }
+        let Some(c) = rest.chars().next() else { break };
+        out.push(c);
+        at_boundary = c == '(';
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+/// Returns the selection with each missing source replaced by the single live,
+/// selectable device of the same direction and name key, or `None` when
+/// nothing changed. Ambiguous matches and devices already selected are skipped.
+fn rebind_by_name(
+    inventory: &AudioInventorySnapshot,
+    sources: &[AudioSourceSelection],
+) -> Option<Vec<AudioSourceSelection>> {
+    let live = |id: &str| {
+        inventory
+            .devices
+            .iter()
+            .any(|device| device.id.as_deref() == Some(id))
+    };
+    let mut rebound = sources.to_vec();
+    let mut changed = false;
+    for index in 0..rebound.len() {
+        if live(&rebound[index].id) {
+            continue;
+        }
+        let key = device_name_key(&rebound[index].name);
+        let direction = match rebound[index].direction {
+            AudioSourceDirection::Input => AudioDeviceDirection::Input,
+            AudioSourceDirection::Output => AudioDeviceDirection::Output,
+        };
+        let mut candidates = inventory.devices.iter().filter(|device| {
+            device.selectable
+                && device.direction == direction
+                && device_name_key(&device.name) == key
+                && device
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| !rebound.iter().any(|source| source.id == id))
+        });
+        let (Some(device), None) = (candidates.next(), candidates.next()) else {
+            continue;
+        };
+        rebound[index] = AudioSourceSelection {
+            id: device.id.clone()?,
+            name: device.name.clone(),
+            direction: rebound[index].direction.clone(),
+        };
+        changed = true;
+    }
+    changed.then_some(rebound)
 }
 #[tauri::command]
 async fn get_app_state(
@@ -822,7 +950,9 @@ async fn delete_recordings_from_disk(
         let summary = SummaryStore::open(&root.join("summary.sqlite3"))?;
         let compression = CompressionStore::open(&root.join("compression.sqlite3"))?;
         let appflowy = AppFlowyStore::open(&root.join("appflowy.sqlite3"))?;
-        let speaker_names = speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
+        let atomik_kb = AtomikKbStore::open(&root.join("atomik_kb.sqlite3"))?;
+        let speaker_names =
+            speaker_names::SpeakerNameStore::open(speaker_names::store_path(&root))?;
         let active_recording_id = service.state().active.map(|r| r.recording_id);
         let stores = recording_delete::DeleteStores {
             recordings: &recordings_store,
@@ -831,6 +961,7 @@ async fn delete_recordings_from_disk(
             summary: &summary,
             compression: &compression,
             appflowy: &appflowy,
+            atomik_kb: &atomik_kb,
             speaker_names: &speaker_names,
         };
         let summary = recording_delete::delete_recordings_from_disk(
@@ -1141,8 +1272,7 @@ async fn speaker_names_changed_since_summary(
         if summary::read_completed_summary(&root, &extra, &recording_id).is_none() {
             return Ok(false);
         }
-        let Ok(directory) = transcription::recording_directory(&root, &extra, &recording_id)
-        else {
+        let Ok(directory) = transcription::recording_directory(&root, &extra, &recording_id) else {
             return Ok(false);
         };
         let Ok(summary_json) = transcription::output_path(&directory, "summary.json") else {
@@ -1193,10 +1323,15 @@ async fn list_voice_profiles(app: tauri::AppHandle) -> Result<Vec<VoiceProfileIn
     .map_err(app_error)?
 }
 #[tauri::command]
-async fn rename_voice_profile(id: String, name: String, app: tauri::AppHandle) -> Result<(), String> {
+async fn rename_voice_profile(
+    id: String,
+    name: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = recordings_dir(&app)?;
-        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?.rename(&id, &name)
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?
+            .rename(&id, &name)
     })
     .await
     .map_err(app_error)?
@@ -1286,7 +1421,11 @@ async fn reidentify_speakers(
         app.state::<SearchService>().reindex(&recording_id);
         Ok(applied
             .into_iter()
-            .map(|(speaker, name, score)| ReidentifyOutcome { speaker, name, score })
+            .map(|(speaker, name, score)| ReidentifyOutcome {
+                speaker,
+                name,
+                score,
+            })
             .collect())
     })
     .await
@@ -1317,11 +1456,9 @@ async fn test_ollama_connection(ollama_url: String) -> Result<(), String> {
 }
 #[tauri::command]
 async fn retry_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<SummaryService>().retry(&recording_id)
-    })
-    .await
-    .map_err(app_error)?
+    tauri::async_runtime::spawn_blocking(move || app.state::<SummaryService>().retry(&recording_id))
+        .await
+        .map_err(app_error)?
 }
 #[tauri::command]
 async fn regenerate_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
@@ -1338,11 +1475,9 @@ async fn regenerate_summary(recording_id: String, app: tauri::AppHandle) -> Resu
 /// meetings the automatic pipeline never queued.
 #[tauri::command]
 async fn queue_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<SummaryService>().queue(&recording_id)
-    })
-    .await
-    .map_err(app_error)?
+    tauri::async_runtime::spawn_blocking(move || app.state::<SummaryService>().queue(&recording_id))
+        .await
+        .map_err(app_error)?
 }
 #[tauri::command]
 async fn open_summary(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
@@ -1366,10 +1501,16 @@ async fn appflowy_request_otp(email: String, app: tauri::AppHandle) -> Result<()
         .map_err(app_error)?
 }
 #[tauri::command]
-async fn appflowy_verify_otp(email: String, code: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().verify_otp(&email, &code))
-        .await
-        .map_err(app_error)?
+async fn appflowy_verify_otp(
+    email: String,
+    code: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppFlowyService>().verify_otp(&email, &code)
+    })
+    .await
+    .map_err(app_error)?
 }
 #[tauri::command]
 async fn appflowy_sign_out(app: tauri::AppHandle) -> Result<(), String> {
@@ -1385,24 +1526,37 @@ async fn appflowy_list_workspaces(app: tauri::AppHandle) -> Result<Vec<AppFlowyW
 }
 #[tauri::command]
 async fn appflowy_export_now(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().export_now(&recording_id))
-        .await
-        .map_err(app_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppFlowyService>().export_now(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
 }
 #[tauri::command]
-async fn appflowy_export_again(recording_id: String, confirm: bool, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().export_again(&recording_id, confirm))
-        .await
-        .map_err(app_error)?
+async fn appflowy_export_again(
+    recording_id: String,
+    confirm: bool,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppFlowyService>()
+            .export_again(&recording_id, confirm)
+    })
+    .await
+    .map_err(app_error)?
 }
 #[tauri::command]
 async fn appflowy_retry(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().retry(&recording_id))
-        .await
-        .map_err(app_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppFlowyService>().retry(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
 }
 #[tauri::command]
-async fn appflowy_list_destinations(app: tauri::AppHandle) -> Result<Vec<appflowy::Destination>, String> {
+async fn appflowy_list_destinations(
+    app: tauri::AppHandle,
+) -> Result<Vec<appflowy::Destination>, String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().list_destinations())
         .await
         .map_err(app_error)?
@@ -1410,6 +1564,75 @@ async fn appflowy_list_destinations(app: tauri::AppHandle) -> Result<Vec<appflow
 #[tauri::command]
 async fn appflowy_list_pages(app: tauri::AppHandle) -> Result<Vec<appflowy::PageInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<AppFlowyService>().list_pages())
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn get_atomik_kb_state(app: tauri::AppHandle) -> Result<AtomikKbState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AtomikKbService>().state())
+        .await
+        .map_err(app_error)
+}
+/// The token goes straight from the settings field into the OS credential
+/// store (shape-checked first); it is never put in the settings file, a log,
+/// or any state sent back to the UI.
+#[tauri::command]
+async fn atomik_kb_save_token(token: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AtomikKbService>().save_token(&token))
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_clear_token(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AtomikKbService>().clear_token())
+        .await
+        .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_test_connection(
+    port: Option<u16>,
+    space_name: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<atomik_kb::ConnectionTest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AtomikKbService>()
+            .test_connection(port, space_name)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_export_now(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AtomikKbService>().export_now(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_export_again(
+    recording_id: String,
+    confirm: bool,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AtomikKbService>()
+            .export_again(&recording_id, confirm)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_retry(recording_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AtomikKbService>().retry(&recording_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn atomik_kb_list_pages(app: tauri::AppHandle) -> Result<Vec<atomik_kb::PageInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AtomikKbService>().list_pages())
         .await
         .map_err(app_error)?
 }
@@ -1606,7 +1829,10 @@ fn browser_extension_status(
         connected: bridge.has_ever_connected(),
         last_message_seconds_ago: bridge.last_message_at().map(|at| at.elapsed().as_secs()),
         registered: !browsers.is_empty(),
-        browsers: browsers.into_iter().map(|b| b.label().to_string()).collect(),
+        browsers: browsers
+            .into_iter()
+            .map(|b| b.label().to_string())
+            .collect(),
     })
 }
 #[tauri::command]
@@ -1844,6 +2070,7 @@ fn request_exit(app: &tauri::AppHandle, service: RecordingService, gate: &ExitGa
             .and_then(|()| app.state::<DiarizationService>().shutdown())
             .and_then(|()| app.state::<SummaryService>().shutdown())
             .and_then(|()| app.state::<AppFlowyService>().shutdown())
+            .and_then(|()| app.state::<AtomikKbService>().shutdown())
             .and_then(|()| app.state::<CompressionService>().shutdown());
         app.state::<SearchService>().shutdown();
         match result {
@@ -1995,10 +2222,7 @@ fn install_tray(app: &tauri::App) -> Result<TrayControls, tauri::Error> {
 /// `DetectionService` methods the Start/Stop buttons and tray menu use, so
 /// behavior (including the "already in progress"/"no recording" guards) is
 /// identical regardless of trigger.
-fn handle_hotkey_event(
-    app: &tauri::AppHandle,
-    event: tauri_plugin_global_shortcut::ShortcutEvent,
-) {
+fn handle_hotkey_event(app: &tauri::AppHandle, event: tauri_plugin_global_shortcut::ShortcutEvent) {
     if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
         return;
     }
@@ -2117,6 +2341,21 @@ pub fn run() {
             extra_library_roots: extra_library_roots(&appflowy_app),
         })
     }), appflowy_credentials));
+    let atomik_kb_app = app.handle().clone();
+    let atomik_kb_credentials: SharedCredentialStore = Arc::new(atomik_kb_credentials::OsCredentialStore);
+    app.manage(AtomikKbService::new(recording_dir.clone(), Arc::new(move || {
+        let settings = atomik_kb_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
+        Ok(AtomikKbSettings {
+            enabled: settings.atomik_kb_enabled,
+            auto_export: settings.atomik_kb_auto_export,
+            port: settings.atomik_kb_port,
+            space_name: settings.atomik_kb_space_name,
+            diarization_enabled: settings.diarization_enabled,
+            summary_enabled: settings.summary_enabled,
+            local_speaker_name: settings.local_speaker_name,
+            extra_library_roots: extra_library_roots(&atomik_kb_app),
+        })
+    }), atomik_kb_credentials));
     let compress_app = app.handle().clone();
     app.manage(CompressionService::new(recording_dir.clone(), Arc::new(move || {
         let settings = compress_app.state::<Mutex<SettingsStorage>>().lock().map_err(app_error)?.load().map_err(app_error)?;
@@ -2150,7 +2389,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status, list_speaker_labels, set_speaker_name, delete_speaker_name, speaker_names_changed_since_summary, list_voice_profiles, rename_voice_profile, delete_voice_profile, forget_all_voice_profiles, reidentify_speakers]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_atomik_kb_state, atomik_kb_save_token, atomik_kb_clear_token, atomik_kb_test_connection, atomik_kb_export_now, atomik_kb_export_again, atomik_kb_retry, atomik_kb_list_pages, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status, list_speaker_labels, set_speaker_name, delete_speaker_name, speaker_names_changed_since_summary, list_voice_profiles, rename_voice_profile, delete_voice_profile, forget_all_voice_profiles, reidentify_speakers]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();
@@ -2189,6 +2428,130 @@ mod tests {
                 .unwrap();
         assert_eq!(selected[0].id, "gone");
         assert_eq!(selected[1].name, "Desk microphone");
+    }
+    fn device(id: &str, name: &str, direction: AudioDeviceDirection) -> audio_devices::AudioDevice {
+        audio_devices::AudioDevice {
+            id: Some(id.into()),
+            name: name.into(),
+            direction,
+            is_default: false,
+            default_format: None,
+            selectable: true,
+            unavailable_reason: None,
+        }
+    }
+    fn source(id: &str, name: &str, direction: AudioSourceDirection) -> AudioSourceSelection {
+        AudioSourceSelection {
+            id: id.into(),
+            name: name.into(),
+            direction,
+        }
+    }
+    #[test]
+    fn device_name_key_strips_windows_instance_prefix() {
+        assert_eq!(
+            device_name_key("Speakers (2- Focusrite USB Audio)"),
+            "Speakers (Focusrite USB Audio)"
+        );
+        assert_eq!(device_name_key("12- Headset"), "Headset");
+        assert_eq!(
+            device_name_key("Analogue 1 + 2 (Focusrite)"),
+            "Analogue 1 + 2 (Focusrite)"
+        );
+        assert_eq!(device_name_key("Mic (2-channel)"), "Mic (2-channel)");
+    }
+    #[test]
+    fn missing_source_rebinds_to_renamed_live_device_of_same_direction() {
+        let inventory = AudioInventorySnapshot {
+            backend: "test".into(),
+            devices: vec![
+                device(
+                    "new-in:input",
+                    "Analogue 1 + 2 (Focusrite USB Audio)",
+                    AudioDeviceDirection::Input,
+                ),
+                device(
+                    "new-out:output",
+                    "Speakers (Focusrite USB Audio)",
+                    AudioDeviceDirection::Output,
+                ),
+            ],
+            errors: vec![],
+        };
+        let saved = vec![
+            source(
+                "old-out:output",
+                "Speakers (2- Focusrite USB Audio)",
+                AudioSourceDirection::Output,
+            ),
+            source(
+                "new-in:input",
+                "Analogue 1 + 2 (Focusrite USB Audio)",
+                AudioSourceDirection::Input,
+            ),
+        ];
+        let rebound = rebind_by_name(&inventory, &saved).unwrap();
+        assert_eq!(rebound[0].id, "new-out:output");
+        assert_eq!(rebound[0].name, "Speakers (Focusrite USB Audio)");
+        assert_eq!(rebound[1], saved[1]);
+        assert!(rebind_by_name(&inventory, &rebound).is_none());
+    }
+    #[test]
+    fn missing_source_is_left_alone_when_match_is_ambiguous_wrong_direction_or_taken() {
+        let two = AudioInventorySnapshot {
+            backend: "test".into(),
+            devices: vec![
+                device(
+                    "a:output",
+                    "Speakers (Focusrite)",
+                    AudioDeviceDirection::Output,
+                ),
+                device(
+                    "b:output",
+                    "Speakers (3- Focusrite)",
+                    AudioDeviceDirection::Output,
+                ),
+            ],
+            errors: vec![],
+        };
+        let gone = vec![source(
+            "gone:output",
+            "Speakers (2- Focusrite)",
+            AudioSourceDirection::Output,
+        )];
+        assert!(rebind_by_name(&two, &gone).is_none());
+        let input_only = AudioInventorySnapshot {
+            backend: "test".into(),
+            devices: vec![device(
+                "a:input",
+                "Speakers (Focusrite)",
+                AudioDeviceDirection::Input,
+            )],
+            errors: vec![],
+        };
+        assert!(rebind_by_name(&input_only, &gone).is_none());
+        let one = AudioInventorySnapshot {
+            backend: "test".into(),
+            devices: vec![device(
+                "a:output",
+                "Speakers (Focusrite)",
+                AudioDeviceDirection::Output,
+            )],
+            errors: vec![],
+        };
+        let taken = vec![
+            source(
+                "a:output",
+                "Speakers (Focusrite)",
+                AudioSourceDirection::Output,
+            ),
+            source(
+                "gone:output",
+                "Speakers (2- Focusrite)",
+                AudioSourceDirection::Output,
+            ),
+        ];
+        assert!(rebind_by_name(&one, &taken).is_none());
     }
     #[test]
     fn exit_gate_allows_one_finalization_attempt_and_can_retry_after_error() {
@@ -2263,7 +2626,10 @@ mod tests {
     }
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("meeting-lib-folder-test-{name}-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "meeting-lib-folder-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -2342,7 +2708,10 @@ mod tests {
         for i in 0..(store::MAX_LEGACY_LIBRARY_ROOTS + 3) {
             record_previous_library_root(&mut settings, format!("root-{i}"));
         }
-        assert_eq!(settings.legacy_library_roots.len(), store::MAX_LEGACY_LIBRARY_ROOTS);
+        assert_eq!(
+            settings.legacy_library_roots.len(),
+            store::MAX_LEGACY_LIBRARY_ROOTS
+        );
         // Most recent first.
         assert_eq!(
             settings.legacy_library_roots[0],
@@ -2352,7 +2721,11 @@ mod tests {
         record_previous_library_root(&mut settings, "root-5".into());
         assert_eq!(settings.legacy_library_roots[0], "root-5");
         assert_eq!(
-            settings.legacy_library_roots.iter().filter(|r| *r == "root-5").count(),
+            settings
+                .legacy_library_roots
+                .iter()
+                .filter(|r| *r == "root-5")
+                .count(),
             1
         );
     }
@@ -2416,12 +2789,27 @@ mod tests {
                 }
                 let s = NativeDetectorTrait::sample(&mut self.0);
                 if s.supported {
-                    return SignalSnapshot { supported: s.supported, meeting: s.meeting, detail: s.detail, error: s.error };
+                    return SignalSnapshot {
+                        supported: s.supported,
+                        meeting: s.meeting,
+                        detail: s.detail,
+                        error: s.error,
+                    };
                 }
                 if self.1.has_ever_connected() {
-                    return SignalSnapshot { supported: true, meeting: None, detail: "No supported meeting hint from the browser extension.".into(), error: None };
+                    return SignalSnapshot {
+                        supported: true,
+                        meeting: None,
+                        detail: "No supported meeting hint from the browser extension.".into(),
+                        error: None,
+                    };
                 }
-                SignalSnapshot { supported: s.supported, meeting: s.meeting, detail: s.detail, error: s.error }
+                SignalSnapshot {
+                    supported: s.supported,
+                    meeting: s.meeting,
+                    detail: s.detail,
+                    error: s.error,
+                }
             }
         }
         let mut adapter = Adapter(unsupported_native(), bridge);
@@ -2443,7 +2831,8 @@ mod tests {
         });
         // Simulate the heartbeat going stale by checking well past STALE_AFTER
         // directly against the shared state (the same check the adapter runs).
-        let far_future = std::time::Instant::now() + browser_bridge::STALE_AFTER + Duration::from_secs(5);
+        let far_future =
+            std::time::Instant::now() + browser_bridge::STALE_AFTER + Duration::from_secs(5);
         assert!(bridge.current_in_call(far_future).is_none());
     }
 
@@ -2456,5 +2845,4 @@ mod tests {
             assert!(!snapshot.supported);
         }
     }
-
 }

@@ -84,7 +84,9 @@ impl DelayEstimator {
         if mic.is_empty() || reference.is_empty() || sample_rate == 0 {
             return (vec![0.0; mic.len()], 0.0);
         }
-        let global_shift = self.estimate(mic, reference, sample_rate, 0, 0.0, GLOBAL_SEARCH_MS).0;
+        let global_shift = self
+            .estimate(mic, reference, sample_rate, 0, 0.0, GLOBAL_SEARCH_MS)
+            .0;
         let block_len = ((sample_rate as f32 * BLOCK_SECONDS) as usize).max(1);
 
         // Pass 1: one delay estimate anchored at the start of each block.
@@ -204,7 +206,10 @@ impl DelayEstimator {
         // max_shift) + lag + i. We want that to equal probe_start + i - d,
         // so d = center_shift + max_shift - lag (lag now including its
         // sub-sample fractional correction).
-        (center_shift_i as f64 + max_shift as f64 - (lag as f64 + f64::from(frac)), score)
+        (
+            center_shift_i as f64 + max_shift as f64 - (lag as f64 + f64::from(frac)),
+            score,
+        )
     }
 
     /// Full (non-circular-wraparound) GCC-PHAT cross-correlation of `sig`
@@ -227,8 +232,10 @@ impl DelayEstimator {
         b[..sig.len()].copy_from_slice(sig);
         let mut fa = r2c.make_output_vec();
         let mut fb = r2c.make_output_vec();
-        r2c.process(&mut a, &mut fa).expect("fixed-size forward FFT");
-        r2c.process(&mut b, &mut fb).expect("fixed-size forward FFT");
+        r2c.process(&mut a, &mut fa)
+            .expect("fixed-size forward FFT");
+        r2c.process(&mut b, &mut fb)
+            .expect("fixed-size forward FFT");
         let mut cross: Vec<Complex32> = fa
             .iter()
             .zip(fb.iter())
@@ -242,8 +249,7 @@ impl DelayEstimator {
         // the divisor at a small fraction of the spectrum's own mean
         // magnitude instead of an absolute epsilon, a standard regularized
         // PHAT variant, so quiet bins are suppressed rather than amplified.
-        let mean_mag: f32 =
-            cross.iter().map(|c| c.norm()).sum::<f32>() / cross.len().max(1) as f32;
+        let mean_mag: f32 = cross.iter().map(|c| c.norm()).sum::<f32>() / cross.len().max(1) as f32;
         let floor = (mean_mag * 1e-2).max(1e-12);
         for c in cross.iter_mut() {
             let mag = c.norm();
@@ -257,10 +263,14 @@ impl DelayEstimator {
         // and global searches (see `REACQUIRE_SCORE_FLOOR`).
         let norm = 1.0 / fft_len as f32;
         let valid_len = (ref_snip.len() - sig.len() + 1).min(corr.len());
-        let (best_index, best_value) = corr[..valid_len]
-            .iter()
-            .enumerate()
-            .fold((0usize, f32::MIN), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
+        let (best_index, best_value) =
+            corr[..valid_len]
+                .iter()
+                .enumerate()
+                .fold(
+                    (0usize, f32::MIN),
+                    |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc },
+                );
         // Parabolic (quadratic) interpolation of the peak against its two
         // immediate neighbors: the standard sub-sample refinement for a
         // discrete correlation peak, only defined (and only trustworthy) when

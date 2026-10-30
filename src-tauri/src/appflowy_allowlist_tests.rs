@@ -15,7 +15,7 @@ fn every_mutating_or_deleting_page_view_route_is_refused() {
     // real AppFlowy-Cloud routes are POST/PATCH; GET is checked too as a
     // defence against a future route-table typo).
     for path in [
-        "/api/workspace/w1/page-view/v1",       // PATCH UpdatePageParams in the real API
+        "/api/workspace/w1/page-view/v1", // PATCH UpdatePageParams in the real API
         "/api/workspace/w1/page-view/v1/update-name",
         "/api/workspace/w1/page-view/v1/update-icon",
         "/api/workspace/w1/page-view/v1/append-block",
@@ -24,9 +24,15 @@ fn every_mutating_or_deleting_page_view_route_is_refused() {
         "/api/workspace/w1/page-view/v1/move",
         "/api/workspace/w1/page-view/v1/trash",
     ] {
-        assert!(check(Method::Post, path).is_err(), "expected POST {path} to be refused");
+        assert!(
+            check(Method::Post, path).is_err(),
+            "expected POST {path} to be refused"
+        );
         if path != "/api/workspace/w1/page-view/v1" {
-            assert!(check(Method::Get, path).is_err(), "expected GET {path} to be refused");
+            assert!(
+                check(Method::Get, path).is_err(),
+                "expected GET {path} to be refused"
+            );
         }
     }
     // Listing (not fetching one page) or creating without a body-less name
@@ -92,7 +98,10 @@ fn allowed_routes_are_exactly_the_documented_set() {
     // the table holds *exactly* these seven and nothing else snuck in (e.g.
     // while adding the space-resolution/destination-picker/verification work
     // in this change, none of which needed a new AppFlowy Cloud route).
-    assert_eq!(ALLOWED_COUNT, 7, "the create-only allowlist must still hold exactly the seven documented routes");
+    assert_eq!(
+        ALLOWED_COUNT, 7,
+        "the create-only allowlist must still hold exactly the seven documented routes"
+    );
 }
 
 #[test]

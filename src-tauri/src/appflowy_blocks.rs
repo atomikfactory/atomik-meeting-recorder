@@ -97,8 +97,16 @@ fn summary_blocks(summary: &SummaryOutput) -> Vec<Value> {
     if !summary.action_items.is_empty() {
         blocks.push(heading(3, "Action items"));
         blocks.extend(summary.action_items.iter().map(|item| {
-            let owner = item.owner.as_deref().map(|o| format!(" — {o}")).unwrap_or_default();
-            let due = item.due.as_deref().map(|d| format!(" (due {d})")).unwrap_or_default();
+            let owner = item
+                .owner
+                .as_deref()
+                .map(|o| format!(" — {o}"))
+                .unwrap_or_default();
+            let due = item
+                .due
+                .as_deref()
+                .map(|d| format!(" (due {d})"))
+                .unwrap_or_default();
             bulleted(&format!("{}{owner}{due}", item.task))
         }));
     }
@@ -179,10 +187,20 @@ pub fn build_fallback_meeting_block(meeting: &MeetingExportData) -> Value {
     };
     let mut transcript_children: Vec<Value> = turns
         .iter()
-        .map(|turn| quote(&format!("[{}] {}: {}", timestamp_label(turn.start_ms), turn.speaker_label, turn.text)))
+        .map(|turn| {
+            quote(&format!(
+                "[{}] {}: {}",
+                timestamp_label(turn.start_ms),
+                turn.speaker_label,
+                turn.text
+            ))
+        })
         .collect();
     if truncated {
-        transcript_children.push(paragraph(&truncation_note(turns.len(), meeting.turns.len())));
+        transcript_children.push(paragraph(&truncation_note(
+            turns.len(),
+            meeting.turns.len(),
+        )));
     }
     json!([
         heading(1, &meeting.title),

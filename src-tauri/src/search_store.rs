@@ -294,8 +294,8 @@ impl SearchStore {
         // Enough candidates to have a good chance of filling `limit` distinct
         // meetings even if the best-ranked rows cluster into few meetings,
         // capped so a very common term still costs a bounded amount of work.
-        let candidate_pool = (limit.saturating_mul(hits_per_meeting).saturating_mul(8))
-            .clamp(200, 5000) as i64;
+        let candidate_pool =
+            (limit.saturating_mul(hits_per_meeting).saturating_mul(8)).clamp(200, 5000) as i64;
         let mut candidates_stmt = c
             .prepare(
                 "SELECT rowid, recording_id FROM search_fts WHERE search_fts MATCH ?1
@@ -317,10 +317,12 @@ impl SearchStore {
         let mut rowids_by_meeting: std::collections::HashMap<String, Vec<i64>> =
             std::collections::HashMap::new();
         for (rowid, recording_id) in candidates {
-            let entry = rowids_by_meeting.entry(recording_id.clone()).or_insert_with(|| {
-                order.push(recording_id);
-                Vec::new()
-            });
+            let entry = rowids_by_meeting
+                .entry(recording_id.clone())
+                .or_insert_with(|| {
+                    order.push(recording_id);
+                    Vec::new()
+                });
             if entry.len() < hits_per_meeting {
                 entry.push(rowid);
             }
@@ -337,7 +339,11 @@ impl SearchStore {
         // Phase 2: only now pay for `snippet()`, and only for rows that will
         // actually be shown. Snippet column index 6 is `text` (0-based
         // across the 7 declared columns).
-        let placeholders = chosen_rowids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = chosen_rowids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT s.rowid, s.recording_id, st.title, st.started_at, s.kind, s.seq, s.start_ms, s.end_ms, s.speaker,
                     snippet(search_fts, 6, '{HIGHLIGHT_START}', '{HIGHLIGHT_END}', '…', 12) AS snip
@@ -346,8 +352,10 @@ impl SearchStore {
              WHERE s.rowid IN ({placeholders})"
         );
         let mut detail_stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
-        let params_dyn: Vec<&dyn rusqlite::ToSql> =
-            chosen_rowids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params_dyn: Vec<&dyn rusqlite::ToSql> = chosen_rowids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         let mut by_rowid: std::collections::HashMap<i64, (String, String, i64, SearchHit)> =
             std::collections::HashMap::new();
         let rows = detail_stmt

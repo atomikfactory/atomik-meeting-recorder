@@ -32,7 +32,8 @@ struct FakeRegistry {
 }
 impl RegistryWriter for FakeRegistry {
     fn set_default_value(&mut self, subkey: &str, manifest_path: &str) -> Result<(), String> {
-        self.values.insert(subkey.to_string(), manifest_path.to_string());
+        self.values
+            .insert(subkey.to_string(), manifest_path.to_string());
         Ok(())
     }
     fn delete_key(&mut self, subkey: &str) -> Result<(), String> {
@@ -49,7 +50,13 @@ fn home() -> PathBuf {
 fn install_writes_a_manifest_for_every_browser() {
     let mut fs = FakeFs::default();
     let mut registry = FakeRegistry::default();
-    let written = install(&mut fs, &mut registry, Path::new("/opt/meeting-recorder"), &home()).unwrap();
+    let written = install(
+        &mut fs,
+        &mut registry,
+        Path::new("/opt/meeting-recorder"),
+        &home(),
+    )
+    .unwrap();
     assert_eq!(written.len(), Browser::ALL.len());
     for path in &written {
         assert!(fs.exists(path));
@@ -101,7 +108,10 @@ fn every_manifest_points_at_the_given_executable_path() {
     let written = install(&mut fs, &mut registry, exe, &home()).unwrap();
     for path in &written {
         let body = String::from_utf8(fs.files.get(path).unwrap().clone()).unwrap();
-        assert!(body.contains("meeting-recorder"), "manifest missing exe path: {body}");
+        assert!(
+            body.contains("meeting-recorder"),
+            "manifest missing exe path: {body}"
+        );
     }
 }
 

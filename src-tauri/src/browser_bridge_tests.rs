@@ -206,7 +206,8 @@ fn generated_socket_paths_stay_under_the_sun_path_limit() {
     // `default_socket_dir()` takes on macOS, where `XDG_RUNTIME_DIR` is
     // never set -- rather than mutating the process-wide `XDG_RUNTIME_DIR`
     // env var, which parallel test threads also read.
-    let dir = short_private_socket_dir().expect("short_private_socket_dir should succeed under /tmp");
+    let dir =
+        short_private_socket_dir().expect("short_private_socket_dir should succeed under /tmp");
     let path = dir.join(format!("{}.sock", crate::browser_bridge_ipc::ENDPOINT_NAME));
     let len = path.as_os_str().len();
     assert!(
@@ -219,14 +220,14 @@ fn generated_socket_paths_stay_under_the_sun_path_limit() {
 #[test]
 fn ensure_private_dir_creates_and_accepts_a_fresh_0700_directory() {
     let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!(
-        "amr-test-fresh-{}-{}",
-        std::process::id(),
-        line!()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("amr-test-fresh-{}-{}", std::process::id(), line!()));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(ensure_private_dir(&dir, uid));
-    assert!(ensure_private_dir(&dir, uid), "re-checking an already-ours dir must still accept it");
+    assert!(
+        ensure_private_dir(&dir, uid),
+        "re-checking an already-ours dir must still accept it"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

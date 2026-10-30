@@ -26,10 +26,7 @@ fn unique_name() -> String {
 /// itself is always short on both platforms.
 #[cfg(not(windows))]
 fn short_test_dir(label: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(
-        "/tmp/amr-t-{label}-{}",
-        std::process::id()
-    ))
+    std::path::PathBuf::from(format!("/tmp/amr-t-{label}-{}", std::process::id()))
 }
 
 fn wait_for<F: Fn() -> bool>(condition: F) -> bool {

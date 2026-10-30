@@ -490,8 +490,10 @@ mod recognition {
         /// constant-amplitude audio: the first half is a positive-amplitude
         /// tone ("speaker 1"), the second half negative ("speaker 2").
         fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("meeting-speakers-recognition-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!(
+                "meeting-speakers-recognition-{}",
+                uuid::Uuid::new_v4()
+            ));
             fs::create_dir_all(&root).unwrap();
             let root = root.canonicalize().unwrap();
             let store = DiarizationStore::open(&root.join("diarization.sqlite3")).unwrap();
@@ -616,10 +618,12 @@ mod recognition {
             .unwrap();
         }
         fn names(&self) -> Vec<crate::speaker_names::NamedLabel> {
-            crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(&self.root))
-                .unwrap()
-                .list(&self.recording.recording_id)
-                .unwrap()
+            crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(
+                &self.root,
+            ))
+            .unwrap()
+            .list(&self.recording.recording_id)
+            .unwrap()
         }
     }
 
@@ -680,7 +684,9 @@ mod recognition {
         // profile, so it stays unnamed.
         assert!(names.iter().all(|n| n.label != "Speaker 2"));
         let md = fs::read_to_string(
-            f.root.join(&f.recording.recording_id).join("transcript-speakers.md"),
+            f.root
+                .join(&f.recording.recording_id)
+                .join("transcript-speakers.md"),
         )
         .unwrap();
         assert!(md.contains("Alice"));

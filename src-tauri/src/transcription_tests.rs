@@ -75,7 +75,8 @@ impl Fixture {
     }
     fn tick_with_key(&self, engine: &FakeEngine, key: &str) {
         let key = key.to_string();
-        let settings: SettingsReader = Arc::new(move || Ok(TranscriptionSettings::for_model(key.clone())));
+        let settings: SettingsReader =
+            Arc::new(move || Ok(TranscriptionSettings::for_model(key.clone())));
         tick(
             &self.root,
             &self.store,
@@ -423,10 +424,17 @@ fn importing_the_only_available_model_wakes_a_job_once_the_setting_is_switched()
     assert_eq!(f.job().status, "waiting_model");
     let selected = Arc::new(std::sync::Mutex::new("small".to_string()));
     let reader = selected.clone();
-    let settings: SettingsReader =
-        Arc::new(move || Ok(TranscriptionSettings::for_model(reader.lock().unwrap().clone())));
-    let service =
-        TranscriptionService::with_inhibition(f.root.clone(), settings, Arc::new(FakeEngine::default()), true);
+    let settings: SettingsReader = Arc::new(move || {
+        Ok(TranscriptionSettings::for_model(
+            reader.lock().unwrap().clone(),
+        ))
+    });
+    let service = TranscriptionService::with_inhibition(
+        f.root.clone(),
+        settings,
+        Arc::new(FakeEngine::default()),
+        true,
+    );
     let mut header = [0u8; 48];
     header[..4].copy_from_slice(&0x67676d6cu32.to_le_bytes());
     header[20..24].copy_from_slice(&6i32.to_le_bytes());

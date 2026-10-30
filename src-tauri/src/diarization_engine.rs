@@ -227,8 +227,7 @@ fn validate_managed_model(
 fn validate_request(request: &DiarizationRequest) -> Result<(PathBuf, PathBuf), String> {
     let root = fs::canonicalize(&request.recordings_root)
         .map_err(|_| "Recording root is unavailable.".to_string())?;
-    let _ =
-        validated_recording_tracks(&request.recording, &root, &request.extra_library_roots)?;
+    let _ = validated_recording_tracks(&request.recording, &root, &request.extra_library_roots)?;
     let segmentation = validate_managed_model(
         &root,
         &request.segmentation_model,
@@ -392,7 +391,10 @@ pub fn run_worker(request_path: &Path, result_path: &Path) -> Result<(), String>
 /// `align_speakers` already treats an absent confidence as "uncertain",
 /// which is exactly right for a turn whose confidence could not be computed.
 fn normalize_confidence(value: f32) -> Option<f32> {
-    value.is_finite().then_some(value).filter(|c| (0.0..=1.0).contains(c))
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|c| (0.0..=1.0).contains(c))
 }
 
 /// Only output (loopback) tracks are diarized: remote participants. The input

@@ -161,17 +161,14 @@ impl RecordingStore {
                 failures.push("recording has no tracks".into());
             }
             let prior_error = recording.error.clone();
-            let recording_dir = match resolved_recording_directory(
-                &self.root,
-                &self.extra_roots,
-                &recording,
-            ) {
-                Ok(dir) => dir,
-                Err(e) => {
-                    failures.push(e);
-                    PathBuf::new()
-                }
-            };
+            let recording_dir =
+                match resolved_recording_directory(&self.root, &self.extra_roots, &recording) {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        failures.push(e);
+                        PathBuf::new()
+                    }
+                };
 
             if failures.is_empty() {
                 for track in &mut recording.tracks {

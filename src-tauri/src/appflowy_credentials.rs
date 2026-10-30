@@ -79,7 +79,12 @@ impl FakeCredentialStore {
 #[cfg(test)]
 impl CredentialStore for FakeCredentialStore {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
-        Ok(self.values.lock().map_err(|_| "credential lock")?.get(key).cloned())
+        Ok(self
+            .values
+            .lock()
+            .map_err(|_| "credential lock")?
+            .get(key)
+            .cloned())
     }
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
         self.values
@@ -89,7 +94,10 @@ impl CredentialStore for FakeCredentialStore {
         Ok(())
     }
     fn delete(&self, key: &str) -> Result<(), String> {
-        self.values.lock().map_err(|_| "credential lock")?.remove(key);
+        self.values
+            .lock()
+            .map_err(|_| "credential lock")?
+            .remove(key);
         Ok(())
     }
 }

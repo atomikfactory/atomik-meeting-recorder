@@ -179,16 +179,19 @@ mod tests {
     #[test]
     fn accepts_case_insensitive_aliases_and_normalizes() {
         assert_eq!(validate_accelerator("ctrl+alt+r").unwrap(), "Control+Alt+R");
-        assert_eq!(validate_accelerator("Option+shift+p").unwrap(), "Alt+Shift+P");
-        assert_eq!(validate_accelerator("win+shift+m").unwrap(), "Super+Shift+M");
+        assert_eq!(
+            validate_accelerator("Option+shift+p").unwrap(),
+            "Alt+Shift+P"
+        );
+        assert_eq!(
+            validate_accelerator("win+shift+m").unwrap(),
+            "Super+Shift+M"
+        );
     }
 
     #[test]
     fn normalizes_named_keys() {
-        assert_eq!(
-            validate_accelerator("Ctrl+space").unwrap(),
-            "Control+Space"
-        );
+        assert_eq!(validate_accelerator("Ctrl+space").unwrap(), "Control+Space");
         assert_eq!(validate_accelerator("Ctrl+F1").unwrap(), "Control+F1");
     }
 
@@ -223,8 +226,14 @@ mod tests {
     #[test]
     fn idle_phases_start_a_recording() {
         assert_eq!(decide_toggle_action("waiting", None), ToggleAction::Start);
-        assert_eq!(decide_toggle_action("confirming", None), ToggleAction::Start);
-        assert_eq!(decide_toggle_action("suppressed", None), ToggleAction::Start);
+        assert_eq!(
+            decide_toggle_action("confirming", None),
+            ToggleAction::Start
+        );
+        assert_eq!(
+            decide_toggle_action("suppressed", None),
+            ToggleAction::Start
+        );
         assert_eq!(decide_toggle_action("error", None), ToggleAction::Start);
     }
 

@@ -74,8 +74,8 @@ fn real_ollama_summarizes_copied_transcripts() {
     };
     let dir = std::env::var("SUMMARY_REAL_TRANSCRIPTS_DIR")
         .expect("set SUMMARY_REAL_TRANSCRIPTS_DIR to a directory of subfolders, each containing a transcript.json");
-    let ollama_url =
-        std::env::var("SUMMARY_REAL_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let ollama_url = std::env::var("SUMMARY_REAL_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
     let model = std::env::var("SUMMARY_REAL_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
     let engine = OllamaSummaryEngine::new();
     engine
@@ -88,7 +88,10 @@ fn real_ollama_summarizes_copied_transcripts() {
         .filter(|e| e.path().is_dir())
         .collect();
     entries.sort_by_key(|e| e.file_name());
-    assert!(!entries.is_empty(), "no transcript subfolders found under {dir}");
+    assert!(
+        !entries.is_empty(),
+        "no transcript subfolders found under {dir}"
+    );
 
     println!("\n=== Real Ollama summary verification ({model} @ {ollama_url}) ===");
     for entry in entries {
@@ -134,7 +137,9 @@ fn real_ollama_summarizes_copied_transcripts() {
                     output.title
                 );
                 if name.contains("d3863b42") || name.contains("cd574cf7") {
-                    println!("### Generated summary.md for {name} ###\n{summary_md}\n### end {name} ###");
+                    println!(
+                        "### Generated summary.md for {name} ###\n{summary_md}\n### end {name} ###"
+                    );
                 }
             }
             Err(error) => {
@@ -149,7 +154,11 @@ fn real_ollama_summarizes_copied_transcripts() {
     }
 }
 
-fn render_markdown(recording: &Recording, model: &str, output: &crate::summary_types::SummaryOutput) -> String {
+fn render_markdown(
+    recording: &Recording,
+    model: &str,
+    output: &crate::summary_types::SummaryOutput,
+) -> String {
     let mut md = format!(
         "# {}\n\n- Recording ID: `{}`\n- Model: {}\n- Language: {}\n\n## Summary\n\n{}\n\n",
         output.title, recording.recording_id, model, output.language, output.summary
@@ -174,8 +183,14 @@ fn render_markdown(recording: &Recording, model: &str, output: &crate::summary_t
             md.push_str(&format!(
                 "- {}{}{}\n",
                 item.task,
-                item.owner.as_deref().map(|o| format!(" — {o}")).unwrap_or_default(),
-                item.due.as_deref().map(|d| format!(" (due {d})")).unwrap_or_default(),
+                item.owner
+                    .as_deref()
+                    .map(|o| format!(" — {o}"))
+                    .unwrap_or_default(),
+                item.due
+                    .as_deref()
+                    .map(|d| format!(" (due {d})"))
+                    .unwrap_or_default(),
             ));
         }
         md.push('\n');

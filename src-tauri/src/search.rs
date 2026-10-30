@@ -85,8 +85,12 @@ impl SearchService {
         ));
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker = {
-            let (root, store, cancel, library_roots) =
-                (root.clone(), store.clone(), cancel.clone(), library_roots.clone());
+            let (root, store, cancel, library_roots) = (
+                root.clone(),
+                store.clone(),
+                cancel.clone(),
+                library_roots.clone(),
+            );
             thread::Builder::new()
                 .name("search-reconcile".into())
                 .spawn(move || {
@@ -124,7 +128,9 @@ impl SearchService {
         let Some(store) = store_guard.as_ref() else {
             return;
         };
-        if let Ok(Some(recording)) = RecordingStore::open(&self.root).and_then(|r| r.get_by_id(recording_id)) {
+        if let Ok(Some(recording)) =
+            RecordingStore::open(&self.root).and_then(|r| r.get_by_id(recording_id))
+        {
             let _ = index_one(&self.root, &(self.library_roots)(), store, &recording);
         } else {
             let _ = store.remove_recording(recording_id);
@@ -169,7 +175,8 @@ impl SearchService {
     }
 
     pub fn shutdown(&self) {
-        self.cancel.store(true, std::sync::atomic::Ordering::Release);
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut worker) = self.worker.lock() {
             if let Some(handle) = worker.take() {
                 let _ = handle.join();
@@ -376,7 +383,11 @@ pub(crate) fn reconcile_for_test(root: &Path, store: &SearchStore) {
 /// As `reconcile_for_test`, but with extra known library roots -- for tests
 /// that index a recording living under a custom (non-default) folder.
 #[cfg(test)]
-pub(crate) fn reconcile_for_test_with_roots(root: &Path, extra_roots: &[PathBuf], store: &SearchStore) {
+pub(crate) fn reconcile_for_test_with_roots(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    store: &SearchStore,
+) {
     reconcile_store(root, extra_roots, store);
 }
 
@@ -432,7 +443,13 @@ fn gather_index_data(
         let names = crate::speaker_names::names_for(root, &recording.recording_id);
         for (i, segment) in transcript.1.segments.iter().enumerate() {
             let remote_speaker = labels.as_ref().and_then(|l| l.get(i).copied().flatten());
-            let speaker = presentation_label(recording, segment, local_speaker_name, remote_speaker, Some(&names));
+            let speaker = presentation_label(
+                recording,
+                segment,
+                local_speaker_name,
+                remote_speaker,
+                Some(&names),
+            );
             rows.push(IndexRow {
                 kind: "segment",
                 seq: i as i64,
@@ -444,7 +461,9 @@ fn gather_index_data(
         }
     }
 
-    if let Some((hash, summary)) = read_completed_summary(root, extra_roots, &recording.recording_id) {
+    if let Some((hash, summary)) =
+        read_completed_summary(root, extra_roots, &recording.recording_id)
+    {
         state.summary_checksum = Some(hash);
         if !summary.summary.trim().is_empty() {
             rows.push(IndexRow {
@@ -562,7 +581,10 @@ mod tests {
         for input in ["\"\"\"\"\"", "\"\"", "\"a\"\"\"b\"", "\"\"\""] {
             if let Some(q) = build_match_query(input) {
                 for part in q.split(" AND ") {
-                    assert!(part.starts_with('"'), "part {part:?} from {input:?} is unquoted");
+                    assert!(
+                        part.starts_with('"'),
+                        "part {part:?} from {input:?} is unquoted"
+                    );
                 }
             }
         }
@@ -575,7 +597,10 @@ mod tests {
             // Every top-level term is wrapped in double quotes; none of the
             // original operator characters appear outside quotes.
             for part in q.split(" AND ") {
-                assert!(part.starts_with('"'), "part {part:?} from {input:?} is unquoted");
+                assert!(
+                    part.starts_with('"'),
+                    "part {part:?} from {input:?} is unquoted"
+                );
             }
         }
     }

@@ -13,6 +13,7 @@ import { refreshSummaryState, refreshSummaryModels, updateSummarySettingsUI } fr
 import { refreshCompressionState, refreshAudioStorage } from "./settings/compression";
 import { refreshBrowserExtensionState } from "./settings/extension";
 import { refreshAppFlowyState, refreshAppFlowyWorkspaces } from "./settings/appflowy";
+import { refreshAtomikKbState } from "./settings/atomikKb";
 import { refreshHotkeyState, updateHotkeyUI } from "./settings/hotkey";
 import { refreshVoiceProfiles, updateVoiceProfilesUI } from "./settings/voiceProfiles";
 import { settingsSectionHtml, wireSettingsSection } from "./settings/index";
@@ -45,6 +46,7 @@ async function loadDesktop() {
     refreshAudioStorage();
     refreshBrowserExtensionState();
     refreshAppFlowyState().then(refreshAppFlowyWorkspaces);
+    refreshAtomikKbState();
     refreshSummaryModels(store.settings.ollama_url ?? "http://127.0.0.1:11434");
     refreshHotkeyState();
     refreshVoiceProfiles();
@@ -148,11 +150,12 @@ if (!preview) {
   window.setInterval(refreshDetectionState, 1000);
   window.setInterval(refreshBrowserExtensionState, 5000);
   window.setInterval(refreshAppFlowyState, 2000);
+  window.setInterval(refreshAtomikKbState, 2000);
   window.setInterval(refreshHotkeyState, 1000);
   window.setInterval(refreshVoiceProfiles, 2000);
   window.setInterval(refreshOpenSpeakerPanels, 1000);
   window.addEventListener("focus", refreshDevices);
-  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); refreshVoiceProfiles(); });
+  window.addEventListener("focus", () => { refreshRecordingState(); refreshTranscriptionState(); refreshDiarizationState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshAtomikKbState(); refreshHotkeyState(); refreshVoiceProfiles(); });
   window.addEventListener("focus", refreshDetectionState);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshHotkeyState(); refreshVoiceProfiles(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshDevices(); refreshRecordingState(); refreshDetectionState(); refreshTranscriptionState(); refreshSummaryState(); refreshCompressionState(); refreshAudioStorage(); refreshBrowserExtensionState(); refreshAppFlowyState(); refreshAtomikKbState(); refreshHotkeyState(); refreshVoiceProfiles(); } });
 } else render();

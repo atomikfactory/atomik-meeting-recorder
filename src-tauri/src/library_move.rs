@@ -20,8 +20,7 @@
 //!   another write of the same row; a repeat delete of an already-missing
 //!   source is a no-op).
 use crate::{
-    recording::Recording,
-    recording_paths::resolved_recording_directory,
+    recording::Recording, recording_paths::resolved_recording_directory,
     recording_store::RecordingStore,
 };
 use serde::{Deserialize, Serialize};
@@ -67,10 +66,13 @@ fn journal_path(state_root: &Path, recording_id: &str) -> Option<PathBuf> {
 fn write_journal(state_root: &Path, entry: &JournalEntry) -> Result<(), String> {
     let dir = journal_dir(state_root);
     fs::create_dir_all(&dir).map_err(|e| format!("create move journal directory: {e}"))?;
-    let path =
-        journal_path(state_root, &entry.recording_id).ok_or("recording id is invalid")?;
+    let path = journal_path(state_root, &entry.recording_id).ok_or("recording id is invalid")?;
     let bytes = serde_json::to_vec(entry).map_err(|e| format!("serialize move journal: {e}"))?;
-    let tmp = dir.join(format!("{}.tmp-{}", entry.recording_id, uuid::Uuid::new_v4()));
+    let tmp = dir.join(format!(
+        "{}.tmp-{}",
+        entry.recording_id,
+        uuid::Uuid::new_v4()
+    ));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -146,9 +148,7 @@ fn hash_file(path: &Path) -> Result<(u64, String), String> {
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination)
         .map_err(|e| format!("create {}: {e}", destination.display()))?;
-    for entry in
-        fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))?
-    {
+    for entry in fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))? {
         let entry = entry.map_err(|e| format!("read {}: {e}", source.display()))?;
         let file_type = entry
             .file_type()
@@ -156,7 +156,10 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
         let from = entry.path();
         let to = destination.join(entry.file_name());
         if file_type.is_symlink() {
-            return Err(format!("{} is a symbolic link; refusing to move it", from.display()));
+            return Err(format!(
+                "{} is a symbolic link; refusing to move it",
+                from.display()
+            ));
         } else if file_type.is_dir() {
             copy_tree(&from, &to)?;
         } else if file_type.is_file() {
@@ -281,8 +284,7 @@ pub fn move_one(
         // A previous crash may have left a partial copy; it was never
         // verified, so it is always safe to discard and redo.
         if destination.exists() {
-            fs::remove_dir_all(&destination)
-                .map_err(|e| format!("remove partial copy: {e}"))?;
+            fs::remove_dir_all(&destination).map_err(|e| format!("remove partial copy: {e}"))?;
         }
         copy_tree(&source, &destination)?;
         verify_tree(&source, &destination)?;
@@ -317,7 +319,10 @@ mod tests {
     use crate::recording_paths::create_recording_directory;
 
     fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("meeting-library-move-{name}-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "meeting-library-move-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -378,10 +383,21 @@ mod tests {
         )
         .unwrap();
 
-        let updated = recordings.get_by_id(&recording.recording_id).unwrap().unwrap();
-        let new_dir = resolved_recording_directory(&source_root, std::slice::from_ref(&destination_root), &updated).unwrap();
+        let updated = recordings
+            .get_by_id(&recording.recording_id)
+            .unwrap()
+            .unwrap();
+        let new_dir = resolved_recording_directory(
+            &source_root,
+            std::slice::from_ref(&destination_root),
+            &updated,
+        )
+        .unwrap();
         assert!(new_dir.starts_with(fs::canonicalize(&destination_root).unwrap()));
-        assert_eq!(fs::read(new_dir.join("track-00.wav")).unwrap(), b"pretend-wav-bytes");
+        assert_eq!(
+            fs::read(new_dir.join("track-00.wav")).unwrap(),
+            b"pretend-wav-bytes"
+        );
         // The source is gone and the journal is clear.
         assert!(!source_dir.exists());
         assert!(pending_recording_ids(&state_root).is_empty());
@@ -421,7 +437,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(fs::read(destination.join("track-00.wav")).unwrap(), b"pretend-wav-bytes");
+        assert_eq!(
+            fs::read(destination.join("track-00.wav")).unwrap(),
+            b"pretend-wav-bytes"
+        );
         assert!(pending_recording_ids(&state_root).is_empty());
     }
 
@@ -460,7 +479,10 @@ mod tests {
         )
         .unwrap();
 
-        let updated = recordings.get_by_id(&recording.recording_id).unwrap().unwrap();
+        let updated = recordings
+            .get_by_id(&recording.recording_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             fs::canonicalize(updated.library_root.unwrap()).unwrap(),
             destination_root_canonical

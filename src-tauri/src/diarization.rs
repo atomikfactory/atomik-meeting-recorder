@@ -529,10 +529,9 @@ pub(crate) fn read_completed_checkpoint(
 /// `SherpaEmbeddingExtractor::create` inline) so tests can substitute a fake
 /// extractor and exercise the matching/naming logic without a real ONNX
 /// model file.
-type EmbeddingExtractorFactory =
-    dyn Fn(&Path, &str) -> Result<Box<dyn crate::voice_profiles::EmbeddingExtractor>, String>
-        + Send
-        + Sync;
+type EmbeddingExtractorFactory = dyn Fn(&Path, &str) -> Result<Box<dyn crate::voice_profiles::EmbeddingExtractor>, String>
+    + Send
+    + Sync;
 fn real_embedding_extractor(
     path: &Path,
     hash: &str,
@@ -675,7 +674,8 @@ fn tick(
         // recognition is a cosmetic overlay and must never fail or block
         // diarization completing.
         if recognize_known_voices {
-            if let Ok(Some((model_path, model_hash))) = registered_model(root, registry, "embedding")
+            if let Ok(Some((model_path, model_hash))) =
+                registered_model(root, registry, "embedding")
             {
                 if let Ok(extractor) = embedding_extractor(Path::new(&model_path), &model_hash) {
                     let _ = crate::voice_profiles::recognize_speakers(
@@ -709,7 +709,8 @@ fn tick(
             // `transcript.md` too (the speaker-specific Markdown above
             // already reflects it) so both presentations agree immediately,
             // without waiting for a user-triggered rename to do it.
-            let _ = crate::speaker_names::regenerate_presentation(root, extra_roots, &job.recording_id);
+            let _ =
+                crate::speaker_names::regenerate_presentation(root, extra_roots, &job.recording_id);
         }
         Ok(())
     })();

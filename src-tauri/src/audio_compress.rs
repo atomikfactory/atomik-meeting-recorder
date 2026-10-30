@@ -32,13 +32,9 @@
 //! a WAV unless a verified `.flac` is (or becomes) the one the metadata
 //! names.
 use crate::{
-    audio_compress_store::CompressionStore,
-    audio_file,
-    diarization_store::DiarizationStore,
-    recording::Recording,
-    recording_paths::resolved_recording_directory,
-    recording_store::RecordingStore,
-    transcription::processing_guard,
+    audio_compress_store::CompressionStore, audio_file, diarization_store::DiarizationStore,
+    recording::Recording, recording_paths::resolved_recording_directory,
+    recording_store::RecordingStore, transcription::processing_guard,
     transcription_store::TranscriptionStore,
 };
 use serde::Serialize;
@@ -118,8 +114,12 @@ impl CompressionService {
         let mut worker = None;
         if !inhibited {
             if let Some((s, r)) = stores.clone() {
-                let (root, settings_reader, c, e) =
-                    (root.clone(), settings.clone(), cancel.clone(), error.clone());
+                let (root, settings_reader, c, e) = (
+                    root.clone(),
+                    settings.clone(),
+                    cancel.clone(),
+                    error.clone(),
+                );
                 match thread::Builder::new().name("audio-compress".into()).spawn(move || {
                     lower_thread_priority();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -244,7 +244,9 @@ fn set_error(slot: &Mutex<Option<String>>, value: Option<String>) {
 /// the way of anything else on the machine while a recording is active.
 #[cfg(windows)]
 fn lower_thread_priority() {
-    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
@@ -337,8 +339,8 @@ fn compress_recording(
         if metadata.file_type().is_symlink() {
             return Err("A recording track must not be a symbolic link.".into());
         }
-        let canonical = fs::canonicalize(&path)
-            .map_err(|_| "A recording track is unavailable.".to_string())?;
+        let canonical =
+            fs::canonicalize(&path).map_err(|_| "A recording track is unavailable.".to_string())?;
         if canonical.parent() != Some(directory.as_path()) {
             return Err("A recording track is outside its recording directory.".into());
         }
@@ -366,7 +368,9 @@ fn compress_recording(
             continue;
         }
         let tmp_path = canonical.with_extension(format!("flac.tmp-{}", Uuid::new_v4()));
-        if let Err(e) = audio_file::encode_flac_new(&tmp_path, info.sample_rate, info.channels, &samples) {
+        if let Err(e) =
+            audio_file::encode_flac_new(&tmp_path, info.sample_rate, info.channels, &samples)
+        {
             let _ = audio_file::remove_orphan(&tmp_path);
             return Err(e);
         }

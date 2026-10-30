@@ -73,7 +73,9 @@ impl SummaryStore {
             .optional()
             .map_err(|e| e.to_string())?;
         match old {
-            Some(x) if x != h => Err("Transcript checksum changed; create a new summary job.".into()),
+            Some(x) if x != h => {
+                Err("Transcript checksum changed; create a new summary job.".into())
+            }
             Some(_) => Ok(()),
             None => {
                 c.execute("INSERT INTO summary_jobs(recording_id,parent_checksum,status,progress)VALUES(?1,?2,'queued',0)",params![id,h]).map_err(|e|e.to_string())?;
@@ -171,7 +173,10 @@ impl SummaryStore {
             .optional()
             .map_err(|e| e.to_string())?;
         if status.as_deref() == Some("summarizing") {
-            return Err("Summarizing is in progress; wait for it to finish before deleting this recording.".into());
+            return Err(
+                "Summarizing is in progress; wait for it to finish before deleting this recording."
+                    .into(),
+            );
         }
         c.execute(
             "DELETE FROM summary_jobs WHERE recording_id=?1",
@@ -304,7 +309,8 @@ mod tests {
         let s = store();
         s.enqueue(&id(), &hash()).unwrap();
         s.claim(&id(), "qwen3:8b").unwrap();
-        s.wait_for_ollama(&id(), "Ollama is not reachable.").unwrap();
+        s.wait_for_ollama(&id(), "Ollama is not reachable.")
+            .unwrap();
         let j = s.get(&id()).unwrap().unwrap();
         assert_eq!(j.status, "waiting_ollama");
         assert_eq!(j.error.as_deref(), Some("Ollama is not reachable."));

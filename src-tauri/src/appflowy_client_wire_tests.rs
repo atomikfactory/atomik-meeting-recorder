@@ -18,11 +18,25 @@ fn otp_request_and_verify_stores_a_session() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
     client.request_otp("user@example.com").unwrap();
-    assert_eq!(server.otp_email_requested().as_deref(), Some("user@example.com"));
-    client.verify_otp("user@example.com", &server.otp_code()).unwrap();
+    assert_eq!(
+        server.otp_email_requested().as_deref(),
+        Some("user@example.com")
+    );
+    client
+        .verify_otp("user@example.com", &server.otp_code())
+        .unwrap();
     assert!(client.is_signed_in().unwrap());
-    assert_eq!(client.signed_in_email().unwrap().as_deref(), Some("user@example.com"));
-    assert_eq!(creds.get(crate::appflowy_credentials::KEY_ACCESS_TOKEN).unwrap().as_deref(), Some("access-1"));
+    assert_eq!(
+        client.signed_in_email().unwrap().as_deref(),
+        Some("user@example.com")
+    );
+    assert_eq!(
+        creds
+            .get(crate::appflowy_credentials::KEY_ACCESS_TOKEN)
+            .unwrap()
+            .as_deref(),
+        Some("access-1")
+    );
 }
 
 #[test]
@@ -39,23 +53,42 @@ fn verify_otp_rejects_a_wrong_code() {
 fn list_workspaces_and_get_folder_round_trip() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
     let workspaces = client.list_workspaces().unwrap();
     assert_eq!(workspaces[0].workspace_id, server.workspace_id);
     let folder = client.get_folder(&server.workspace_id, None).unwrap();
     assert_eq!(folder.view_id, server.workspace_id);
-    assert!(folder.child_named("General").is_some(), "the fake server seeds a default Space");
+    assert!(
+        folder.child_named("General").is_some(),
+        "the fake server seeds a default Space"
+    );
 }
 
 #[test]
 fn create_page_reaches_the_server_and_returns_its_view_id() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
     let page_data = serde_json::json!({"type": "page", "data": {}, "children": []});
-    let page = client.create_page(&server.workspace_id, &server.workspace_id, "planned-1", "My daily meetings", &page_data).unwrap();
+    let page = client
+        .create_page(
+            &server.workspace_id,
+            &server.workspace_id,
+            "planned-1",
+            "My daily meetings",
+            &page_data,
+        )
+        .unwrap();
     assert_eq!(page.view_id, "planned-1");
     let folder = client.get_folder(&server.workspace_id, None).unwrap();
     assert!(folder.child_named("My daily meetings").is_some());
@@ -65,14 +98,28 @@ fn create_page_reaches_the_server_and_returns_its_view_id() {
 fn a_401_triggers_exactly_one_refresh_then_succeeds() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
     server.invalidate_current_access_token();
     let workspaces = client.list_workspaces().unwrap();
     assert_eq!(workspaces[0].workspace_id, server.workspace_id);
-    assert_eq!(server.refresh_count(), 1, "exactly one refresh should have happened");
+    assert_eq!(
+        server.refresh_count(),
+        1,
+        "exactly one refresh should have happened"
+    );
     // The refreshed token was persisted.
-    assert_eq!(creds.get(crate::appflowy_credentials::KEY_ACCESS_TOKEN).unwrap().as_deref(), Some("access-2"));
+    assert_eq!(
+        creds
+            .get(crate::appflowy_credentials::KEY_ACCESS_TOKEN)
+            .unwrap()
+            .as_deref(),
+        Some("access-2")
+    );
 }
 
 #[test]
@@ -88,10 +135,22 @@ fn create_page_sends_collab_id_so_its_content_loads_afterward() {
     // view_id` so this never happens.
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
     let page_data = serde_json::json!({"type": "page", "data": {}, "children": []});
-    let page = client.create_page(&server.workspace_id, &server.workspace_id, "planned-collab", "My daily meetings", &page_data).unwrap();
+    let page = client
+        .create_page(
+            &server.workspace_id,
+            &server.workspace_id,
+            "planned-collab",
+            "My daily meetings",
+            &page_data,
+        )
+        .unwrap();
     assert!(
         client.page_content_loads(&server.workspace_id, &page.view_id).unwrap(),
         "a page created by this client's create_page must have working content, not just a listed view"
@@ -102,9 +161,15 @@ fn create_page_sends_collab_id_so_its_content_loads_afterward() {
 fn page_content_loads_reports_false_for_an_unknown_view_id() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
-    assert!(!client.page_content_loads(&server.workspace_id, "no-such-view").unwrap());
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
+    assert!(!client
+        .page_content_loads(&server.workspace_id, "no-such-view")
+        .unwrap());
 }
 
 #[test]
@@ -118,7 +183,10 @@ fn a_request_without_collab_id_reproduces_the_record_not_found_bug_and_the_fix_r
     let agent = ureq::AgentBuilder::new().build();
     let create = |body: serde_json::Value| -> String {
         agent
-            .post(&format!("{}/api/workspace/{}/page-view", server.base_url, server.workspace_id))
+            .post(&format!(
+                "{}/api/workspace/{}/page-view",
+                server.base_url, server.workspace_id
+            ))
             .set("Authorization", "Bearer access-1")
             .send_json(body)
             .unwrap()
@@ -132,7 +200,10 @@ fn a_request_without_collab_id_reproduces_the_record_not_found_bug_and_the_fix_r
     // avoids handing back `ureq::Error` itself (clippy::result_large_err).
     let get_page_view_status = |view_id: &str| -> Option<u16> {
         match agent
-            .get(&format!("{}/api/workspace/{}/page-view/{}", server.base_url, server.workspace_id, view_id))
+            .get(&format!(
+                "{}/api/workspace/{}/page-view/{}",
+                server.base_url, server.workspace_id, view_id
+            ))
             .set("Authorization", "Bearer access-1")
             .call()
         {
@@ -162,19 +233,35 @@ fn a_request_without_collab_id_reproduces_the_record_not_found_bug_and_the_fix_r
         "view_id": "fixed-view-1", "collab_id": "fixed-view-1",
     }));
     assert_eq!(fixed_view_id, "fixed-view-1");
-    assert_eq!(get_page_view_status(&fixed_view_id), None, "the fixed request shape must make the page's content load");
+    assert_eq!(
+        get_page_view_status(&fixed_view_id),
+        None,
+        "the fixed request shape must make the page's content load"
+    );
 }
 
 #[test]
 fn french_utf8_page_name_and_content_round_trip_over_the_wire() {
     let server = FakeAppFlowyServer::start();
     let (client, creds) = client(&server);
-    creds.set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1").unwrap();
-    creds.set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1").unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_ACCESS_TOKEN, "access-1")
+        .unwrap();
+    creds
+        .set(crate::appflowy_credentials::KEY_REFRESH_TOKEN, "refresh-1")
+        .unwrap();
     let page_data = serde_json::json!({"type": "page", "data": {}, "children": [
         {"type": "paragraph", "data": {"delta": [{"insert": "Réunion à 14h30 — 100% \"prêt\""}]}, "children": []}
     ]});
-    client.create_page(&server.workspace_id, &server.workspace_id, "planned-fr", "Réunion hebdomadaire", &page_data).unwrap();
+    client
+        .create_page(
+            &server.workspace_id,
+            &server.workspace_id,
+            "planned-fr",
+            "Réunion hebdomadaire",
+            &page_data,
+        )
+        .unwrap();
     let folder = client.get_folder(&server.workspace_id, None).unwrap();
     assert!(folder.child_named("Réunion hebdomadaire").is_some());
 }

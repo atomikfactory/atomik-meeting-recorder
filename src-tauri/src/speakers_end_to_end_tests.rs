@@ -34,7 +34,9 @@ use crate::{
     summary::SummaryCheckpoint,
     summary_engine::{OllamaSummaryEngine, SummaryEngine, SummaryRequest},
     transcription::markdown_document_labeled,
-    transcription_engine::{inspect_model, load_wav_16k_mono, LocalWhisperEngine, TranscriptionEngine},
+    transcription_engine::{
+        inspect_model, load_wav_16k_mono, LocalWhisperEngine, TranscriptionEngine,
+    },
     transcription_types::TranscriptionRequest,
 };
 use std::{fs, path::PathBuf, sync::atomic::AtomicBool, time::Instant};
@@ -62,8 +64,10 @@ fn real_end_to_end_speakers_pipeline() {
     let output_dir = env_path("SPEAKERS_E2E_OUTPUT_DIR");
     fs::create_dir_all(&output_dir).expect("output dir must be creatable");
     let local_name = std::env::var("SPEAKERS_E2E_LOCAL_NAME").unwrap_or_else(|_| "You".into());
-    let ollama_model = std::env::var("SPEAKERS_E2E_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
-    let ollama_url = std::env::var("SPEAKERS_E2E_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let ollama_model =
+        std::env::var("SPEAKERS_E2E_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
+    let ollama_url = std::env::var("SPEAKERS_E2E_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
     // A plain file copy loses the recorder's own metadata, so real
     // started_at/duration_ms (rather than the 1970/00:00:00 this harness used
     // to hardcode into every rendered header) can optionally be supplied from
@@ -84,11 +88,18 @@ fn real_end_to_end_speakers_pipeline() {
         .map(|e| e.path())
         .filter(|p| {
             p.extension().and_then(|x| x.to_str()) == Some("wav")
-                && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("track-"))
+                && p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with("track-"))
         })
         .collect();
     wavs.sort();
-    assert_eq!(wavs.len(), 2, "expected exactly two track-*.wav files in {}", recording_dir.display());
+    assert_eq!(
+        wavs.len(),
+        2,
+        "expected exactly two track-*.wav files in {}",
+        recording_dir.display()
+    );
 
     let (input_wav, output_wav) = match (
         std::env::var("SPEAKERS_E2E_INPUT_TRACK").ok(),
@@ -180,9 +191,12 @@ fn real_end_to_end_speakers_pipeline() {
 
     // --- 2. Speaker identification: real sherpa-onnx on the loopback track only ---
     let samples = load_wav_16k_mono(&output_wav, MAX_SECONDS).expect("loopback track must decode");
-    let diarizer = create_diarizer(&segmentation_model, &embedding_model).expect("real models must initialize");
+    let diarizer = create_diarizer(&segmentation_model, &embedding_model)
+        .expect("real models must initialize");
     let diar_started = Instant::now();
-    let result = diarizer.process(&samples).expect("native diarization must produce a result");
+    let result = diarizer
+        .process(&samples)
+        .expect("native diarization must produce a result");
     let diar_elapsed = diar_started.elapsed();
     let segments = result.sort_by_start_time();
     println!(
@@ -200,7 +214,11 @@ fn real_end_to_end_speakers_pipeline() {
             start_ms: (s.start as f64 * 1000.0).round() as u64,
             end_ms: (s.end as f64 * 1000.0).round() as u64,
             speaker: s.speaker as u32,
-            confidence: s.confidence.is_finite().then_some(s.confidence).filter(|c| (0.0..=1.0).contains(c)),
+            confidence: s
+                .confidence
+                .is_finite()
+                .then_some(s.confidence)
+                .filter(|c| (0.0..=1.0).contains(c)),
         })
         .collect();
     let diarization_output = DiarizationOutput {
@@ -213,7 +231,8 @@ fn real_end_to_end_speakers_pipeline() {
     // --- 3. Render transcript.md exactly as the app would (with speaker labels) ---
     let mut labeled_transcript = transcript.clone();
     labeled_transcript.local_speaker_name = Some(local_name.clone());
-    let transcript_md = markdown_document_labeled(&recording, &labeled_transcript, Some(&labels), None);
+    let transcript_md =
+        markdown_document_labeled(&recording, &labeled_transcript, Some(&labels), None);
     let transcript_path = output_dir.join("transcript.md");
     fs::write(&transcript_path, &transcript_md).expect("must write transcript.md");
     println!("Wrote {}", transcript_path.display());
@@ -235,7 +254,9 @@ fn real_end_to_end_speakers_pipeline() {
     let summary_started = Instant::now();
     let mut progress_calls = Vec::new();
     let output = summary_engine
-        .summarize(&summary_request, &AtomicBool::new(false), &mut |p| progress_calls.push(p))
+        .summarize(&summary_request, &AtomicBool::new(false), &mut |p| {
+            progress_calls.push(p)
+        })
         .expect("real Ollama summarization must succeed");
     println!(
         "Summary: {:.1}s wall time | title: {}",

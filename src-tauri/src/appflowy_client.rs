@@ -8,7 +8,9 @@
 //! defensively by `allowlist::check`, which every outgoing request passes
 //! through *before* a socket is opened. `allowlist_tests.rs` proves every
 //! forbidden (method, path) combination is refused without any network I/O.
-use crate::appflowy_credentials::{SharedCredentialStore, KEY_ACCESS_TOKEN, KEY_EMAIL, KEY_REFRESH_TOKEN};
+use crate::appflowy_credentials::{
+    SharedCredentialStore, KEY_ACCESS_TOKEN, KEY_EMAIL, KEY_REFRESH_TOKEN,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -67,7 +69,10 @@ mod allowlist {
     /// string (query parameters, e.g. `?depth=`, are never part of the
     /// allowlist match and never affect it either way).
     pub fn check(method: Method, path: &str) -> Result<(), String> {
-        if ALLOWED.iter().any(|(m, pattern)| *m == method && path_matches(pattern, path)) {
+        if ALLOWED
+            .iter()
+            .any(|(m, pattern)| *m == method && path_matches(pattern, path))
+        {
             Ok(())
         } else {
             Err(format!(
@@ -211,7 +216,9 @@ fn classify(error: ureq::Error) -> ClientError {
             let message = response
                 .into_string()
                 .unwrap_or_else(|_| "invalid response body".into());
-            ClientError::Rejected(format!("AppFlowy rejected the request (HTTP {code}): {message}"))
+            ClientError::Rejected(format!(
+                "AppFlowy rejected the request (HTTP {code}): {message}"
+            ))
         }
         ureq::Error::Status(code, _) => {
             ClientError::Transient(format!("AppFlowy returned HTTP {code}."))
@@ -263,7 +270,11 @@ const APPFLOWY_CLOUD_API_BASE: &str = "https://beta.appflowy.cloud";
 /// to change.
 pub fn web_page_url(base_url: &str, workspace_id: &str, view_id: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    let app_base = if trimmed == APPFLOWY_CLOUD_API_BASE { APPFLOWY_WEB_PUBLIC_BASE } else { trimmed };
+    let app_base = if trimmed == APPFLOWY_CLOUD_API_BASE {
+        APPFLOWY_WEB_PUBLIC_BASE
+    } else {
+        trimmed
+    };
     format!("{app_base}/app/{workspace_id}/{view_id}")
 }
 
@@ -300,8 +311,10 @@ impl AppFlowyClient {
     }
 
     fn store_session(&self, tokens: &TokenResponse) -> Result<(), String> {
-        self.credentials.set(KEY_ACCESS_TOKEN, &tokens.access_token)?;
-        self.credentials.set(KEY_REFRESH_TOKEN, &tokens.refresh_token)
+        self.credentials
+            .set(KEY_ACCESS_TOKEN, &tokens.access_token)?;
+        self.credentials
+            .set(KEY_REFRESH_TOKEN, &tokens.refresh_token)
     }
 
     /// Sends the one-time-passcode email. Never handles a password (see
@@ -312,7 +325,10 @@ impl AppFlowyClient {
         self.agent
             .post(&format!("{}/gotrue/otp", self.base_url))
             .set("Client-Version", CLIENT_VERSION)
-            .send_json(OtpRequest { email, should_create_user: true })
+            .send_json(OtpRequest {
+                email,
+                should_create_user: true,
+            })
             .map_err(|e| classify(e).to_string())?;
         self.credentials.set(KEY_EMAIL, email)?;
         Ok(())
@@ -325,7 +341,11 @@ impl AppFlowyClient {
             .agent
             .post(&format!("{}/gotrue/verify", self.base_url))
             .set("Client-Version", CLIENT_VERSION)
-            .send_json(VerifyOtpRequest { email, token: code, kind: "magiclink" })
+            .send_json(VerifyOtpRequest {
+                email,
+                token: code,
+                kind: "magiclink",
+            })
             .map_err(|e| classify(e).to_string())?;
         let tokens: TokenResponse = response.into_json().map_err(err)?;
         self.store_session(&tokens)?;
@@ -352,9 +372,14 @@ impl AppFlowyClient {
             .ok_or("Not signed in to AppFlowy.")?;
         let response = self
             .agent
-            .post(&format!("{}/gotrue/token?grant_type=refresh_token", self.base_url))
+            .post(&format!(
+                "{}/gotrue/token?grant_type=refresh_token",
+                self.base_url
+            ))
             .set("Client-Version", CLIENT_VERSION)
-            .send_json(RefreshTokenRequest { refresh_token: &refresh_token })
+            .send_json(RefreshTokenRequest {
+                refresh_token: &refresh_token,
+            })
             .map_err(|e| classify(e).to_string())?;
         let tokens: TokenResponse = response.into_json().map_err(err)?;
         self.store_session(&tokens)?;
@@ -430,7 +455,11 @@ impl AppFlowyClient {
     /// `depth=4` covers workspace -> "My daily meetings" -> date -> meeting,
     /// the full hierarchy this integration ever creates.
     #[allow(clippy::result_large_err)]
-    pub fn get_folder(&self, workspace_id: &str, root_view_id: Option<&str>) -> Result<FolderView, ClientError> {
+    pub fn get_folder(
+        &self,
+        workspace_id: &str,
+        root_view_id: Option<&str>,
+    ) -> Result<FolderView, ClientError> {
         let path = format!("/api/workspace/{workspace_id}/folder");
         let query = match root_view_id {
             Some(id) => format!("?depth=4&root_view_id={id}"),
@@ -477,7 +506,14 @@ impl AppFlowyClient {
             // `collab_id` == `view_id` (see the `CreatePageParams` doc
             // comment) so the document is always findable by the id the
             // returned `Page.view_id` reports.
-            &CreatePageParams { parent_view_id, layout: LAYOUT_DOCUMENT, name, page_data, view_id, collab_id: view_id },
+            &CreatePageParams {
+                parent_view_id,
+                layout: LAYOUT_DOCUMENT,
+                name,
+                page_data,
+                view_id,
+                collab_id: view_id,
+            },
         )?;
         let parsed: PageResponse = response
             .into_json()
@@ -494,7 +530,11 @@ impl AppFlowyClient {
     /// 401-after-refresh, unexpected 4xx/5xx) so a caller doesn't silently
     /// treat an unrelated failure as "content missing".
     #[allow(clippy::result_large_err)]
-    pub fn page_content_loads(&self, workspace_id: &str, view_id: &str) -> Result<bool, ClientError> {
+    pub fn page_content_loads(
+        &self,
+        workspace_id: &str,
+        view_id: &str,
+    ) -> Result<bool, ClientError> {
         let path = format!("/api/workspace/{workspace_id}/page-view/{view_id}");
         match self.get_authed(Method::Get, &path) {
             Ok(_response) => Ok(true),
@@ -545,7 +585,13 @@ mod tests {
         assert!(root.child_named("My daily meeting").is_none());
     }
     fn space(view_id: &str, name: &str) -> FolderView {
-        FolderView { view_id: view_id.into(), parent_view_id: None, name: name.into(), is_space: true, children: vec![] }
+        FolderView {
+            view_id: view_id.into(),
+            parent_view_id: None,
+            name: name.into(),
+            is_space: true,
+            children: vec![],
+        }
     }
     #[test]
     fn pick_space_prefers_general_case_insensitively() {
@@ -554,7 +600,11 @@ mod tests {
             parent_view_id: None,
             name: "Workspace".into(),
             is_space: true,
-            children: vec![space("s1", "Marketing"), space("s2", "gENERAL"), space("s3", "Engineering")],
+            children: vec![
+                space("s1", "Marketing"),
+                space("s2", "gENERAL"),
+                space("s3", "Engineering"),
+            ],
         };
         assert_eq!(root.pick_space().unwrap().view_id, "s2");
     }
@@ -573,22 +623,43 @@ mod tests {
     fn pick_space_ignores_non_space_children() {
         let mut page = space("p1", "Some Page");
         page.is_space = false;
-        let root = FolderView { view_id: "root".into(), parent_view_id: None, name: "Workspace".into(), is_space: true, children: vec![page] };
+        let root = FolderView {
+            view_id: "root".into(),
+            parent_view_id: None,
+            name: "Workspace".into(),
+            is_space: true,
+            children: vec![page],
+        };
         assert!(root.pick_space().is_none());
     }
     #[test]
     fn web_page_url_uses_the_public_web_domain_for_the_official_cloud() {
-        assert_eq!(web_page_url("https://beta.appflowy.cloud", "ws1", "v1"), "https://appflowy.com/app/ws1/v1");
-        assert_eq!(web_page_url("https://beta.appflowy.cloud/", "ws1", "v1"), "https://appflowy.com/app/ws1/v1");
+        assert_eq!(
+            web_page_url("https://beta.appflowy.cloud", "ws1", "v1"),
+            "https://appflowy.com/app/ws1/v1"
+        );
+        assert_eq!(
+            web_page_url("https://beta.appflowy.cloud/", "ws1", "v1"),
+            "https://appflowy.com/app/ws1/v1"
+        );
     }
     #[test]
     fn web_page_url_uses_the_configured_host_for_self_hosted_servers() {
-        assert_eq!(web_page_url("https://flowy.example.com", "ws1", "v1"), "https://flowy.example.com/app/ws1/v1");
+        assert_eq!(
+            web_page_url("https://flowy.example.com", "ws1", "v1"),
+            "https://flowy.example.com/app/ws1/v1"
+        );
     }
     #[test]
     fn scheme_and_host_extracts_https_origin_only() {
-        assert_eq!(scheme_and_host("https://appflowy.com/app/ws1/v1"), Some("https://appflowy.com".into()));
-        assert_eq!(scheme_and_host("https://flowy.example.com/app/x"), Some("https://flowy.example.com".into()));
+        assert_eq!(
+            scheme_and_host("https://appflowy.com/app/ws1/v1"),
+            Some("https://appflowy.com".into())
+        );
+        assert_eq!(
+            scheme_and_host("https://flowy.example.com/app/x"),
+            Some("https://flowy.example.com".into())
+        );
         assert_eq!(scheme_and_host("http://appflowy.com/app/ws1/v1"), None);
         assert_eq!(scheme_and_host("javascript:alert(1)"), None);
     }

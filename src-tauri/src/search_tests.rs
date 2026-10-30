@@ -20,7 +20,10 @@ use crate::{
 use std::{fs, path::PathBuf, time::Instant};
 
 fn test_root(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("meeting-search-test-{name}-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!(
+        "meeting-search-test-{name}-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir_all(&root).unwrap();
     root.canonicalize().unwrap()
 }
@@ -63,7 +66,11 @@ impl Fixture {
             }],
         };
         recordings.save(&recording).unwrap();
-        Self { root, recordings, id }
+        Self {
+            root,
+            recordings,
+            id,
+        }
     }
     fn complete_transcript(&self, text: &str) -> String {
         let dir = self.root.join(&self.id);
@@ -86,8 +93,12 @@ impl Fixture {
         let json = dir.join("transcript.json");
         fs::write(&json, &bytes).unwrap();
         let registry = TranscriptionStore::open(&self.root.join("transcription.sqlite3")).unwrap();
-        registry.enqueue(&self.id, "base", &transcript.model_hash).unwrap();
-        assert!(registry.claim(&self.id, "unused", &transcript.model_hash).unwrap());
+        registry
+            .enqueue(&self.id, "base", &transcript.model_hash)
+            .unwrap();
+        assert!(registry
+            .claim(&self.id, "unused", &transcript.model_hash)
+            .unwrap());
         registry
             .complete(
                 &self.id,
@@ -119,7 +130,9 @@ impl Fixture {
         let store = SummaryStore::open(&self.root.join("summary.sqlite3")).unwrap();
         store.enqueue(&self.id, parent_checksum).unwrap();
         assert!(store.claim(&self.id, "qwen3:8b").unwrap());
-        store.complete(&self.id, &checksum(&bytes), "Weekly sync").unwrap();
+        store
+            .complete(&self.id, &checksum(&bytes), "Weekly sync")
+            .unwrap();
     }
     fn delete(&self) {
         self.recordings.tombstone(&self.id, 999).unwrap();
@@ -229,8 +242,21 @@ fn corrupt_index_file_is_dropped_and_rebuilt() {
 fn query_latency_stays_small_at_synthetic_scale() {
     let store = SearchStore::open_in_memory().unwrap();
     let words = [
-        "budget", "roadmap", "decision", "launch", "customer", "release", "meeting", "action",
-        "review", "planning", "engineering", "design", "marketing", "hiring", "vendor",
+        "budget",
+        "roadmap",
+        "decision",
+        "launch",
+        "customer",
+        "release",
+        "meeting",
+        "action",
+        "review",
+        "planning",
+        "engineering",
+        "design",
+        "marketing",
+        "hiring",
+        "vendor",
     ];
     let build_start = Instant::now();
     for meeting in 0..2000 {
@@ -262,7 +288,10 @@ fn query_latency_stays_small_at_synthetic_scale() {
             )
             .unwrap();
     }
-    println!("index build took: {:?} for 2000 meetings x 200 segments", build_start.elapsed());
+    println!(
+        "index build took: {:?} for 2000 meetings x 200 segments",
+        build_start.elapsed()
+    );
 
     // Worst case: a common word present in roughly 1/15 of all 400,000 rows
     // (~27,000 matches). Warm up (page cache, query plan) before timing.
@@ -319,12 +348,39 @@ fn probe_index_size_per_hour_of_meeting() {
     }
     rows.push(IndexRow { kind: "summary", seq: 0, start_ms: None, end_ms: None, speaker: None, text: "The team agreed on the Friday release timeline and reviewed the staging deploy checklist, flagging two open risks around the payments integration.".into() });
     for i in 0..5 {
-        rows.push(IndexRow { kind: "key_point", seq: i, start_ms: None, end_ms: None, speaker: None, text: "Payments integration needs one more review pass before Friday.".into() });
-        rows.push(IndexRow { kind: "decision", seq: i, start_ms: None, end_ms: None, speaker: None, text: "Ship on Friday unless the payments review finds a blocker.".into() });
-        rows.push(IndexRow { kind: "action_item", seq: i, start_ms: None, end_ms: None, speaker: None, text: "Review the staging deploy checklist — Ben — Thursday".into() });
+        rows.push(IndexRow {
+            kind: "key_point",
+            seq: i,
+            start_ms: None,
+            end_ms: None,
+            speaker: None,
+            text: "Payments integration needs one more review pass before Friday.".into(),
+        });
+        rows.push(IndexRow {
+            kind: "decision",
+            seq: i,
+            start_ms: None,
+            end_ms: None,
+            speaker: None,
+            text: "Ship on Friday unless the payments review finds a blocker.".into(),
+        });
+        rows.push(IndexRow {
+            kind: "action_item",
+            seq: i,
+            start_ms: None,
+            end_ms: None,
+            speaker: None,
+            text: "Review the staging deploy checklist — Ben — Thursday".into(),
+        });
     }
     store
-        .replace_recording("one-hour-meeting-0", "Weekly release sync", 0, &RecordingIndexState::default(), &rows)
+        .replace_recording(
+            "one-hour-meeting-0",
+            "Weekly release sync",
+            0,
+            &RecordingIndexState::default(),
+            &rows,
+        )
         .unwrap();
     drop(store);
     let one_meeting_bytes = fs::metadata(&path).unwrap().len();
@@ -427,8 +483,12 @@ fn reconcile_indexes_summary_and_speaker_labels_for_a_recording_under_a_custom_l
     fs::write(directory.join("transcript.json"), &transcript_bytes).unwrap();
     let transcript_checksum = checksum(&transcript_bytes);
     let registry = TranscriptionStore::open(&default_root.join("transcription.sqlite3")).unwrap();
-    registry.enqueue(&id, "base", &transcript.model_hash).unwrap();
-    assert!(registry.claim(&id, "unused", &transcript.model_hash).unwrap());
+    registry
+        .enqueue(&id, "base", &transcript.model_hash)
+        .unwrap();
+    assert!(registry
+        .claim(&id, "unused", &transcript.model_hash)
+        .unwrap());
     registry
         .complete(
             &id,
@@ -498,7 +558,9 @@ fn reconcile_indexes_summary_and_speaker_labels_for_a_recording_under_a_custom_l
     let summaries = SummaryStore::open(&default_root.join("summary.sqlite3")).unwrap();
     summaries.enqueue(&id, &transcript_checksum).unwrap();
     assert!(summaries.claim(&id, "qwen3:8b").unwrap());
-    summaries.complete(&id, &summary_checksum, "Weekly sync").unwrap();
+    summaries
+        .complete(&id, &summary_checksum, "Weekly sync")
+        .unwrap();
 
     let index = SearchStore::open_in_memory().unwrap();
     // Only listing `custom_root` as a known extra root makes it resolvable

@@ -35,7 +35,8 @@ const GPU_BUILD: bool = cfg!(feature = "cuda");
 /// rather than once for its own transcription and again to feed acoustic
 /// echo cancellation, which is the double decode this file used to do.
 #[cfg(test)]
-static DECODE_TRACK_16K_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DECODE_TRACK_16K_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 const BACKEND_CPU: u8 = 1;
 const BACKEND_CUDA: u8 = 2;
@@ -231,17 +232,17 @@ impl TranscriptionEngine for LocalWhisperEngine {
         let mut processed: u32 = 0;
         progress(0);
         let mut run_track = |track: &Track,
-                              samples: &[f32],
-                              echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
-                              processed: &mut u32,
-                              segments: &mut Vec<TranscriptSegment>,
-                              directions: &mut Vec<&'static str>,
-                              languages_used: &mut Vec<String>,
-                              warnings: &mut Vec<String>|
+                             samples: &[f32],
+                             echo_blocks: Option<&[echo_cancel::BlockEnergy]>,
+                             processed: &mut u32,
+                             segments: &mut Vec<TranscriptSegment>,
+                             directions: &mut Vec<&'static str>,
+                             languages_used: &mut Vec<String>,
+                             warnings: &mut Vec<String>|
          -> Result<(), String> {
             check_cancelled(cancelled)?;
             let start_progress = ((*processed * 100) / total) as u8;
-            let end_progress = ((( *processed + 1) * 100) / total) as u8;
+            let end_progress = (((*processed + 1) * 100) / total) as u8;
             let before = segments.len();
             let (chunk_count, detected_language) = transcribe_decoded_track(
                 &context,
@@ -259,7 +260,11 @@ impl TranscriptionEngine for LocalWhisperEngine {
                     );
                 },
             )?;
-            let direction: &'static str = if track.direction == "output" { "output" } else { "input" };
+            let direction: &'static str = if track.direction == "output" {
+                "output"
+            } else {
+                "input"
+            };
             directions.extend(std::iter::repeat_n(direction, segments.len() - before));
             if chunk_count > 1 {
                 warnings.push(format!(
@@ -282,8 +287,10 @@ impl TranscriptionEngine for LocalWhisperEngine {
         // weak/far-end-dominated residual (see `PARTIAL_SIMILARITY_THRESHOLD`
         // in `echo_dedup.rs`), the same signal `transcribe_decoded_track`
         // used to gate them before Whisper ever saw them.
-        let mut echo_traces: std::collections::HashMap<String, (Vec<echo_cancel::BlockEnergy>, f32)> =
-            std::collections::HashMap::new();
+        let mut echo_traces: std::collections::HashMap<
+            String,
+            (Vec<echo_cancel::BlockEnergy>, f32),
+        > = std::collections::HashMap::new();
         if let Some(handle) = aec_handle {
             // AEC only ever substitutes "input" tracks (see
             // `apply_echo_cancellation`); every other track's samples are
@@ -307,7 +314,10 @@ impl TranscriptionEngine for LocalWhisperEngine {
             warnings.extend(aec_warnings);
             for (track, samples, blocks) in cleaned_inputs.iter() {
                 let near_end_level_rms = residual_echo_gate::derive_near_end_level_rms(blocks);
-                echo_traces.insert(track.source_id.clone(), (blocks.clone(), near_end_level_rms));
+                echo_traces.insert(
+                    track.source_id.clone(),
+                    (blocks.clone(), near_end_level_rms),
+                );
                 run_track(
                     track,
                     samples,
@@ -336,7 +346,13 @@ impl TranscriptionEngine for LocalWhisperEngine {
         // Sort `segments` and `directions` together (as one indirect key) so
         // they stay paired index-for-index.
         let mut order: Vec<usize> = (0..segments.len()).collect();
-        order.sort_by_key(|&i| (segments[i].start_ms, segments[i].end_ms, segments[i].source_id.clone()));
+        order.sort_by_key(|&i| {
+            (
+                segments[i].start_ms,
+                segments[i].end_ms,
+                segments[i].source_id.clone(),
+            )
+        });
         let sorted_segments: Vec<TranscriptSegment> =
             order.iter().map(|&i| segments[i].clone()).collect();
         let sorted_directions: Vec<&'static str> = order.iter().map(|&i| directions[i]).collect();
@@ -350,8 +366,10 @@ impl TranscriptionEngine for LocalWhisperEngine {
                 let Some((blocks, near_end_level_rms)) = echo_traces.get(&segment.source_id) else {
                     return false;
                 };
-                let start_sample = (segment.start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
-                let end_sample = (segment.end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let start_sample =
+                    (segment.start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let end_sample =
+                    (segment.end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
                 residual_echo_gate::overlaps_weak_far_end_residual(
                     blocks,
                     start_sample,
@@ -718,7 +736,8 @@ fn decode_window(
         // can only ever remove echo-adjacent mic audio.
         if track.direction != "output" {
             if let Some(blocks) = echo_blocks {
-                let start_sample = (start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
+                let start_sample =
+                    (start_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
                 let end_sample = (end_ms.saturating_mul(u64::from(TARGET_RATE)) / 1000) as usize;
                 // Text+timing tiny-segment rule (see `residual_echo_gate`):
                 // a mic segment of one or two words, fully inside far-end
@@ -845,7 +864,8 @@ fn detect_speech_regions(samples: &[f32], sample_rate: u32) -> Vec<(usize, usize
 
     let pad_frames = (u64::from(VAD_HANGOVER_MS) / u64::from(VAD_FRAME_MS)).max(1) as usize;
     let merge_gap_frames = (u64::from(VAD_MERGE_GAP_MS) / u64::from(VAD_FRAME_MS)).max(1) as usize;
-    let min_region_frames = (u64::from(VAD_MIN_REGION_MS) / u64::from(VAD_FRAME_MS)).max(1) as usize;
+    let min_region_frames =
+        (u64::from(VAD_MIN_REGION_MS) / u64::from(VAD_FRAME_MS)).max(1) as usize;
 
     // Raw (unpadded) contiguous speech runs first, so a short noise spike can
     // be dropped by its true duration rather than by a duration inflated by
@@ -899,7 +919,8 @@ fn detect_speech_regions(samples: &[f32], sample_rate: u32) -> Vec<(usize, usize
 /// `VAD_MAX_WINDOW_SECONDS`, preserving exact sample-index boundaries so
 /// callers can map decoded timestamps back onto the original timeline.
 fn windows_for_regions(regions: &[(usize, usize)], sample_rate: u32) -> Vec<(usize, usize)> {
-    let max_window = ((sample_rate as usize).saturating_mul(VAD_MAX_WINDOW_SECONDS as usize)).max(1);
+    let max_window =
+        ((sample_rate as usize).saturating_mul(VAD_MAX_WINDOW_SECONDS as usize)).max(1);
     let mut windows = Vec::new();
     for &(start, end) in regions {
         let mut window_start = start;
@@ -970,8 +991,14 @@ fn resample_to(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Result<Vec<f3
     let input_frames = samples.len();
     let input = InterleavedSlice::new(&samples, 1, input_frames)
         .map_err(|error| format!("Could not adapt mono audio for resampling: {error}"))?;
-    let mut resampler = Fft::<f32>::new(from_rate as usize, to_rate as usize, 1024, 1, FixedSync::Both)
-        .map_err(|error| format!("Could not configure anti-aliasing resampler: {error}"))?;
+    let mut resampler = Fft::<f32>::new(
+        from_rate as usize,
+        to_rate as usize,
+        1024,
+        1,
+        FixedSync::Both,
+    )
+    .map_err(|error| format!("Could not configure anti-aliasing resampler: {error}"))?;
     let output = resampler
         .process_all(&input, input_frames, None)
         .map_err(|error| format!("Could not resample WAV audio: {error}"))?;
@@ -1215,14 +1242,21 @@ fn load_flac_16k_mono(path: &Path, max_duration_seconds: u64) -> Result<Vec<f32>
 /// `&mut` so this can run on a background thread (see its caller in
 /// `transcribe`) while the main thread keeps transcribing tracks AEC never
 /// touches.
-type CleanedInputs = (Vec<(Track, Vec<f32>, Vec<echo_cancel::BlockEnergy>)>, Vec<String>);
+type CleanedInputs = (
+    Vec<(Track, Vec<f32>, Vec<echo_cancel::BlockEnergy>)>,
+    Vec<String>,
+);
 
 fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
     let mut warnings = Vec::new();
-    let output_tracks: Vec<&TrackPcm> =
-        pcm.iter().filter(|(track, _)| track.direction == "output").collect();
-    let input_tracks: Vec<&TrackPcm> =
-        pcm.iter().filter(|(track, _)| track.direction == "input").collect();
+    let output_tracks: Vec<&TrackPcm> = pcm
+        .iter()
+        .filter(|(track, _)| track.direction == "output")
+        .collect();
+    let input_tracks: Vec<&TrackPcm> = pcm
+        .iter()
+        .filter(|(track, _)| track.direction == "input")
+        .collect();
     if output_tracks.is_empty() || input_tracks.is_empty() {
         let unchanged = input_tracks
             .into_iter()
@@ -1235,7 +1269,11 @@ fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
     // further resampling -- unlike the previous implementation, which
     // resampled every output track to each microphone track's own native
     // rate separately, once per microphone track.
-    let reference_len = output_tracks.iter().map(|(_, samples)| samples.len()).max().unwrap_or(0);
+    let reference_len = output_tracks
+        .iter()
+        .map(|(_, samples)| samples.len())
+        .max()
+        .unwrap_or(0);
     let mut reference = vec![0.0f32; reference_len];
     for (_, samples) in &output_tracks {
         for (slot, sample) in reference.iter_mut().zip(samples.iter()) {
@@ -1256,8 +1294,10 @@ fn apply_echo_cancellation(pcm: Vec<TrackPcm>) -> CleanedInputs {
         })
         .collect();
     if cleaned_any {
-        let reference_names: Vec<&str> =
-            output_tracks.iter().map(|(track, _)| track.name.as_str()).collect();
+        let reference_names: Vec<&str> = output_tracks
+            .iter()
+            .map(|(track, _)| track.name.as_str())
+            .collect();
         warnings.push(format!(
             "Acoustic echo cancellation was applied to reduce audio from {} appearing twice in this transcript.",
             reference_names.join(", ")
@@ -1549,7 +1589,13 @@ mod tests {
         // simulating loudspeaker leakage picked up by the microphone.
         let delay = 8usize;
         let mic_samples: Vec<f32> = (0..reference_samples.len())
-            .map(|i| if i >= delay { reference_samples[i - delay] * 0.6 } else { 0.0 })
+            .map(|i| {
+                if i >= delay {
+                    reference_samples[i - delay] * 0.6
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let pcm = vec![
             (
@@ -1562,11 +1608,21 @@ mod tests {
             ),
         ];
         let (result, warnings) = apply_echo_cancellation(pcm);
-        assert_eq!(result.len(), 1, "only the input track's samples are returned");
+        assert_eq!(
+            result.len(),
+            1,
+            "only the input track's samples are returned"
+        );
         let (cleaned_track, cleaned_samples, blocks) = &result[0];
         assert_eq!(cleaned_track.direction, "input");
-        assert_ne!(cleaned_samples, &mic_samples, "input track should be cleaned in place");
-        assert!(!blocks.is_empty(), "a track AEC actually cleaned should have a block trace");
+        assert_ne!(
+            cleaned_samples, &mic_samples,
+            "input track should be cleaned in place"
+        );
+        assert!(
+            !blocks.is_empty(),
+            "a track AEC actually cleaned should have a block trace"
+        );
         assert!(warnings.iter().any(|w| w.contains("echo cancellation")));
     }
 
@@ -1620,11 +1676,25 @@ mod tests {
         let sample_rate = 48_000;
         let input_path = dir.join("mic.wav");
         let output_path = dir.join("loopback.wav");
-        fs::write(&input_path, pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate)).unwrap();
-        fs::write(&output_path, pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate)).unwrap();
+        fs::write(
+            &input_path,
+            pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate),
+        )
+        .unwrap();
+        fs::write(
+            &output_path,
+            pcm16_wav(&tone_i16(2, sample_rate, 6_000), 1, sample_rate),
+        )
+        .unwrap();
         let tracks = vec![
-            (track("input", "Microphone", &input_path, sample_rate), input_path.clone()),
-            (track("output", "Speakers", &output_path, sample_rate), output_path.clone()),
+            (
+                track("input", "Microphone", &input_path, sample_rate),
+                input_path.clone(),
+            ),
+            (
+                track("output", "Speakers", &output_path, sample_rate),
+                output_path.clone(),
+            ),
         ];
         DECODE_TRACK_16K_CALLS.store(0, Ordering::SeqCst);
         let cancelled = AtomicBool::new(false);
@@ -1747,7 +1817,10 @@ mod tests {
         let path = dir.join("distil.bin");
         fs::write(&path, ggml_header(1280, 32, 2, 1)).unwrap();
         let error = inspect_model(&path).unwrap_err();
-        assert!(error.contains("distil-large-v3"), "unexpected error: {error}");
+        assert!(
+            error.contains("distil-large-v3"),
+            "unexpected error: {error}"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

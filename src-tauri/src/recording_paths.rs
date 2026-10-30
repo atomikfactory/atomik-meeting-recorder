@@ -79,8 +79,8 @@ pub(crate) fn resolved_recording_directory(
     extra_roots: &[PathBuf],
     recording: &Recording,
 ) -> Result<PathBuf, String> {
-    let canonical_default = fs::canonicalize(default_root)
-        .map_err(|e| format!("canonicalize recordings root: {e}"))?;
+    let canonical_default =
+        fs::canonicalize(default_root).map_err(|e| format!("canonicalize recordings root: {e}"))?;
     let root = match recording.library_root.as_deref() {
         None => canonical_default.clone(),
         Some(saved) => {
@@ -323,7 +323,12 @@ mod tests {
         assert!(resolved_recording_directory(&default_root, &[], &record).is_err());
         // ...but listing the custom root as a known extra root resolves it.
         assert_eq!(
-            resolved_recording_directory(&default_root, std::slice::from_ref(&custom_root), &record).unwrap(),
+            resolved_recording_directory(
+                &default_root,
+                std::slice::from_ref(&custom_root),
+                &record
+            )
+            .unwrap(),
             directory
         );
         let _ = fs::remove_dir_all(default_root);
@@ -358,7 +363,8 @@ mod tests {
         // always means the default root -- extra roots are irrelevant here.
         let unrelated = root("unrelated-c");
         assert_eq!(
-            resolved_recording_directory(&default_root, std::slice::from_ref(&unrelated), &record).unwrap(),
+            resolved_recording_directory(&default_root, std::slice::from_ref(&unrelated), &record)
+                .unwrap(),
             legacy.canonicalize().unwrap()
         );
         let _ = fs::remove_dir_all(default_root);

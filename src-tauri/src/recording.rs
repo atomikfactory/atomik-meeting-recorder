@@ -116,7 +116,13 @@ impl RecordingService {
         known: KnownLibraryRoots,
         title_provider: TitleProvider,
     ) -> Self {
-        Self::with_backend_and_title(dir, current, known, || Box::new(NativeCapture), title_provider)
+        Self::with_backend_and_title(
+            dir,
+            current,
+            known,
+            || Box::new(NativeCapture),
+            title_provider,
+        )
     }
     #[cfg(test)]
     fn with_backend(

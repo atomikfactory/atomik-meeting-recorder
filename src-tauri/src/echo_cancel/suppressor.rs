@@ -29,7 +29,9 @@ pub struct DoubleTalkDetector {
 
 impl DoubleTalkDetector {
     pub fn new() -> Self {
-        Self { smoothed_ratio: 0.0 }
+        Self {
+            smoothed_ratio: 0.0,
+        }
     }
 
     /// Returns the step-size multiplier in `[MIN_STEP_SCALE, 1.0]` for this

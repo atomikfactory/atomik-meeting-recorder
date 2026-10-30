@@ -184,10 +184,7 @@ fn real_voice_profiles_identify_known_speakers_across_meetings() {
         .expect("embedding extractor must initialize");
     let mut profiles = Vec::new();
     for (index, speaker) in speakers.iter().enumerate() {
-        let name = PLACEHOLDER_NAMES
-            .get(index)
-            .copied()
-            .unwrap_or("Unnamed");
+        let name = PLACEHOLDER_NAMES.get(index).copied().unwrap_or("Unnamed");
         match speaker_centroid(&extractor, &naming_samples, *speaker) {
             Ok((embedding, total_seconds)) => {
                 println!(

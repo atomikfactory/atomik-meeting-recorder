@@ -95,7 +95,9 @@ fn manifest_file_path(home: &Path, browser: Browser) -> PathBuf {
             Browser::Firefox => PathBuf::new(),
             _ => PathBuf::from("NativeMessagingHosts"),
         };
-        home.join(dir).join(suffix).join(format!("{HOST_NAME}.json"))
+        home.join(dir)
+            .join(suffix)
+            .join(format!("{HOST_NAME}.json"))
     }
 }
 
@@ -277,9 +279,8 @@ pub mod real {
                 return Err(format!("RegCreateKeyExW failed: {status:?}"));
             }
             let value = wide(manifest_path);
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2)
-            };
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2) };
             let set = unsafe { RegSetValueExW(key, PCWSTR::null(), None, REG_SZ, Some(bytes)) };
             unsafe {
                 let _ = RegCloseKey(key);

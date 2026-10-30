@@ -129,8 +129,15 @@ pub fn format_segments(
     segments
         .iter()
         .map(|segment| {
-            let remote_speaker = remote_speaker_by_segment.and_then(|m| m.get(&segment_key(segment)).copied());
-            let label = presentation_label(recording, segment, local_speaker_name, remote_speaker, names);
+            let remote_speaker =
+                remote_speaker_by_segment.and_then(|m| m.get(&segment_key(segment)).copied());
+            let label = presentation_label(
+                recording,
+                segment,
+                local_speaker_name,
+                remote_speaker,
+                names,
+            );
             format!(
                 "[{}] {}: {}",
                 timestamp(segment.start_ms),
@@ -167,11 +174,19 @@ fn rendered_line_len_estimate(segment: &TranscriptSegment) -> usize {
 /// from every chunk's summary. Returns a single chunk covering everything when
 /// it already fits, so callers do not need a separate "direct" path.
 pub fn plan_chunks(segments: &[TranscriptSegment], num_ctx: usize) -> Vec<Vec<TranscriptSegment>> {
-    let budget_chars = num_ctx.saturating_mul(CHARS_PER_TOKEN).saturating_sub(2000).max(2000);
+    let budget_chars = num_ctx
+        .saturating_mul(CHARS_PER_TOKEN)
+        .saturating_sub(2000)
+        .max(2000);
     if segments.is_empty() {
         return vec![Vec::new()];
     }
-    if segments.iter().map(rendered_line_len_estimate).sum::<usize>() <= budget_chars {
+    if segments
+        .iter()
+        .map(rendered_line_len_estimate)
+        .sum::<usize>()
+        <= budget_chars
+    {
         return vec![segments.to_vec()];
     }
     let mut chunks = Vec::new();
@@ -281,12 +296,21 @@ impl OllamaClient {
         let request = ChatRequest {
             model,
             messages: vec![
-                ChatMessage { role: "system", content: system.to_string() },
-                ChatMessage { role: "user", content: user.to_string() },
+                ChatMessage {
+                    role: "system",
+                    content: system.to_string(),
+                },
+                ChatMessage {
+                    role: "user",
+                    content: user.to_string(),
+                },
             ],
             stream: false,
             format: schema,
-            options: ChatOptions { temperature: 0.2, num_ctx },
+            options: ChatOptions {
+                temperature: 0.2,
+                num_ctx,
+            },
             // qwen3's "thinking" mode roughly doubles latency for a summarization
             // task that does not benefit from it; other models ignore this field.
             think: model.starts_with("qwen3").then_some(false),
@@ -313,7 +337,8 @@ fn describe_transport_error(error: ureq::Error) -> String {
     }
 }
 fn describe_chat_error(model: &str) -> impl Fn(ureq::Error) -> String + '_ {
-    move |error| match error {
+    move |error| {
+        match error {
         ureq::Error::Status(404, _) => format!(
             "Ollama does not have the model '{model}'. Run `ollama pull {model}` and it will be retried automatically."
         ),
@@ -323,6 +348,7 @@ fn describe_chat_error(model: &str) -> impl Fn(ureq::Error) -> String + '_ {
         ureq::Error::Transport(_) => {
             "Ollama is not reachable at the configured URL. Start Ollama and it will be retried automatically.".into()
         }
+    }
     }
 }
 
@@ -379,7 +405,10 @@ mod tests {
     }
     #[test]
     fn small_transcript_is_a_single_chunk() {
-        let segments = vec![segment(0, "Microphone", "hello"), segment(1000, "Speakers", "hi")];
+        let segments = vec![
+            segment(0, "Microphone", "hello"),
+            segment(1000, "Speakers", "hi"),
+        ];
         let chunks = plan_chunks(&segments, 32_768);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 2);
@@ -393,7 +422,8 @@ mod tests {
         assert!(chunks.len() > 1);
         // Every chunk after the first repeats a tail of the previous chunk.
         for window in chunks.windows(2) {
-            let previous_tail = &window[0][window[0].len().saturating_sub(CHUNK_OVERLAP_SEGMENTS)..];
+            let previous_tail =
+                &window[0][window[0].len().saturating_sub(CHUNK_OVERLAP_SEGMENTS)..];
             assert_eq!(previous_tail[0].start_ms, window[1][0].start_ms);
         }
         // Chunking must not drop text: every source segment appears somewhere.
@@ -403,7 +433,10 @@ mod tests {
     }
     #[test]
     fn empty_transcript_plans_one_empty_chunk() {
-        assert_eq!(plan_chunks(&[], 32_768), vec![Vec::<TranscriptSegment>::new()]);
+        assert_eq!(
+            plan_chunks(&[], 32_768),
+            vec![Vec::<TranscriptSegment>::new()]
+        );
     }
     #[test]
     fn think_is_set_false_only_for_qwen3_models() {
@@ -413,7 +446,10 @@ mod tests {
             messages: vec![],
             stream: false,
             format: serde_json::json!({}),
-            options: ChatOptions { temperature: 0.2, num_ctx: 4096 },
+            options: ChatOptions {
+                temperature: 0.2,
+                num_ctx: 4096,
+            },
             think: "qwen3:8b".starts_with("qwen3").then_some(false),
         };
         let value = serde_json::to_value(&request).unwrap();

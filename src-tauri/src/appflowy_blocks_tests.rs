@@ -10,13 +10,27 @@ fn sample_meeting() -> MeetingExportData {
             summary: "The team discussed the roadmap.".into(),
             key_points: vec!["Roadmap reviewed".into()],
             decisions: vec!["Ship behind a flag".into()],
-            action_items: vec![ActionItem { task: "Write design doc".into(), owner: Some("Alex".into()), due: Some("Friday".into()) }],
+            action_items: vec![ActionItem {
+                task: "Write design doc".into(),
+                owner: Some("Alex".into()),
+                due: Some("Friday".into()),
+            }],
             open_questions: vec!["Who owns rollout?".into()],
             language: "en".into(),
         }),
         turns: vec![
-            SpeakerTurn { speaker_label: "You".into(), start_ms: 0, end_ms: 12_000, text: "Let's kick off.".into() },
-            SpeakerTurn { speaker_label: "Speaker 1".into(), start_ms: 13_000, end_ms: 40_000, text: "Sounds good.".into() },
+            SpeakerTurn {
+                speaker_label: "You".into(),
+                start_ms: 0,
+                end_ms: 12_000,
+                text: "Let's kick off.".into(),
+            },
+            SpeakerTurn {
+                speaker_label: "Speaker 1".into(),
+                start_ms: 13_000,
+                end_ms: 40_000,
+                text: "Sounds good.".into(),
+            },
         ],
     }
 }
@@ -27,8 +41,18 @@ fn native_block_matches_the_documented_ai_meeting_schema() {
     assert_eq!(block["type"], "ai_meeting");
     assert_eq!(block["data"]["title"], "Weekly sync");
     let children = block["children"].as_array().unwrap();
-    let types: Vec<&str> = children.iter().map(|c| c["type"].as_str().unwrap()).collect();
-    assert_eq!(types, vec!["ai_meeting_summary", "ai_meeting_notes", "ai_meeting_transcription"]);
+    let types: Vec<&str> = children
+        .iter()
+        .map(|c| c["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            "ai_meeting_summary",
+            "ai_meeting_notes",
+            "ai_meeting_transcription"
+        ]
+    );
     let transcription = &children[2];
     let speakers = transcription["children"].as_array().unwrap();
     assert_eq!(speakers.len(), 2);
@@ -72,16 +96,25 @@ fn fallback_block_uses_only_standard_block_types() {
     let blocks = build_fallback_meeting_block(&sample_meeting());
     let array = blocks.as_array().unwrap();
     let types: Vec<&str> = array.iter().map(|b| b["type"].as_str().unwrap()).collect();
-    assert_eq!(types, vec!["heading", "paragraph", "toggle_list", "toggle_list"]);
+    assert_eq!(
+        types,
+        vec!["heading", "paragraph", "toggle_list", "toggle_list"]
+    );
     // No ai_meeting* type appears anywhere in the fallback tree.
     let rendered = serde_json::to_string(&blocks).unwrap();
     assert!(!rendered.contains("ai_meeting"));
     let transcript_toggle = &array[3];
-    assert_eq!(transcript_toggle["data"]["delta"][0]["insert"], "Transcript");
+    assert_eq!(
+        transcript_toggle["data"]["delta"][0]["insert"],
+        "Transcript"
+    );
     let quotes = transcript_toggle["children"].as_array().unwrap();
     assert_eq!(quotes.len(), 2);
     assert_eq!(quotes[0]["type"], "quote");
-    assert!(quotes[0]["data"]["delta"][0]["insert"].as_str().unwrap().contains("You"));
+    assert!(quotes[0]["data"]["delta"][0]["insert"]
+        .as_str()
+        .unwrap()
+        .contains("You"));
 }
 
 #[test]
@@ -109,7 +142,8 @@ fn french_utf8_and_special_characters_round_trip_through_the_delta() {
         speaker_label: "Vous".into(),
         start_ms: 0,
         end_ms: 5_000,
-        text: "Résumé : \"c'était très clair\", n'est-ce pas ? Coût: 100% \\ garanti\nligne 2".into(),
+        text: "Résumé : \"c'était très clair\", n'est-ce pas ? Coût: 100% \\ garanti\nligne 2"
+            .into(),
     }];
     meeting.summary = Some(SummaryOutput {
         title: "Réunion".into(),
@@ -130,7 +164,12 @@ fn french_utf8_and_special_characters_round_trip_through_the_delta() {
 #[test]
 fn truncate_turns_keeps_whole_turns_within_the_budget() {
     let turns: Vec<SpeakerTurn> = (0..10)
-        .map(|i| SpeakerTurn { speaker_label: "You".into(), start_ms: i * 1000, end_ms: i * 1000 + 500, text: "x".repeat(100) })
+        .map(|i| SpeakerTurn {
+            speaker_label: "You".into(),
+            start_ms: i * 1000,
+            end_ms: i * 1000 + 500,
+            text: "x".repeat(100),
+        })
         .collect();
     let (kept, truncated) = truncate_turns(&turns, 350);
     assert!(truncated);
@@ -144,7 +183,12 @@ fn truncate_turns_keeps_whole_turns_within_the_budget() {
 fn oversized_transcript_is_truncated_with_a_visible_note_in_both_formats() {
     let mut meeting = sample_meeting();
     meeting.turns = (0..10)
-        .map(|i| SpeakerTurn { speaker_label: "You".into(), start_ms: i * 1000, end_ms: i * 1000 + 500, text: "x".repeat(MAX_TRANSCRIPT_CHARS / 5) })
+        .map(|i| SpeakerTurn {
+            speaker_label: "You".into(),
+            start_ms: i * 1000,
+            end_ms: i * 1000 + 500,
+            text: "x".repeat(MAX_TRANSCRIPT_CHARS / 5),
+        })
         .collect();
     let native = build_native_meeting_block(&meeting);
     let native_rendered = serde_json::to_string(&native).unwrap();
@@ -158,5 +202,7 @@ fn oversized_transcript_is_truncated_with_a_visible_note_in_both_formats() {
 fn a_transcript_within_budget_is_never_truncated() {
     let meeting = sample_meeting();
     let native = build_native_meeting_block(&meeting);
-    assert!(!serde_json::to_string(&native).unwrap().contains("Transcript truncated"));
+    assert!(!serde_json::to_string(&native)
+        .unwrap()
+        .contains("Transcript truncated"));
 }

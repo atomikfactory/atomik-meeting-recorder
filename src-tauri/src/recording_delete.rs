@@ -13,10 +13,11 @@
 //! any other id in the same batch from being deleted.
 
 use crate::{
-    appflowy_store::AppFlowyStore, audio_compress_store::CompressionStore,
-    diarization_store::DiarizationStore, recording::Recording,
-    recording_paths::resolved_recording_directory, recording_store::RecordingStore,
-    summary_store::SummaryStore, transcription_store::TranscriptionStore,
+    appflowy_store::AppFlowyStore, atomik_kb_store::AtomikKbStore,
+    audio_compress_store::CompressionStore, diarization_store::DiarizationStore,
+    recording::Recording, recording_paths::resolved_recording_directory,
+    recording_store::RecordingStore, summary_store::SummaryStore,
+    transcription_store::TranscriptionStore,
 };
 use serde::Serialize;
 use std::{
@@ -76,6 +77,7 @@ pub struct DeleteStores<'a> {
     pub summary: &'a SummaryStore,
     pub compression: &'a CompressionStore,
     pub appflowy: &'a AppFlowyStore,
+    pub atomik_kb: &'a AtomikKbStore,
     pub speaker_names: &'a crate::speaker_names::SpeakerNameStore,
 }
 
@@ -138,6 +140,14 @@ fn active_job_reason(id: &str, stores: &DeleteStores) -> Result<(), String> {
     {
         return Err("An AppFlowy export is in progress.".into());
     }
+    if stores
+        .atomik_kb
+        .get_job(id)
+        .map_err(|e| format!("Could not read atomik-kb export status: {e}"))?
+        .is_some_and(|job| job.status == "exporting")
+    {
+        return Err("An atomik-kb export is in progress.".into());
+    }
     Ok(())
 }
 
@@ -171,7 +181,12 @@ fn delete_one(
     // completely alone rather than guessed at.
     let folder = match resolved_recording_directory(default_root, extra_roots, &recording) {
         Ok(dir) => dir,
-        Err(e) => return skip(id, format!("Could not locate this recording's folder safely: {e}")),
+        Err(e) => {
+            return skip(
+                id,
+                format!("Could not locate this recording's folder safely: {e}"),
+            )
+        }
     };
 
     // Tombstone first (the same crash-safety ordering as `delete_recording`):
@@ -182,7 +197,10 @@ fn delete_one(
     // *unfinished* recordings, so a tombstoned row is never resurrected.
     let now = now_ms();
     if let Err(e) = stores.recordings.tombstone(id, now) {
-        return skip(id, format!("Could not mark this recording for deletion: {e}"));
+        return skip(
+            id,
+            format!("Could not mark this recording for deletion: {e}"),
+        );
     }
 
     let remove_result = match mode {
@@ -222,6 +240,9 @@ fn delete_one(
     if let Err(e) = stores.appflowy.remove_job_if_idle(id) {
         leftovers.push(format!("AppFlowy export: {e}"));
     }
+    if let Err(e) = stores.atomik_kb.remove_job_if_idle(id) {
+        leftovers.push(format!("atomik-kb export: {e}"));
+    }
     // Best-effort: per-recording speaker names are pure presentation
     // metadata with no job state of its own, so it is simply cleared rather
     // than gated on an "idle" check like the pipeline stores above.
@@ -254,7 +275,17 @@ pub fn delete_recordings_from_disk(
 ) -> DeleteSummary {
     let results = recording_ids
         .iter()
-        .map(|id| delete_one(id, mode, default_root, extra_roots, stores, active_recording_id, trash))
+        .map(|id| {
+            delete_one(
+                id,
+                mode,
+                default_root,
+                extra_roots,
+                stores,
+                active_recording_id,
+                trash,
+            )
+        })
         .collect();
     DeleteSummary { results }
 }

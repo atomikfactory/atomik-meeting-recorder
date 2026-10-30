@@ -49,7 +49,10 @@ fn cancel_echo_speed_on_a_real_recording() {
     };
     let (mic, sample_rate) = load_mono(&mic_path);
     let (reference, ref_rate) = load_mono(&ref_path);
-    assert_eq!(sample_rate, ref_rate, "benchmark expects matching native sample rates");
+    assert_eq!(
+        sample_rate, ref_rate,
+        "benchmark expects matching native sample rates"
+    );
     let real_time_secs = mic.len() as f64 / f64::from(sample_rate);
 
     let start = Instant::now();

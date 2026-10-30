@@ -13,11 +13,7 @@
 
 use claxon::FlacReader;
 use flacenc::error::Verify;
-use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-};
+use std::{fs::OpenOptions, io::Write, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioInfo {
@@ -181,8 +177,8 @@ pub fn encode_flac_new(
 /// bounded chunked transcription decode vs. whole-track compression input --
 /// have different memory/latency shapes).
 pub fn read_wav_pcm16(path: &Path) -> Result<(AudioInfo, Vec<i16>), String> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|error| format!("Could not read saved WAV: {error}"))?;
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|error| format!("Could not read saved WAV: {error}"))?;
     let spec = reader.spec();
     if spec.channels == 0 || spec.sample_rate == 0 {
         return Err("WAV has an invalid channel count or sample rate.".into());

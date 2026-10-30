@@ -73,7 +73,10 @@ pub struct AppFlowyStore {
 }
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 /// Same shape as `summary_store::backoff_seconds`: 5s, 10s, 20s, ... capped
 /// at 5 minutes.
@@ -86,7 +89,10 @@ impl AppFlowyStore {
         if let Some(dir) = p.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        if fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             return Err("appflowy database must not be a symlink".into());
         }
         let c = Connection::open(p).map_err(|e| e.to_string())?;
@@ -106,7 +112,10 @@ impl AppFlowyStore {
         // `ALTER TABLE ... ADD COLUMN` errors if the column already exists
         // (e.g. re-opening a database this same version already migrated),
         // which is expected and ignored.
-        let _ = c.execute("ALTER TABLE appflowy_pages ADD COLUMN generation INTEGER NOT NULL DEFAULT 1", []);
+        let _ = c.execute(
+            "ALTER TABLE appflowy_pages ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         Ok(Self { c: Mutex::new(c) })
     }
 
@@ -189,7 +198,8 @@ impl AppFlowyStore {
                 params![key, kind, parent_key, workspace_id, name, planned_view_id, CURRENT_GENERATION],
             )
             .map_err(|e| e.to_string())?;
-        self.get_page(key)?.ok_or_else(|| "page record vanished after insert".into())
+        self.get_page(key)?
+            .ok_or_else(|| "page record vanished after insert".into())
     }
     /// True if `view_id` is recorded as a page this integration itself
     /// created/adopted at a legacy generation -- used to exclude a
@@ -278,7 +288,10 @@ impl AppFlowyStore {
         self.c
             .lock()
             .map_err(|_| "store lock")?
-            .execute("UPDATE appflowy_jobs SET status='queued' WHERE status='exporting'", [])
+            .execute(
+                "UPDATE appflowy_jobs SET status='queued' WHERE status='exporting'",
+                [],
+            )
             .map_err(|e| e.to_string())?;
         Ok(())
     }

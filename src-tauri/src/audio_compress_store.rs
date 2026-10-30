@@ -92,7 +92,10 @@ impl CompressionStore {
             .optional()
             .map_err(|e| e.to_string())?;
         if status.as_deref() == Some("compressing") {
-            return Err("Compression is in progress; wait for it to finish before deleting this recording.".into());
+            return Err(
+                "Compression is in progress; wait for it to finish before deleting this recording."
+                    .into(),
+            );
         }
         c.execute(
             "DELETE FROM compression_jobs WHERE recording_id=?1",
@@ -120,12 +123,8 @@ impl CompressionStore {
                     status: r.get(1)?,
                     progress: r.get(2)?,
                     error: r.get(3)?,
-                    bytes_before: r
-                        .get::<_, Option<i64>>(4)?
-                        .map(|v| v.max(0) as u64),
-                    bytes_after: r
-                        .get::<_, Option<i64>>(5)?
-                        .map(|v| v.max(0) as u64),
+                    bytes_before: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+                    bytes_after: r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
                     #[cfg(test)]
                     attempts: r.get(6)?,
                 })
@@ -197,7 +196,8 @@ mod tests {
         let s = store();
         s.enqueue(&id()).unwrap();
         s.claim(&id()).unwrap();
-        s.status(&id(), "failed", 0, Some("verification failed")).unwrap();
+        s.status(&id(), "failed", 0, Some("verification failed"))
+            .unwrap();
         let j = s.get(&id()).unwrap().unwrap();
         assert_eq!(j.status, "failed");
         assert_eq!(j.error.as_deref(), Some("verification failed"));

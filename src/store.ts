@@ -14,6 +14,9 @@ import type {
   AppFlowyState,
   AppFlowyWorkspace,
   AppState,
+  AtomikKbConnectionTest,
+  AtomikKbPageInfo,
+  AtomikKbState,
   AudioInventory,
   AudioSourceSelection,
   AudioStorageSummary,
@@ -62,6 +65,10 @@ export const store = {
     appflowy_use_native_block: true,
     appflowy_workspace_id: null,
     appflowy_parent_view_id: null,
+    atomik_kb_enabled: false,
+    atomik_kb_auto_export: false,
+    atomik_kb_port: 47811,
+    atomik_kb_space_name: "My Daily Meeting",
     hotkey_enabled: true,
     hotkey: "CommandOrControl+Alt+R",
     recognize_known_voices: true,
@@ -101,6 +108,15 @@ export const store = {
   appflowyAuthError: null as string | null,
   appflowyDestinations: [] as AppFlowyDestination[],
   appflowyPages: [] as AppFlowyPageInfo[],
+
+  atomikKbState: {enabled:false,auto_export:false,has_token:false,port:47811,space_name:"My Daily Meeting",jobs:[],inhibited:false,error:null} as AtomikKbState,
+  atomikKbPoll: false,
+  atomikKbPages: [] as AtomikKbPageInfo[],
+  atomikKbBusy: false,
+  // Last token Save/Clear message and last "Test connection" result. Never
+  // holds a token: the field's value goes straight to the backend and is cleared.
+  atomikKbMessage: null as string | null,
+  atomikKbTest: null as AtomikKbConnectionTest | null,
 
   compressionState: {enabled:true,inhibited:false,jobs:[],error:null} as CompressionState,
   compressionPoll: false,
@@ -192,6 +208,7 @@ export const store = {
 // Sets mutated only via `.add`/`.delete`, never reassigned -- safe as plain
 // module-level exports (see file header).
 export const appflowyActionInFlight = new Set<string>();
+export const atomikKbActionInFlight = new Set<string>();
 export const summaryActionInFlight = new Set<string>();
 export const transcribeInFlight = new Set<string>();
 

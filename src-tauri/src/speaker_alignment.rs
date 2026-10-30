@@ -61,8 +61,10 @@ pub fn align_speakers(t: &Transcript, d: &DiarizationOutput) -> Result<Vec<Optio
         if m.is_empty() {
             continue;
         }
-        let mut coverage: Vec<(u32, u64)> =
-            m.iter().map(|(speaker, v)| (*speaker, merged_coverage_ms(v))).collect();
+        let mut coverage: Vec<(u32, u64)> = m
+            .iter()
+            .map(|(speaker, v)| (*speaker, merged_coverage_ms(v)))
+            .collect();
         coverage.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let (winner, winner_ms) = coverage[0];
         let runner_up_ms = coverage.get(1).map(|(_, ms)| *ms).unwrap_or(0);

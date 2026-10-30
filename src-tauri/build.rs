@@ -33,7 +33,10 @@ fn copy_native_dlls_beside_test_binaries() {
     };
     let deps_dir = profile_dir.join("deps");
     if let Err(err) = std::fs::create_dir_all(&deps_dir) {
-        println!("cargo:warning=Could not create {}: {err}", deps_dir.display());
+        println!(
+            "cargo:warning=Could not create {}: {err}",
+            deps_dir.display()
+        );
         return;
     }
     let Ok(entries) = std::fs::read_dir(profile_dir) else {

@@ -137,7 +137,11 @@ fn build_fixture() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let echo_after = apply_synthetic_rir(&reference, delay_90ms);
     let mut echo = vec![0.0f32; reference.len()];
     for i in 0..echo.len() {
-        echo[i] = if i < jump_at { echo_before[i] } else { echo_after[i] };
+        echo[i] = if i < jump_at {
+            echo_before[i]
+        } else {
+            echo_after[i]
+        };
     }
 
     let drifted_echo = resample_drift(&echo, 1.0002);
@@ -145,7 +149,8 @@ fn build_fixture() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut mic = vec![0.0f32; len];
     for i in 0..len {
         // A little sensor noise so energies are never exactly zero.
-        mic[i] = drifted_echo[i] + near_end[i] + 0.0005 * ((i * 2654435761u64 as usize) as f32).sin();
+        mic[i] =
+            drifted_echo[i] + near_end[i] + 0.0005 * ((i * 2654435761u64 as usize) as f32).sin();
     }
     let mut reference = reference;
     reference.truncate(len);
@@ -193,7 +198,10 @@ fn cancels_echo_across_drift_a_delay_jump_and_double_talk() {
     let mic_before = slice_seconds(&mic, 4.0, 6.5);
     let out_before = slice_seconds(&output, 4.0, 6.5);
     let erle_before = db(energy(mic_before), energy(out_before));
-    assert!(erle_before >= 20.0, "ERLE before jump too low: {erle_before} dB");
+    assert!(
+        erle_before >= 20.0,
+        "ERLE before jump too low: {erle_before} dB"
+    );
 
     // Far-end-only, well after the delay jump and drift reacquisition.
     let mic_after = slice_seconds(&mic, 26.0, 29.5);
@@ -218,7 +226,10 @@ fn cancels_echo_across_drift_a_delay_jump_and_double_talk() {
     // (about 3 dB of margin under the lowest, macOS, measurement) while still
     // requiring real, substantial echo cancellation -- not the near-0 dB a
     // broken or disabled canceller would show.
-    assert!(erle_after >= 12.0, "ERLE after jump too low: {erle_after} dB");
+    assert!(
+        erle_after >= 12.0,
+        "ERLE after jump too low: {erle_after} dB"
+    );
     if let Some(reported) = stats.erle_db {
         // Lower bar than the two hand-picked steady-state windows above: this
         // is averaged over every far-end-only block in the whole recording,

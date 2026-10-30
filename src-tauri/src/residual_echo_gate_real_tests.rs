@@ -23,13 +23,11 @@
 use crate::echo_cancel;
 use crate::recording::{Recording, Track};
 use crate::residual_echo_gate;
-use crate::transcription_engine::{inspect_model, load_wav_16k_mono, LocalWhisperEngine, TranscriptionEngine};
-use crate::transcription_types::TranscriptionRequest;
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::AtomicBool,
+use crate::transcription_engine::{
+    inspect_model, load_wav_16k_mono, LocalWhisperEngine, TranscriptionEngine,
 };
+use crate::transcription_types::TranscriptionRequest;
+use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
 
 /// Diagnostic (not an acceptance check): dumps the AEC block trace for one
 /// recording's very start, to explain why a specific mic segment there was or
@@ -68,7 +66,8 @@ fn real_recording_debug_block_trace() {
             block.reference_rms,
         );
     }
-    let region_gated = residual_echo_gate::is_residual_echo_region(&stats.blocks, 0, 13_440, near_end, coupling);
+    let region_gated =
+        residual_echo_gate::is_residual_echo_region(&stats.blocks, 0, 13_440, near_end, coupling);
     let tiny = residual_echo_gate::is_tiny_far_end_fragment(&stats.blocks, 0, 13_440, near_end, 1);
     println!("region[0,13440) gated={region_gated} tiny_fragment={tiny}");
 }
@@ -87,7 +86,10 @@ fn real_recordings_residual_echo_gate_eval() {
         .expect("set RESIDUAL_ECHO_REAL_RECORDINGS_DIR to a directory of recording-id subfolders");
     let model_path = PathBuf::from(model_path);
     let model = inspect_model(&model_path).expect("model must be a valid ggml Whisper file");
-    println!("\n=== Real residual-echo-gate evaluation (model: {}) ===", model.key);
+    println!(
+        "\n=== Real residual-echo-gate evaluation (model: {}) ===",
+        model.key
+    );
 
     let mut entries: Vec<_> = fs::read_dir(&recordings_dir)
         .expect("RESIDUAL_ECHO_REAL_RECORDINGS_DIR must exist")
@@ -95,7 +97,10 @@ fn real_recordings_residual_echo_gate_eval() {
         .filter(|e| e.path().is_dir())
         .collect();
     entries.sort_by_key(|e| e.file_name());
-    assert!(!entries.is_empty(), "no recording subfolders found under {recordings_dir}");
+    assert!(
+        !entries.is_empty(),
+        "no recording subfolders found under {recordings_dir}"
+    );
 
     let engine = LocalWhisperEngine::new();
     let recordings_root = PathBuf::from(&recordings_dir);

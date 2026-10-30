@@ -6,7 +6,10 @@ fn levels_are_source_mapped_independent_and_cleared_on_stop() {
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
     let mut engine = Engine {
-        current_library_root: Arc::new({ let dir = dir.clone(); move || Ok(dir.clone()) }),
+        current_library_root: Arc::new({
+            let dir = dir.clone();
+            move || Ok(dir.clone())
+        }),
         store,
         backend: backend(vec![("a", false, false, false), ("b", false, false, false)]),
         active: None,
@@ -36,7 +39,10 @@ fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
     let mut engine = Engine {
-        current_library_root: Arc::new({ let dir = dir.clone(); move || Ok(dir.clone()) }),
+        current_library_root: Arc::new({
+            let dir = dir.clone();
+            move || Ok(dir.clone())
+        }),
         store,
         backend: backend(vec![("a", false, false, false)]),
         active: None,
@@ -225,7 +231,9 @@ fn frame_timeline_first_packet_offset_is_not_a_discontinuity() {
     // with, so establishing the anchor must not itself count as a gap.
     let mut clock = FrameTimeline::default();
     let adjustments = AtomicU64::new(0);
-    let offset = clock.offset(Some(960), 48_000, 480, 960, &adjustments).unwrap();
+    let offset = clock
+        .offset(Some(960), 48_000, 480, 960, &adjustments)
+        .unwrap();
     assert_eq!(offset, 960);
     assert_eq!(adjustments.load(Ordering::Relaxed), 0);
     // This first packet did not land within budget, so the timeline is not

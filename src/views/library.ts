@@ -1,6 +1,6 @@
 import { invoke, preview } from "../api";
 import { notice } from "../ui/notice";
-import { recordingBusy, store, summaryActionInFlight, appflowyActionInFlight, transcribeInFlight } from "../store";
+import { recordingBusy, store, summaryActionInFlight, appflowyActionInFlight, atomikKbActionInFlight, transcribeInFlight } from "../store";
 import type { LibraryFilter } from "../store";
 import type { Recording, RecordingState } from "../types";
 import { escapeAttr, escapeHtml, setTextIfChanged } from "../util/escape";
@@ -10,6 +10,7 @@ import { transcriptionJob, refreshTranscriptionState } from "../settings/transcr
 import { diarizationSummary, refreshDiarizationState } from "../settings/speakers";
 import { summaryJob, summarySummary } from "../settings/summary";
 import { appflowyJob, appflowySummary, openAppFlowyUrl } from "../settings/appflowy";
+import { atomikKbJob, atomikKbSummary } from "../settings/atomikKb";
 import { audioStorageLine, compressionSummary } from "../settings/compression";
 import { speakerPanelHtml, wireSpeakerPanels } from "./speakerPanel";
 
@@ -182,13 +183,28 @@ export function recentRecordings() {
           : !appflowyJobFor && store.appflowyState.connected
             ? `<button class="secondary" data-appflowy-export="${escapeAttr(recording.recording_id)}" ${appflowyBusy ? "disabled" : ""}>Export to AppFlowy</button>`
             : "";
+    const atomikBusy = atomikKbActionInFlight.has(recording.recording_id);
+    const atomikJob = atomikKbJob(recording.recording_id);
+    const atomikState = store.atomikKbState;
+    const atomikActions = job?.status !== "completed"
+      ? ""
+      : !atomikState.enabled || !atomikState.has_token
+      ? `<button class="secondary" data-atomik-kb-setup>${atomikState.enabled ? "Add Atomik KB token" : "Set up Atomik KB export"}</button>`
+      : atomikJob?.status === "queued" || atomikJob?.status === "exporting"
+      ? `<button class="secondary" disabled>${atomikJob.status === "exporting" ? "Exporting to Atomik KB…" : "Atomik KB export queued"}</button>`
+      : atomikJob?.status === "completed"
+        ? `<button class="secondary" data-atomik-kb-export-again="${escapeAttr(recording.recording_id)}" ${atomikBusy ? "disabled" : ""}>Export to Atomik KB again</button>`
+        : atomikJob?.status === "failed"
+          ? `<button class="secondary" data-atomik-kb-retry="${escapeAttr(recording.recording_id)}" ${atomikBusy ? "disabled" : ""}>Retry Atomik KB export</button>`
+          : `<button class="secondary" data-atomik-kb-export="${escapeAttr(recording.recording_id)}" ${atomikBusy ? "disabled" : ""}>Export to Atomik KB</button>`;
     const checkbox = `<label class="select-row"><input type="checkbox" data-select="${escapeAttr(recording.recording_id)}" aria-label="Select ${escapeAttr(recording.meeting_title || "Meeting")}" ${store.selectedRecordingIds.has(recording.recording_id) ? "checked" : ""}/></label>`;
     const chip = (text: string, tone = "") => `<span class="chip-status${tone ? ` ${tone}` : ""}">${escapeHtml(text)}</span>`;
     const failedTone = (text: string) => /fail|needs model|error/i.test(text) ? "bad" : /complet|ready|exported|synced/i.test(text) ? "ok" : "";
-    const statusChips = [audioSummary(recording), ...(storageLine ? [storageLine] : []), ...(compressionLine ? [compressionLine] : []), transcriptSummary(recording), diarizationSummary(recording.recording_id), summarySummary(recording.recording_id), appflowySummary(recording.recording_id)]
+    const statusChips = [audioSummary(recording), ...(storageLine ? [storageLine] : []), ...(compressionLine ? [compressionLine] : []), transcriptSummary(recording), diarizationSummary(recording.recording_id), summarySummary(recording.recording_id), appflowySummary(recording.recording_id), atomikKbSummary(recording.recording_id)]
+      .filter((text): text is string => Boolean(text))
       .map((text) => chip(text, failedTone(text))).join("");
-    const errors = [issues, diarization?.error, summary?.error, appflowyJobFor?.error].filter(Boolean).map((text) => `<p>${escapeHtml(String(text))}</p>`).join("");
-    return `<article class="recording-row">${checkbox}<div class="rec-main"><div class="rec-title"><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)} · ${escapeHtml(recordingSources(recording))} · ID ${escapeHtml(shortId)}</small></div>${suggestedTitle}<div class="rec-status">${statusChips}</div></div><div class="rec-actions"><div class="rec-group">${action}${retry}</div><div class="rec-group">${summaryActions}</div><div class="rec-group">${appflowyActions}</div></div><div class="rec-manage">${folder}${manage}</div>${errors}${speakerPanelHtml(recording)}</article>`;
+    const errors = [issues, diarization?.error, summary?.error, appflowyJobFor?.error, atomikJob?.error].filter(Boolean).map((text) => `<p>${escapeHtml(String(text))}</p>`).join("");
+    return `<article class="recording-row">${checkbox}<div class="rec-main"><div class="rec-title"><b>${escapeHtml(recording.meeting_title || "Meeting")}</b><small>${escapeHtml(started)} · ${recordingDuration(recording)} · ${escapeHtml(recordingSources(recording))} · ID ${escapeHtml(shortId)}</small></div>${suggestedTitle}<div class="rec-status">${statusChips}</div></div><div class="rec-actions"><div class="rec-group">${action}${retry}</div><div class="rec-group">${summaryActions}</div><div class="rec-group">${appflowyActions}${atomikActions}</div></div><div class="rec-manage">${folder}${manage}</div>${errors}${speakerPanelHtml(recording)}</article>`;
   }).join("")}</div>`;
 }
 
@@ -326,6 +342,31 @@ export function updateRecordingUI() {
     const id = button.dataset.appflowyExportAgain!;
     if (!window.confirm("Export again? This creates a new page in AppFlowy alongside the existing one -- the earlier export is never modified.")) return;
     runAppFlowyAction(id, "appflowy_export_again", { confirm: true });
+  });
+  const runAtomikKbAction = async (id: string, command: string, args: Record<string, unknown> = {}) => {
+    if (atomikKbActionInFlight.has(id)) return;
+    atomikKbActionInFlight.add(id);
+    updateRecordingUI();
+    try {
+      await invoke(command, { recordingId: id, ...args });
+      await refreshAtomikKbStateAndUI();
+    } catch (error) {
+      notice(`Could not update Atomik KB export: ${String(error)}`, "error");
+    } finally {
+      atomikKbActionInFlight.delete(id);
+      updateRecordingUI();
+    }
+  };
+  document.querySelectorAll<HTMLButtonElement>("[data-atomik-kb-export]").forEach(button => button.onclick = () => runAtomikKbAction(button.dataset.atomikKbExport!, "atomik_kb_export_now"));
+  document.querySelectorAll<HTMLButtonElement>("[data-atomik-kb-setup]").forEach(button => button.onclick = () => {
+    document.querySelector<HTMLButtonElement>("[data-page='settings']")?.click();
+    document.querySelector("#atomik-kb-settings-section")?.scrollIntoView({ block: "start" });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-atomik-kb-retry]").forEach(button => button.onclick = () => runAtomikKbAction(button.dataset.atomikKbRetry!, "atomik_kb_retry"));
+  document.querySelectorAll<HTMLButtonElement>("[data-atomik-kb-export-again]").forEach(button => button.onclick = () => {
+    const id = button.dataset.atomikKbExportAgain!;
+    if (!window.confirm("Export again? This creates a new page in Atomik KB alongside the existing one -- the earlier export is never modified.")) return;
+    runAtomikKbAction(id, "atomik_kb_export_again", { confirm: true });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-use-suggested-title]").forEach(button => button.onclick = async () => {
     const id = button.dataset.useSuggestedTitle!;
@@ -582,6 +623,7 @@ function wireBulkDialog() {
 // same behaviour as before the split, just named for clarity at the call site.
 import { refreshSummaryState as refreshSummaryStateAndUI } from "../settings/summary";
 import { refreshAppFlowyState as refreshAppFlowyStateAndUI } from "../settings/appflowy";
+import { refreshAtomikKbState as refreshAtomikKbStateAndUI } from "../settings/atomikKb";
 
 function wireManagementDialog() {
   const dialog = document.querySelector<HTMLDialogElement>("#management-dialog");

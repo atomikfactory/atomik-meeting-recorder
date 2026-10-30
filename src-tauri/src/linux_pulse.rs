@@ -84,15 +84,12 @@ pub(crate) fn enumerate_sinks() -> Result<Vec<PulseSinkInfo>, String> {
         let default_sink_name = default_sink_name.clone();
         let done = Rc::new(RefCell::new(false));
         let done_cb = done.clone();
-        context
-            .borrow()
-            .introspect()
-            .get_server_info(move |info| {
-                if let Some(name) = &info.default_sink_name {
-                    *default_sink_name.borrow_mut() = name.to_string();
-                }
-                *done_cb.borrow_mut() = true;
-            });
+        context.borrow().introspect().get_server_info(move |info| {
+            if let Some(name) = &info.default_sink_name {
+                *default_sink_name.borrow_mut() = name.to_string();
+            }
+            *done_cb.borrow_mut() = true;
+        });
         pump_until(&mut mainloop, &done, deadline)?;
     }
 
@@ -165,9 +162,7 @@ fn wait_for_context_ready(
             _ => {}
         }
         if Instant::now() >= deadline {
-            return Err(
-                "Timed out connecting to the PulseAudio/PipeWire server".into(),
-            );
+            return Err("Timed out connecting to the PulseAudio/PipeWire server".into());
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -211,9 +206,7 @@ impl PulseMonitorDevice {
         let sink = sinks
             .into_iter()
             .find(|s| s.sink_name == sink_name)
-            .ok_or_else(|| {
-                format!("System-output source '{sink_name}' is no longer available")
-            })?;
+            .ok_or_else(|| format!("System-output source '{sink_name}' is no longer available"))?;
         Ok(Self {
             monitor_source_name: sink.monitor_source_name,
             format: CaptureFormat {
@@ -298,7 +291,16 @@ impl CaptureStream for PulseCaptureStream {
         let source_name = self.monitor_source_name.clone();
         let handle = thread::Builder::new()
             .name("pulse-monitor-capture".into())
-            .spawn(move || capture_loop(simple, sink, stop, format, fragment_bytes as usize, source_name))
+            .spawn(move || {
+                capture_loop(
+                    simple,
+                    sink,
+                    stop,
+                    format,
+                    fragment_bytes as usize,
+                    source_name,
+                )
+            })
             .map_err(|e| format!("Could not start the PulseAudio capture thread: {e}"))?;
         *self
             .thread
@@ -373,7 +375,9 @@ fn capture_loop(
                 ) {
                     Ok(offset) => offset,
                     Err(error) => {
-                        let _ = sink.errors.try_send(format!("{}: {error}", sink.source_name));
+                        let _ = sink
+                            .errors
+                            .try_send(format!("{}: {error}", sink.source_name));
                         continue;
                     }
                 };

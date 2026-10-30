@@ -10,6 +10,7 @@ import { voiceProfilesSectionHtml, wireVoiceProfilesSection } from "./voiceProfi
 import { wireSummarySection } from "./summary";
 import { audioStorageSummaryText } from "./compression";
 import { appflowySettingsSectionHtml, wireAppFlowySettingsSection } from "./appflowy";
+import { atomikKbSettingsSectionHtml, wireAtomikKbSettingsSection, refreshAtomikKbState, refreshAtomikKbPages } from "./atomikKb";
 import { browserExtensionStatusText, wireExtensionSection } from "./extension";
 import { wireFolderSection, refreshAppState, refreshRecordingsFolderSection } from "./folder";
 import { hotkeySettingsSectionHtml, wireHotkeySection, refreshHotkeyState, syncHotkeyDraftFromSettings, DEFAULT_HOTKEY } from "./hotkey";
@@ -118,6 +119,7 @@ export function settingsSectionHtml(): string {
               <div><button type="button" class="secondary" id="refresh-summary-models" ${disabled()}>Refresh models</button> <button type="button" class="secondary" id="test-ollama-connection" ${disabled()}>Test connection</button></div>
             </section>
             <section id="appflowy-settings-section" class="model-settings" aria-labelledby="appflowy-heading">${appflowySettingsSectionHtml()}</section>
+            <section id="atomik-kb-settings-section" class="model-settings" aria-labelledby="atomik-kb-heading">${atomikKbSettingsSectionHtml()}</section>
             <section class="model-settings"><label class="toggle"><input type="checkbox" name="compress_audio" ${store.settings.compress_audio !== false ? "checked" : ""} ${disabled()}/><span><b>Compress finished recordings to FLAC</b><small>Once transcription (and speaker identification, if enabled) has finished with a recording's audio, losslessly compresses each WAV track to FLAC and verifies it decodes back to the exact original samples before removing the WAV. Never runs on an active recording.</small></span></label>
               <p id="audio-storage-total">${escapeHtml(audioStorageSummaryText())}</p>
             </section>
@@ -188,6 +190,10 @@ export function wireSettingsSection() {
       appflowy_use_native_block: form.get("appflowy_use_native_block") === "on",
       appflowy_workspace_id: (form.get("appflowy_workspace_id") as string) || store.settings.appflowy_workspace_id || null,
       appflowy_parent_view_id: (form.get("appflowy_parent_view_id") as string) || null,
+      atomik_kb_enabled: form.get("atomik_kb_enabled") === "on",
+      atomik_kb_auto_export: form.get("atomik_kb_auto_export") === "on",
+      atomik_kb_port: Number(form.get("atomik_kb_port")) || 47811,
+      atomik_kb_space_name: String(form.get("atomik_kb_space_name") ?? "My Daily Meeting").trim(),
       audio_sources: store.settings.audio_sources,
       hotkey_enabled: form.get("hotkey_enabled") === "on",
       // A cleared-but-never-repicked capture field (Backspace, then Save
@@ -208,12 +214,15 @@ export function wireSettingsSection() {
       refreshAppFlowyState();
       refreshAppFlowyDestinations();
       refreshAppFlowyPages();
+      refreshAtomikKbState();
+      refreshAtomikKbPages();
       refreshHotkeyState();
     } catch (error) {
       notice(`Could not save preferences: ${String(error)}`, "error");
     }
   };
   wireAppFlowySettingsSection();
+  wireAtomikKbSettingsSection();
   wireSummarySection();
   wireFolderSection();
   wireExtensionSection();

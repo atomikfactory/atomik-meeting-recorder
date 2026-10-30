@@ -86,10 +86,10 @@ fn real_sherpa_diarizes_copied_recordings() {
         );
         return;
     };
-    let segmentation_model = PathBuf::from(
-        std::env::var("DIARIZATION_REAL_SEGMENTATION_MODEL")
-            .expect("set DIARIZATION_REAL_SEGMENTATION_MODEL to a pyannote segmentation model.onnx"),
-    );
+    let segmentation_model =
+        PathBuf::from(std::env::var("DIARIZATION_REAL_SEGMENTATION_MODEL").expect(
+            "set DIARIZATION_REAL_SEGMENTATION_MODEL to a pyannote segmentation model.onnx",
+        ));
     let embedding_model = PathBuf::from(
         std::env::var("DIARIZATION_REAL_EMBEDDING_MODEL")
             .expect("set DIARIZATION_REAL_EMBEDDING_MODEL to nemo_en_titanet_small.onnx"),
@@ -106,7 +106,10 @@ fn real_sherpa_diarizes_copied_recordings() {
         .filter(|e| e.path().is_dir())
         .collect();
     entries.sort_by_key(|e| e.file_name());
-    assert!(!entries.is_empty(), "no recording subfolders found under {dir}");
+    assert!(
+        !entries.is_empty(),
+        "no recording subfolders found under {dir}"
+    );
 
     println!("\n=== Real sherpa-onnx diarization verification ===");
     let mut any_crashed = false;
@@ -130,7 +133,11 @@ fn real_sherpa_diarizes_copied_recordings() {
             continue;
         }
         for track_path in tracks {
-            let track_name = track_path.file_name().unwrap().to_string_lossy().to_string();
+            let track_name = track_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
             let decode_started = Instant::now();
             let samples = match load_wav_16k_mono(&track_path, MAX_SOURCE_SECONDS) {
                 Ok(samples) => samples,
@@ -192,5 +199,8 @@ fn real_sherpa_diarizes_copied_recordings() {
             }
         }
     }
-    assert!(!any_crashed, "at least one track failed to decode or process; see output above");
+    assert!(
+        !any_crashed,
+        "at least one track failed to decode or process; see output above"
+    );
 }

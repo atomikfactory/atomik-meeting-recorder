@@ -61,13 +61,16 @@ impl Fixture {
     /// Marks transcription completed (so the recording becomes eligible) and
     /// leaves diarization untouched (no job -> "disabled/never needed").
     fn mark_transcription_completed(&self) {
-        let registry =
-            TranscriptionStore::open(&self.root.join("transcription.sqlite3")).unwrap();
+        let registry = TranscriptionStore::open(&self.root.join("transcription.sqlite3")).unwrap();
         registry
             .enqueue(&self.recording.recording_id, "base", &"a".repeat(64))
             .unwrap();
         assert!(registry
-            .claim(&self.recording.recording_id, "unused-model-path", &"a".repeat(64))
+            .claim(
+                &self.recording.recording_id,
+                "unused-model-path",
+                &"a".repeat(64)
+            )
             .unwrap());
         let json = self.dir.join("transcript.json");
         fs::write(&json, b"{}").unwrap();
@@ -81,12 +84,15 @@ impl Fixture {
             .unwrap();
     }
     fn track_path(&self) -> PathBuf {
-        PathBuf::from(&self.recordings
-            .get_by_id(&self.recording.recording_id)
-            .unwrap()
-            .unwrap()
-            .tracks[0]
-            .file_path)
+        PathBuf::from(
+            &self
+                .recordings
+                .get_by_id(&self.recording.recording_id)
+                .unwrap()
+                .unwrap()
+                .tracks[0]
+                .file_path,
+        )
     }
 }
 fn test_samples(len: usize) -> Vec<i16> {
@@ -151,9 +157,7 @@ fn completed_diarization_unblocks_compression() {
         embedding_path: "emb".into(),
         embedding_hash: "b".repeat(64),
     };
-    assert!(speakers
-        .claim(&f.recording.recording_id, &models)
-        .unwrap());
+    assert!(speakers.claim(&f.recording.recording_id, &models).unwrap());
     speakers
         .complete(&f.recording.recording_id, &"c".repeat(64), 1)
         .unwrap();
@@ -188,8 +192,13 @@ fn already_compressed_track_is_skipped_idempotently() {
     tick(&f.root, &[], &f.store, &f.recordings, &cancel()).unwrap();
     // Re-running compress_recording directly (as a resumed/crashed job would)
     // must be a no-op that neither errors nor touches the FLAC again.
-    let recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
-    let (before, after) = compress_recording(&f.root, &[], recording, &f.recordings, &cancel()).unwrap();
+    let recording = f
+        .recordings
+        .get_by_id(&f.recording.recording_id)
+        .unwrap()
+        .unwrap();
+    let (before, after) =
+        compress_recording(&f.root, &[], recording, &f.recordings, &cancel()).unwrap();
     assert!(after > 0 && after <= before);
     cleanup(&f);
 }
@@ -215,7 +224,11 @@ fn existing_flac_without_metadata_update_is_left_untouched() {
 fn cancellation_mid_job_requeues_without_partial_loss() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    let recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
+    let recording = f
+        .recordings
+        .get_by_id(&f.recording.recording_id)
+        .unwrap()
+        .unwrap();
     let cancelled = AtomicBool::new(true);
     let result = compress_recording(&f.root, &[], recording, &f.recordings, &cancelled);
     assert!(result.is_err());
@@ -229,9 +242,13 @@ fn cancellation_mid_job_requeues_without_partial_loss() {
 fn disabled_setting_is_reflected_in_state_without_enqueueing() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    let settings: SettingsReader = Arc::new(|| Ok(CompressionSettings { enabled: false, extra_library_roots: Vec::new() }));
-    let service =
-        CompressionService::with_inhibition(f.root.clone(), settings, true);
+    let settings: SettingsReader = Arc::new(|| {
+        Ok(CompressionSettings {
+            enabled: false,
+            extra_library_roots: Vec::new(),
+        })
+    });
+    let service = CompressionService::with_inhibition(f.root.clone(), settings, true);
     let state = service.state();
     assert!(!state.enabled);
     assert!(state.jobs.is_empty());
@@ -274,7 +291,11 @@ fn recovery_finishes_a_lagging_wav_delete_when_metadata_already_points_at_flac()
     let (info, samples) = audio_file::read_wav_pcm16(&f.track_path()).unwrap();
     let flac_path = f.dir.join("track-00.flac");
     audio_file::encode_flac_new(&flac_path, info.sample_rate, info.channels, &samples).unwrap();
-    let mut recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
+    let mut recording = f
+        .recordings
+        .get_by_id(&f.recording.recording_id)
+        .unwrap()
+        .unwrap();
     recording.tracks[0].file_path = flac_path.display().to_string();
     f.recordings.save(&recording).unwrap();
     assert!(f.dir.join("track-00.wav").exists());
@@ -288,7 +309,11 @@ fn recovery_finishes_a_lagging_wav_delete_when_metadata_already_points_at_flac()
 fn recovery_falls_back_to_wav_when_metadata_flac_is_missing() {
     let f = Fixture::new();
     f.mark_transcription_completed();
-    let mut recording = f.recordings.get_by_id(&f.recording.recording_id).unwrap().unwrap();
+    let mut recording = f
+        .recordings
+        .get_by_id(&f.recording.recording_id)
+        .unwrap()
+        .unwrap();
     let missing_flac = f.dir.join("track-00.flac");
     recording.tracks[0].file_path = missing_flac.display().to_string();
     f.recordings.save(&recording).unwrap();

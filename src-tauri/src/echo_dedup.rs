@@ -104,9 +104,7 @@ fn echo_duplicate_keep_mask(
                 if similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
                     return true;
                 }
-                weak
-                    && contained_within(seg, other)
-                    && similarity >= PARTIAL_SIMILARITY_THRESHOLD
+                weak && contained_within(seg, other) && similarity >= PARTIAL_SIMILARITY_THRESHOLD
             });
             !is_duplicate
         })
@@ -213,12 +211,12 @@ mod tests {
             segment(3_000, 11_000, "one two three four"),
             segment(5_000, 9_000, "one two five six"),
         ];
-        let (kept, removed) = dedupe_echo_segments_with_energy(
-            segments,
-            &["output", "input"],
-            &[false, true],
+        let (kept, removed) =
+            dedupe_echo_segments_with_energy(segments, &["output", "input"], &[false, true]);
+        assert_eq!(
+            removed, 1,
+            "weak, contained, partially-overlapping mic line should be dropped"
         );
-        assert_eq!(removed, 1, "weak, contained, partially-overlapping mic line should be dropped");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].source_id, "source");
     }
@@ -232,11 +230,8 @@ mod tests {
             segment(3_000, 11_000, "one two three four"),
             segment(5_000, 9_000, "one two five six"),
         ];
-        let (kept, removed) = dedupe_echo_segments_with_energy(
-            segments,
-            &["output", "input"],
-            &[false, false],
-        );
+        let (kept, removed) =
+            dedupe_echo_segments_with_energy(segments, &["output", "input"], &[false, false]);
         assert_eq!(removed, 0);
         assert_eq!(kept.len(), 2);
     }
@@ -249,11 +244,8 @@ mod tests {
             segment(0, 2_000, "one two three four"),
             segment(1_000, 3_000, "one two five six"),
         ];
-        let (kept, removed) = dedupe_echo_segments_with_energy(
-            segments,
-            &["output", "input"],
-            &[false, true],
-        );
+        let (kept, removed) =
+            dedupe_echo_segments_with_energy(segments, &["output", "input"], &[false, true]);
         assert_eq!(removed, 0);
         assert_eq!(kept.len(), 2);
     }
@@ -274,7 +266,11 @@ mod tests {
     fn near_duplicate_with_minor_wording_diff_is_removed() {
         let segments = vec![
             segment(0, 3000, "with those key brands in the list there"),
-            segment(50, 6800, "with those key brands in the list there, completing"),
+            segment(
+                50,
+                6800,
+                "with those key brands in the list there, completing",
+            ),
         ];
         let (kept, removed) = dedupe_echo_segments(segments, &["output", "input"]);
         assert_eq!(removed, 1, "near-duplicate wording should still be dropped");

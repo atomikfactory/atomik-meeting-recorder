@@ -22,6 +22,10 @@ export type Settings = {
   appflowy_use_native_block?: boolean;
   appflowy_workspace_id?: string | null;
   appflowy_parent_view_id?: string | null;
+  atomik_kb_enabled?: boolean;
+  atomik_kb_auto_export?: boolean;
+  atomik_kb_port?: number;
+  atomik_kb_space_name?: string;
   hotkey_enabled?: boolean;
   hotkey?: string;
   recognize_known_voices?: boolean;
@@ -88,6 +92,10 @@ export type AppFlowyState = { enabled:boolean; auto_export:boolean; connected:bo
 export type AppFlowyWorkspace = { workspace_id:string; workspace_name:string|null };
 export type AppFlowyDestination = { view_id:string; name:string; depth:number };
 export type AppFlowyPageInfo = { key:string; kind:string; name:string; status:string; url:string|null; legacy:boolean };
+export type AtomikKbJob = { recording_id:string; status:string; error:string|null; export_index:number };
+export type AtomikKbState = { enabled:boolean; auto_export:boolean; has_token:boolean; port:number; space_name:string; jobs:AtomikKbJob[]; inhibited:boolean; error:string|null };
+export type AtomikKbPageInfo = { key:string; kind:string; name:string; status:string; page_id:string|null };
+export type AtomikKbConnectionTest = { ok:boolean; message:string; space_found:boolean; writable:boolean };
 export type SearchHit = { kind: string; seq: number; start_ms: number | null; end_ms: number | null; speaker: string | null; snippet_html: string };
 export type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
 export type SearchResults = { meetings: SearchMeeting[]; took_ms: number };

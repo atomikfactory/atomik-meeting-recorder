@@ -139,7 +139,10 @@ impl std::fmt::Display for FramingError {
         match self {
             FramingError::Eof => write!(f, "connection closed"),
             FramingError::OversizedMessage(len) => {
-                write!(f, "message of {len} bytes exceeds the {MAX_MESSAGE_BYTES}-byte cap")
+                write!(
+                    f,
+                    "message of {len} bytes exceeds the {MAX_MESSAGE_BYTES}-byte cap"
+                )
             }
             FramingError::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -161,12 +164,10 @@ pub fn read_message<R: Read>(reader: &mut R) -> Result<Vec<u8>, FramingError> {
         return Err(FramingError::OversizedMessage(len));
     }
     let mut body = vec![0u8; len as usize];
-    reader
-        .read_exact(&mut body)
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::UnexpectedEof => FramingError::Eof,
-            _ => FramingError::Io(e.to_string()),
-        })?;
+    reader.read_exact(&mut body).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => FramingError::Eof,
+        _ => FramingError::Io(e.to_string()),
+    })?;
     Ok(body)
 }
 
@@ -251,7 +252,10 @@ impl BrowserBridgeState {
         let now = Instant::now();
         inner.ever_connected = true;
         inner.last_message_at = Some(now);
-        inner.last = Some(StampedObservation { observation, at: now });
+        inner.last = Some(StampedObservation {
+            observation,
+            at: now,
+        });
     }
     /// `has_ever_connected` distinguishes "no browser extension has ever
     /// registered a signal" (native detection's own `supported` should
@@ -265,7 +269,10 @@ impl BrowserBridgeState {
             .ever_connected
     }
     pub fn last_message_at(&self) -> Option<Instant> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).last_message_at
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .last_message_at
     }
     /// A fresh `InCall` observation, or `None` if there is none / it has
     /// gone stale (no heartbeat within `STALE_AFTER`).

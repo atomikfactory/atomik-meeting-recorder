@@ -268,8 +268,7 @@ pub fn regenerate_presentation(
     if Some(checksum(&bytes)) != job.checksum {
         return Err("Transcript checkpoint checksum mismatch; files preserved.".into());
     }
-    let transcript: Transcript =
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let transcript: Transcript = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     validate_transcript(&transcript, &job, &recording)?;
     let names = names_for(root, recording_id);
     let md = output_path(&directory, "transcript.md")?;
@@ -302,7 +301,8 @@ mod tests {
     };
 
     fn fixture() -> (PathBuf, Recording) {
-        let root = std::env::temp_dir().join(format!("speaker-names-regen-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("speaker-names-regen-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
         let recordings = RecordingStore::open(&root).unwrap();
@@ -353,9 +353,17 @@ mod tests {
         };
         let json = serde_json::to_vec_pretty(&transcript).unwrap();
         fs::write(dir.join("transcript.json"), &json).unwrap();
-        fs::write(dir.join("transcript.md"), markdown_document(&recording, &transcript)).unwrap();
-        registry.enqueue(&id, "base", &transcript.model_hash).unwrap();
-        assert!(registry.claim(&id, "unused-fake-model", &transcript.model_hash).unwrap());
+        fs::write(
+            dir.join("transcript.md"),
+            markdown_document(&recording, &transcript),
+        )
+        .unwrap();
+        registry
+            .enqueue(&id, "base", &transcript.model_hash)
+            .unwrap();
+        assert!(registry
+            .claim(&id, "unused-fake-model", &transcript.model_hash)
+            .unwrap());
         registry
             .complete(
                 &id,
@@ -371,9 +379,12 @@ mod tests {
     fn regenerate_presentation_rewrites_transcript_markdown_with_the_new_name() {
         let (root, recording) = fixture();
         let names = SpeakerNameStore::open(store_path(&root)).unwrap();
-        names.set(&recording.recording_id, "You", "Ben", false).unwrap();
+        names
+            .set(&recording.recording_id, "You", "Ben", false)
+            .unwrap();
         regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
-        let md = fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
+        let md =
+            fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
         assert!(md.contains("Ben:"));
         assert!(!md.contains("You:"));
     }
@@ -382,21 +393,23 @@ mod tests {
     fn regenerate_presentation_is_idempotent_and_crash_safe_to_repeat() {
         let (root, recording) = fixture();
         let names = SpeakerNameStore::open(store_path(&root)).unwrap();
-        names.set(&recording.recording_id, "You", "Ben", false).unwrap();
+        names
+            .set(&recording.recording_id, "You", "Ben", false)
+            .unwrap();
         regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
         // Calling it again (as if a crash happened right after the first
         // regeneration and the caller retries) must not error just because
         // the file already exists with the same content.
         regenerate_presentation(&root, &[], &recording.recording_id).unwrap();
-        let md = fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
+        let md =
+            fs::read_to_string(root.join(&recording.recording_id).join("transcript.md")).unwrap();
         assert!(md.contains("Ben:"));
     }
 
     fn store() -> SpeakerNameStore {
-        SpeakerNameStore::open(std::env::temp_dir().join(format!(
-            "speaker-names-{}.db",
-            uuid::Uuid::new_v4()
-        )))
+        SpeakerNameStore::open(
+            std::env::temp_dir().join(format!("speaker-names-{}.db", uuid::Uuid::new_v4())),
+        )
         .unwrap()
     }
 
@@ -471,7 +484,8 @@ mod tests {
 
     #[test]
     fn names_persist_after_reopen_crash_safety() {
-        let path = std::env::temp_dir().join(format!("speaker-names-reopen-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("speaker-names-reopen-{}.db", uuid::Uuid::new_v4()));
         {
             let s = SpeakerNameStore::open(&path).unwrap();
             s.set("rec-1", "Speaker 1", "Alice", false).unwrap();
@@ -497,13 +511,15 @@ mod tests {
 
     #[test]
     fn names_for_is_empty_when_nothing_was_set_or_store_is_unreachable() {
-        let root = std::env::temp_dir().join(format!("speaker-names-root-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("speaker-names-root-{}", uuid::Uuid::new_v4()));
         assert!(names_for(&root, "rec-1").is_empty());
     }
 
     #[test]
     fn names_changed_since_compares_against_the_summary_timestamp() {
-        let root = std::env::temp_dir().join(format!("speaker-names-changed-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("speaker-names-changed-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let store = SpeakerNameStore::open(store_path(&root)).unwrap();
         store.set("rec-1", "Speaker 1", "Alice", false).unwrap();

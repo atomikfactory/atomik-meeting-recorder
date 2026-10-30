@@ -106,7 +106,11 @@ pub struct BlockEnergy {
 /// no file I/O and no resampling. Returns a new buffer the same length as
 /// `mic`; `mic` is never mutated in place. A silent or empty reference (or an
 /// empty mic) is a documented no-op that returns `mic` unchanged.
-pub fn cancel_echo(mic: &[f32], reference: &[f32], sample_rate: u32) -> (Vec<f32>, EchoCancelStats) {
+pub fn cancel_echo(
+    mic: &[f32],
+    reference: &[f32],
+    sample_rate: u32,
+) -> (Vec<f32>, EchoCancelStats) {
     if mic.is_empty() || reference.is_empty() || sample_rate == 0 || is_silent(reference) {
         return (mic.to_vec(), EchoCancelStats::default());
     }
@@ -132,7 +136,16 @@ pub fn cancel_echo(mic: &[f32], reference: &[f32], sample_rate: u32) -> (Vec<f32
     // through any double talk (near-end contributions are uncorrelated with
     // the reference and average out over the recording) and hand pass 2 an
     // already-converged filter.
-    run_pass(&mut linear_filter, &mic_hp, &aligned_reference, n, None, false, &far_end_active, None);
+    run_pass(
+        &mut linear_filter,
+        &mic_hp,
+        &aligned_reference,
+        n,
+        None,
+        false,
+        &far_end_active,
+        None,
+    );
 
     // Pass 2: replay from the start with the converged filter (continuing to
     // adapt, now double-talk aware since the echo estimate is trustworthy

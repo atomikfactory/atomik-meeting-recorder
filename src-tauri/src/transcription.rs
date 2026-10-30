@@ -436,7 +436,8 @@ impl TranscriptionService {
         if j.status != "completed" {
             return Err("Transcript is not complete.".into());
         }
-        let directory = recording_directory(&self.root, &(self.settings)()?.extra_library_roots, id)?;
+        let directory =
+            recording_directory(&self.root, &(self.settings)()?.extra_library_roots, id)?;
         let json = output_path(&directory, "transcript.json")?;
         let markdown = output_path(&directory, "transcript.md")?;
         if j.transcript_path.as_deref() != Some(json.to_string_lossy().as_ref())
@@ -693,7 +694,12 @@ fn tick(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     let current_settings = settings()?;
-    recover_restart_intents(root, &current_settings.extra_library_roots, store, recordings)?;
+    recover_restart_intents(
+        root,
+        &current_settings.extra_library_roots,
+        store,
+        recordings,
+    )?;
     let key = current_settings.model_key;
     for recording in recordings.finalized_eligible()? {
         if recording.auto_transcribe {
@@ -759,8 +765,11 @@ fn tick(
         if !automatic && !explicitly_requested {
             return Err("This recording is not eligible for transcription. A failed capture must be explicitly requested and retain audio.".into());
         }
-        let directory =
-            recording_directory(root, &current_settings.extra_library_roots, &job.recording_id)?;
+        let directory = recording_directory(
+            root,
+            &current_settings.extra_library_roots,
+            &job.recording_id,
+        )?;
         let json = output_path(&directory, "transcript.json")?;
         let md = output_path(&directory, "transcript.md")?;
         // Recover a JSON rename that succeeded before the database commit.
@@ -1042,7 +1051,13 @@ pub(crate) fn markdown_document_labeled(
     }
     for (i, segment) in t.segments.iter().enumerate() {
         let remote_speaker = remote_labels.and_then(|labels| labels.get(i).copied().flatten());
-        let label = presentation_label(recording, segment, local_speaker_name, remote_speaker, names);
+        let label = presentation_label(
+            recording,
+            segment,
+            local_speaker_name,
+            remote_speaker,
+            names,
+        );
         output.push_str(&format!(
             "**[{}–{}] {}:** {}\n\n",
             timestamp(segment.start_ms),

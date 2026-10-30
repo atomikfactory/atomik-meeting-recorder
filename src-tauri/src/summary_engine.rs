@@ -84,8 +84,9 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
 }
 
 fn parse_summary(raw: &str, owner_context: &OwnerContext<'_>) -> Result<SummaryOutput, String> {
-    let mut output: SummaryOutput = serde_json::from_str(raw)
-        .map_err(|e| format!("Ollama returned a summary that did not match the expected shape: {e}"))?;
+    let mut output: SummaryOutput = serde_json::from_str(raw).map_err(|e| {
+        format!("Ollama returned a summary that did not match the expected shape: {e}")
+    })?;
     if !output.is_meaningful() {
         return Err("Ollama returned an empty summary.".into());
     }
@@ -143,12 +144,24 @@ impl SummaryEngine for OllamaSummaryEngine {
         );
         let num_ctx = choose_num_ctx(full_text.len());
         let chunks = ollama_client::plan_chunks(&request.transcript.segments, num_ctx);
-        let device_names: Vec<String> = request.recording.tracks.iter().map(|t| t.name.clone()).collect();
-        let owner_context = OwnerContext::new(&request.local_speaker_name, &device_names, &full_text);
+        let device_names: Vec<String> = request
+            .recording
+            .tracks
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let owner_context =
+            OwnerContext::new(&request.local_speaker_name, &device_names, &full_text);
         progress(0);
         if chunks.len() <= 1 {
             let system = ollama_client::prompts(language.as_deref(), false);
-            let raw = client.chat(&request.model, &system, &full_text, summary_schema(), num_ctx)?;
+            let raw = client.chat(
+                &request.model,
+                &system,
+                &full_text,
+                summary_schema(),
+                num_ctx,
+            )?;
             check_cancelled(cancelled)?;
             progress(100);
             return parse_summary(&raw, &owner_context);
@@ -168,11 +181,22 @@ impl SummaryEngine for OllamaSummaryEngine {
                     Some(&request.names),
                 )
             );
-            let raw = client.chat(&request.model, &chunk_system, &text, chunk_schema(), num_ctx)?;
+            let raw = client.chat(
+                &request.model,
+                &chunk_system,
+                &text,
+                chunk_schema(),
+                num_ctx,
+            )?;
             let parsed: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| format!("Ollama returned malformed chunk notes: {e}"))?;
             let text = parsed["notes"].as_str().unwrap_or_default().to_string();
-            notes.push(format!("--- Segment {} of {} ---\n{}", index + 1, chunks.len(), text));
+            notes.push(format!(
+                "--- Segment {} of {} ---\n{}",
+                index + 1,
+                chunks.len(),
+                text
+            ));
             // Map phase fills the first 80%; the final merge call finishes it.
             progress((((index + 1) * 80) / chunks.len()) as u8);
         }
@@ -181,7 +205,13 @@ impl SummaryEngine for OllamaSummaryEngine {
         let merge_system = ollama_client::prompts(language.as_deref(), true);
         let merged_input = notes.join("\n\n");
         let merge_ctx = choose_num_ctx(merged_input.len());
-        let raw = client.chat(&request.model, &merge_system, &merged_input, summary_schema(), merge_ctx)?;
+        let raw = client.chat(
+            &request.model,
+            &merge_system,
+            &merged_input,
+            summary_schema(),
+            merge_ctx,
+        )?;
         check_cancelled(cancelled)?;
         progress(100);
         parse_summary(&raw, &owner_context)
@@ -234,7 +264,11 @@ mod tests {
             key_points: vec!["Roadmap reviewed".into()],
             ..Default::default()
         };
-        assert!(parse_summary(&serde_json::to_string(&filled).unwrap(), &no_owner_context()).is_ok());
+        assert!(parse_summary(
+            &serde_json::to_string(&filled).unwrap(),
+            &no_owner_context()
+        )
+        .is_ok());
     }
     #[test]
     fn parse_summary_rejects_malformed_json() {
@@ -253,7 +287,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let output = parse_summary(&serde_json::to_string(&filled).unwrap(), &no_owner_context()).unwrap();
+        let output = parse_summary(
+            &serde_json::to_string(&filled).unwrap(),
+            &no_owner_context(),
+        )
+        .unwrap();
         assert_eq!(output.action_items[0].owner, None);
     }
 }

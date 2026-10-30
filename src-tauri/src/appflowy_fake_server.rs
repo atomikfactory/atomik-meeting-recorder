@@ -108,10 +108,24 @@ impl FakeAppFlowyServer {
         let mut space_ids = Vec::new();
         for (i, name) in space_names.iter().enumerate() {
             let id = format!("space-{i}");
-            nodes.insert(id.clone(), FakeNode { name: name.to_string(), is_space: true, children: vec![] });
+            nodes.insert(
+                id.clone(),
+                FakeNode {
+                    name: name.to_string(),
+                    is_space: true,
+                    children: vec![],
+                },
+            );
             space_ids.push(id);
         }
-        nodes.insert(workspace_id.clone(), FakeNode { name: "Workspace".into(), is_space: false, children: space_ids.clone() });
+        nodes.insert(
+            workspace_id.clone(),
+            FakeNode {
+                name: "Workspace".into(),
+                is_space: false,
+                children: space_ids.clone(),
+            },
+        );
         let mut server = Self::start_with_state(FakeState {
             nodes,
             page_data: HashMap::new(),
@@ -160,13 +174,24 @@ impl FakeAppFlowyServer {
                 handle_connection(&mut stream, &requests_bg, &state_bg);
             }
         });
-        Self { base_url: format!("http://{addr}"), workspace_id, space_id: String::new(), requests, state, stop, handle: Some(handle) }
+        Self {
+            base_url: format!("http://{addr}"),
+            workspace_id,
+            space_id: String::new(),
+            requests,
+            state,
+            stop,
+            handle: Some(handle),
+        }
     }
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().unwrap().clone()
     }
     pub fn requests_matching(&self, method: &str, path_contains: &str) -> usize {
-        self.requests().iter().filter(|r| r.method == method && r.path.contains(path_contains)).count()
+        self.requests()
+            .iter()
+            .filter(|r| r.method == method && r.path.contains(path_contains))
+            .count()
     }
     pub fn otp_code(&self) -> String {
         self.state.lock().unwrap().otp_code.clone()
@@ -192,7 +217,16 @@ impl FakeAppFlowyServer {
     /// "no duplicate root/date page was created".
     pub fn child_names(&self, parent_id: &str) -> Vec<String> {
         let s = self.state.lock().unwrap();
-        s.nodes.get(parent_id).map(|n| n.children.iter().filter_map(|c| s.nodes.get(c)).map(|n| n.name.clone()).collect()).unwrap_or_default()
+        s.nodes
+            .get(parent_id)
+            .map(|n| {
+                n.children
+                    .iter()
+                    .filter_map(|c| s.nodes.get(c))
+                    .map(|n| n.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// Simulates a page having been created on the server in a previous run
     /// whose local journal update never landed (a crash between the two).
@@ -216,9 +250,22 @@ impl FakeAppFlowyServer {
     pub fn seed_broken_existing_page(&self, parent_id: &str, id: &str, name: &str) {
         self.seed_existing_page_with_collab(parent_id, id, name, false);
     }
-    fn seed_existing_page_with_collab(&self, parent_id: &str, id: &str, name: &str, collab_ok: bool) {
+    fn seed_existing_page_with_collab(
+        &self,
+        parent_id: &str,
+        id: &str,
+        name: &str,
+        collab_ok: bool,
+    ) {
         let mut state = self.state.lock().unwrap();
-        state.nodes.insert(id.to_string(), FakeNode { name: name.to_string(), is_space: false, children: vec![] });
+        state.nodes.insert(
+            id.to_string(),
+            FakeNode {
+                name: name.to_string(),
+                is_space: false,
+                children: vec![],
+            },
+        );
         state.collab_ok.insert(id.to_string(), collab_ok);
         if let Some(parent) = state.nodes.get_mut(parent_id) {
             parent.children.push(id.to_string());
@@ -246,7 +293,9 @@ fn read_full_request(stream: &mut TcpStream) -> Vec<u8> {
             break;
         }
         buffer.extend_from_slice(&chunk[..read]);
-        let Some(header_end) = find_header_end(&buffer) else { continue };
+        let Some(header_end) = find_header_end(&buffer) else {
+            continue;
+        };
         let content_length = content_length_of(&buffer[..header_end]);
         if buffer.len() >= header_end + 4 + content_length {
             break;
@@ -260,7 +309,11 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 fn content_length_of(headers: &[u8]) -> usize {
     String::from_utf8_lossy(headers)
         .lines()
-        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().to_string())
+        })
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
@@ -301,10 +354,16 @@ fn folder_json(nodes: &HashMap<String, FakeNode>, id: &str) -> serde_json::Value
     })
 }
 
-fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRequest>>>, state: &Arc<Mutex<FakeState>>) {
+fn handle_connection(
+    stream: &mut TcpStream,
+    requests: &Arc<Mutex<Vec<RecordedRequest>>>,
+    state: &Arc<Mutex<FakeState>>,
+) {
     let raw = read_full_request(stream);
     let text = String::from_utf8_lossy(&raw);
-    let Some(request_line) = text.lines().next() else { return };
+    let Some(request_line) = text.lines().next() else {
+        return;
+    };
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let full_path = parts.next().unwrap_or("").to_string();
@@ -312,57 +371,97 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (full_path.clone(), String::new()),
     };
-    requests.lock().unwrap().push(RecordedRequest { method: method.clone(), path: path.clone() });
+    requests.lock().unwrap().push(RecordedRequest {
+        method: method.clone(),
+        path: path.clone(),
+    });
     let header_end = find_header_end(&raw).unwrap_or(raw.len());
     let headers = String::from_utf8_lossy(&raw[..header_end]).to_string();
     let body_start = header_end.saturating_add(4).min(raw.len());
     let body_bytes = &raw[body_start..];
-    let body: serde_json::Value = serde_json::from_slice(body_bytes).unwrap_or(serde_json::Value::Null);
-    let auth = header_value(&headers, "Authorization").unwrap_or("").to_string();
+    let body: serde_json::Value =
+        serde_json::from_slice(body_bytes).unwrap_or(serde_json::Value::Null);
+    let auth = header_value(&headers, "Authorization")
+        .unwrap_or("")
+        .to_string();
 
     let mut s = state.lock().unwrap();
     match (method.as_str(), path.as_str()) {
         ("POST", "/gotrue/otp") => {
-            s.otp_email = body.get("email").and_then(|v| v.as_str()).map(str::to_string);
+            s.otp_email = body
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             respond(stream, "200 OK", &serde_json::json!({}));
         }
         ("POST", "/gotrue/verify") => {
             let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
             if token == s.otp_code {
-                respond(stream, "200 OK", &serde_json::json!({"access_token": s.access_token, "refresh_token": s.refresh_token}));
+                respond(
+                    stream,
+                    "200 OK",
+                    &serde_json::json!({"access_token": s.access_token, "refresh_token": s.refresh_token}),
+                );
             } else {
-                respond(stream, "400 Bad Request", &serde_json::json!({"message": "invalid code"}));
+                respond(
+                    stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"message": "invalid code"}),
+                );
             }
         }
         ("POST", "/gotrue/token") => {
             s.refresh_count += 1;
             s.access_token = format!("access-{}", s.refresh_count + 1);
             s.refresh_token = format!("refresh-{}", s.refresh_count + 1);
-            respond(stream, "200 OK", &serde_json::json!({"access_token": s.access_token, "refresh_token": s.refresh_token}));
+            respond(
+                stream,
+                "200 OK",
+                &serde_json::json!({"access_token": s.access_token, "refresh_token": s.refresh_token}),
+            );
         }
         ("GET", "/api/workspace") => {
             if !check_auth(&auth, &s.access_token, stream) {
                 return;
             }
-            respond(stream, "200 OK", &serde_json::json!({"data": [{"workspace_id": s.workspace_id, "workspace_name": "Test Workspace"}]}));
+            respond(
+                stream,
+                "200 OK",
+                &serde_json::json!({"data": [{"workspace_id": s.workspace_id, "workspace_name": "Test Workspace"}]}),
+            );
         }
         (method, p) if method == "GET" && p.ends_with("/folder") => {
             if !check_auth(&auth, &s.access_token, stream) {
                 return;
             }
             let query_map = parse_query(&query);
-            let root = query_map.get("root_view_id").cloned().unwrap_or_else(|| s.workspace_id.clone());
-            respond(stream, "200 OK", &serde_json::json!({"data": folder_json(&s.nodes, &root)}));
+            let root = query_map
+                .get("root_view_id")
+                .cloned()
+                .unwrap_or_else(|| s.workspace_id.clone());
+            respond(
+                stream,
+                "200 OK",
+                &serde_json::json!({"data": folder_json(&s.nodes, &root)}),
+            );
         }
         ("POST", p) if p.ends_with("/page-view") => {
             if !check_auth(&auth, &s.access_token, stream) {
                 return;
             }
             if let Some((status, message)) = s.fail_next_page_view.take() {
-                respond(stream, &format!("{status} Injected Failure"), &serde_json::json!({"message": message}));
+                respond(
+                    stream,
+                    &format!("{status} Injected Failure"),
+                    &serde_json::json!({"message": message}),
+                );
                 return;
             }
-            let parent_id = body.get("parent_view_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let parent_id = body
+                .get("parent_view_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             // Real `create_document_page` semantics (AppFlowy-Cloud
             // `src/biz/workspace/page_view.rs`): the document collab is
             // stored under `collab_id.unwrap_or(Uuid::new_v4())`, and the
@@ -370,7 +469,10 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
             // omits `collab_id` (the pre-fix bug) gets a collab stored under
             // a random id that never equals `view_id`, so its content never
             // loads by `view_id` afterward.
-            let collab_id = body.get("collab_id").and_then(|v| v.as_str()).map(str::to_string);
+            let collab_id = body
+                .get("collab_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let view_id = body
                 .get("view_id")
                 .and_then(|v| v.as_str())
@@ -378,14 +480,29 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
                 .or_else(|| collab_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let effective_collab_id = collab_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = body
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !s.nodes.contains_key(&parent_id) {
-                respond(stream, "404 Not Found", &serde_json::json!({"message": "parent not found"}));
+                respond(
+                    stream,
+                    "404 Not Found",
+                    &serde_json::json!({"message": "parent not found"}),
+                );
                 return;
             }
             let hide = s.hide_created_children;
             let collab_ok = !s.force_missing_collab && effective_collab_id == view_id;
-            s.nodes.insert(view_id.clone(), FakeNode { name, is_space: false, children: vec![] });
+            s.nodes.insert(
+                view_id.clone(),
+                FakeNode {
+                    name,
+                    is_space: false,
+                    children: vec![],
+                },
+            );
             s.collab_ok.insert(view_id.clone(), collab_ok);
             if !hide {
                 if let Some(parent) = s.nodes.get_mut(&parent_id) {
@@ -395,7 +512,11 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
             if let Some(page_data) = body.get("page_data") {
                 s.page_data.insert(view_id.clone(), page_data.clone());
             }
-            respond(stream, "200 OK", &serde_json::json!({"data": {"view_id": view_id}}));
+            respond(
+                stream,
+                "200 OK",
+                &serde_json::json!({"data": {"view_id": view_id}}),
+            );
         }
         (method, p) if method == "GET" && p.contains("/page-view/") => {
             if !check_auth(&auth, &s.access_token, stream) {
@@ -403,11 +524,19 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
             }
             let view_id = p.rsplit('/').next().unwrap_or("");
             if !s.nodes.contains_key(view_id) {
-                respond(stream, "404 Not Found", &serde_json::json!({"message": "Page not found"}));
+                respond(
+                    stream,
+                    "404 Not Found",
+                    &serde_json::json!({"message": "Page not found"}),
+                );
                 return;
             }
             if s.collab_ok.get(view_id).copied().unwrap_or(false) {
-                respond(stream, "200 OK", &serde_json::json!({"data": {"view_id": view_id}}));
+                respond(
+                    stream,
+                    "200 OK",
+                    &serde_json::json!({"data": {"view_id": view_id}}),
+                );
             } else {
                 respond(
                     stream,
@@ -417,7 +546,11 @@ fn handle_connection(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<RecordedRe
             }
         }
         _ => {
-            respond(stream, "404 Not Found", &serde_json::json!({"message": format!("unhandled fake route {method} {path}")}));
+            respond(
+                stream,
+                "404 Not Found",
+                &serde_json::json!({"message": format!("unhandled fake route {method} {path}")}),
+            );
         }
     }
 }
@@ -425,7 +558,11 @@ fn check_auth(auth: &str, expected_token: &str, stream: &mut TcpStream) -> bool 
     if auth == format!("Bearer {expected_token}") {
         true
     } else {
-        respond(stream, "401 Unauthorized", &serde_json::json!({"message": "unauthorized"}));
+        respond(
+            stream,
+            "401 Unauthorized",
+            &serde_json::json!({"message": "unauthorized"}),
+        );
         false
     }
 }

@@ -449,7 +449,11 @@ pub fn match_clusters(
         let best = candidate_scores(&remaining_clusters, &remaining_profiles)
             .into_iter()
             .filter(|c| c.best_score >= threshold && c.best_score - c.second_best_score >= margin)
-            .max_by(|a, b| a.best_score.partial_cmp(&b.best_score).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.best_score
+                    .partial_cmp(&b.best_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         match best {
             Some(candidate) => {
                 used_clusters.insert(candidate.speaker);
@@ -466,7 +470,10 @@ pub fn match_clusters(
 /// All match candidates considered (including rejected ones), for reporting
 /// -- e.g. the real-data verification harness's similarity table. Does not
 /// enforce one-to-one assignment; use `match_clusters` for the accepted set.
-pub fn candidate_scores(clusters: &[ClusterCentroid], profiles: &[VoiceProfile]) -> Vec<MatchCandidate> {
+pub fn candidate_scores(
+    clusters: &[ClusterCentroid],
+    profiles: &[VoiceProfile],
+) -> Vec<MatchCandidate> {
     if profiles.is_empty() {
         return Vec::new();
     }
@@ -564,7 +571,8 @@ pub fn load_speaker_samples(
     use crate::transcription_engine::{load_wav_16k_mono, validated_recording_tracks};
     const MAX_SOURCE_SECONDS: u64 = 30 * 60;
     let tracks = validated_recording_tracks(recording, recordings_root, extra_roots)?;
-    let mut by_source: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+    let mut by_source: std::collections::HashMap<String, Vec<f32>> =
+        std::collections::HashMap::new();
     let mut out = Vec::new();
     for turn in turns {
         let seconds = turn.end_ms.saturating_sub(turn.start_ms) as f64 / 1000.0;
@@ -575,7 +583,10 @@ pub fn load_speaker_samples(
             let Some((_, path)) = tracks.iter().find(|(t, _)| t.source_id == turn.source_id) else {
                 continue;
             };
-            by_source.insert(turn.source_id.clone(), load_wav_16k_mono(path, MAX_SOURCE_SECONDS)?);
+            by_source.insert(
+                turn.source_id.clone(),
+                load_wav_16k_mono(path, MAX_SOURCE_SECONDS)?,
+            );
         }
         let samples = &by_source[&turn.source_id];
         let start = ((turn.start_ms as f64 / 1000.0) * 16_000.0) as usize;
@@ -623,7 +634,8 @@ pub fn recognize_speakers(
         DEFAULT_MATCH_THRESHOLD,
         DEFAULT_MATCH_MARGIN,
     );
-    let names = crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(root))?;
+    let names =
+        crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(root))?;
     let existing = names.list(&recording.recording_id)?;
     let mut applied = Vec::new();
     for candidate in matches {
@@ -634,8 +646,17 @@ pub fn recognize_speakers(
         if user_set {
             continue;
         }
-        names.set(&recording.recording_id, &label, &candidate.profile_name, true)?;
-        applied.push((candidate.speaker, candidate.profile_name, candidate.best_score));
+        names.set(
+            &recording.recording_id,
+            &label,
+            &candidate.profile_name,
+            true,
+        )?;
+        applied.push((
+            candidate.speaker,
+            candidate.profile_name,
+            candidate.best_score,
+        ));
     }
     Ok(applied)
 }
@@ -665,13 +686,22 @@ mod tests {
         }
     }
 
-    fn profile(store: &VoiceProfileStore, name: &str, embedding: Vec<f32>, hash: &str, seconds: f64) -> VoiceProfile {
+    fn profile(
+        store: &VoiceProfileStore,
+        name: &str,
+        embedding: Vec<f32>,
+        hash: &str,
+        seconds: f64,
+    ) -> VoiceProfile {
         store.create(name, &embedding, hash, seconds).unwrap()
     }
 
     #[test]
     fn fake_extractor_reports_its_configured_model_hash() {
-        let extractor = FakeExtractor { hash: "hash-a".into(), fixed: vec![1.0] };
+        let extractor = FakeExtractor {
+            hash: "hash-a".into(),
+            fixed: vec![1.0],
+        };
         assert_eq!(extractor.model_hash(), "hash-a");
     }
 
@@ -732,10 +762,21 @@ mod tests {
         let alice = profile(&store, "Alice", vec![1.0, 0.0], "h", 20.0);
         let bob = profile(&store, "Bob", vec![0.0, 1.0], "h", 20.0);
         let clusters = vec![
-            ClusterCentroid { speaker: 1, embedding: vec![1.0, 0.0] },
-            ClusterCentroid { speaker: 2, embedding: vec![0.0, 1.0] },
+            ClusterCentroid {
+                speaker: 1,
+                embedding: vec![1.0, 0.0],
+            },
+            ClusterCentroid {
+                speaker: 2,
+                embedding: vec![0.0, 1.0],
+            },
         ];
-        let matches = match_clusters(&clusters, &[alice.clone(), bob.clone()], DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
+        let matches = match_clusters(
+            &clusters,
+            &[alice.clone(), bob.clone()],
+            DEFAULT_MATCH_THRESHOLD,
+            DEFAULT_MATCH_MARGIN,
+        );
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].profile_id, alice.id);
         assert_eq!(matches[1].profile_id, bob.id);
@@ -746,8 +787,16 @@ mod tests {
         let store = VoiceProfileStore::open(temp_db()).unwrap();
         let alice = profile(&store, "Alice", vec![1.0, 0.0], "h", 20.0);
         // Cluster is nearly orthogonal to Alice -- similarity well under 0.6.
-        let clusters = vec![ClusterCentroid { speaker: 1, embedding: vec![0.1, 0.99] }];
-        let matches = match_clusters(&clusters, &[alice], DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
+        let clusters = vec![ClusterCentroid {
+            speaker: 1,
+            embedding: vec![0.1, 0.99],
+        }];
+        let matches = match_clusters(
+            &clusters,
+            &[alice],
+            DEFAULT_MATCH_THRESHOLD,
+            DEFAULT_MATCH_MARGIN,
+        );
         assert!(matches.is_empty());
     }
 
@@ -757,8 +806,16 @@ mod tests {
         let alice = profile(&store, "Alice", vec![1.0, 0.0], "h", 20.0);
         // A near-duplicate profile whose score will be within margin of Alice's.
         let alice_twin = profile(&store, "AliceTwin", vec![0.99, 0.05], "h", 20.0);
-        let clusters = vec![ClusterCentroid { speaker: 1, embedding: vec![1.0, 0.0] }];
-        let matches = match_clusters(&clusters, &[alice, alice_twin], DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
+        let clusters = vec![ClusterCentroid {
+            speaker: 1,
+            embedding: vec![1.0, 0.0],
+        }];
+        let matches = match_clusters(
+            &clusters,
+            &[alice, alice_twin],
+            DEFAULT_MATCH_THRESHOLD,
+            DEFAULT_MATCH_MARGIN,
+        );
         assert!(matches.is_empty());
     }
 
@@ -769,10 +826,21 @@ mod tests {
         // Both clusters are closest to Alice; the weaker one must fall
         // through unmatched (there's no second profile to reassign it to).
         let clusters = vec![
-            ClusterCentroid { speaker: 1, embedding: vec![1.0, 0.0] },
-            ClusterCentroid { speaker: 2, embedding: vec![0.95, 0.05] },
+            ClusterCentroid {
+                speaker: 1,
+                embedding: vec![1.0, 0.0],
+            },
+            ClusterCentroid {
+                speaker: 2,
+                embedding: vec![0.95, 0.05],
+            },
         ];
-        let matches = match_clusters(&clusters, std::slice::from_ref(&alice), DEFAULT_MATCH_THRESHOLD, DEFAULT_MATCH_MARGIN);
+        let matches = match_clusters(
+            &clusters,
+            std::slice::from_ref(&alice),
+            DEFAULT_MATCH_THRESHOLD,
+            DEFAULT_MATCH_MARGIN,
+        );
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].speaker, 1);
         assert_eq!(matches[0].profile_id, alice.id);
@@ -780,8 +848,15 @@ mod tests {
 
     #[test]
     fn speaker_centroid_refuses_too_little_speech() {
-        let extractor = FakeExtractor { hash: "h".into(), fixed: vec![1.0, 0.0] };
-        let turns = vec![SpeakerSamples { speaker: 1, seconds: 2.0, samples: vec![1.0, 1.0] }];
+        let extractor = FakeExtractor {
+            hash: "h".into(),
+            fixed: vec![1.0, 0.0],
+        };
+        let turns = vec![SpeakerSamples {
+            speaker: 1,
+            seconds: 2.0,
+            samples: vec![1.0, 1.0],
+        }];
         let result = speaker_centroid(&extractor, &turns, 1);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Not enough speech"));
@@ -789,11 +864,26 @@ mod tests {
 
     #[test]
     fn speaker_centroid_skips_short_turns_and_uses_the_rest() {
-        let extractor = FakeExtractor { hash: "h".into(), fixed: vec![1.0, 0.0] };
+        let extractor = FakeExtractor {
+            hash: "h".into(),
+            fixed: vec![1.0, 0.0],
+        };
         let turns = vec![
-            SpeakerSamples { speaker: 1, seconds: 0.5, samples: vec![99.0] }, // skipped: too short
-            SpeakerSamples { speaker: 1, seconds: 3.0, samples: vec![1.0] },
-            SpeakerSamples { speaker: 1, seconds: 3.0, samples: vec![1.0] },
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 0.5,
+                samples: vec![99.0],
+            }, // skipped: too short
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 3.0,
+                samples: vec![1.0],
+            },
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 3.0,
+                samples: vec![1.0],
+            },
         ];
         let (_embedding, total) = speaker_centroid(&extractor, &turns, 1).unwrap();
         assert!((total - 6.0).abs() < 1e-9);
@@ -801,11 +891,26 @@ mod tests {
 
     #[test]
     fn speaker_centroid_ignores_other_speakers_turns() {
-        let extractor = FakeExtractor { hash: "h".into(), fixed: vec![1.0, 0.0] };
+        let extractor = FakeExtractor {
+            hash: "h".into(),
+            fixed: vec![1.0, 0.0],
+        };
         let turns = vec![
-            SpeakerSamples { speaker: 2, seconds: 30.0, samples: vec![1.0] },
-            SpeakerSamples { speaker: 1, seconds: 3.0, samples: vec![1.0] },
-            SpeakerSamples { speaker: 1, seconds: 3.0, samples: vec![1.0] },
+            SpeakerSamples {
+                speaker: 2,
+                seconds: 30.0,
+                samples: vec![1.0],
+            },
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 3.0,
+                samples: vec![1.0],
+            },
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 3.0,
+                samples: vec![1.0],
+            },
         ];
         let (_embedding, total) = speaker_centroid(&extractor, &turns, 1).unwrap();
         assert!((total - 6.0).abs() < 1e-9);
@@ -813,10 +918,21 @@ mod tests {
 
     #[test]
     fn all_speaker_centroids_omits_speakers_with_too_little_speech() {
-        let extractor = FakeExtractor { hash: "h".into(), fixed: vec![1.0, 0.0] };
+        let extractor = FakeExtractor {
+            hash: "h".into(),
+            fixed: vec![1.0, 0.0],
+        };
         let turns = vec![
-            SpeakerSamples { speaker: 1, seconds: 6.0, samples: vec![1.0] },
-            SpeakerSamples { speaker: 2, seconds: 2.0, samples: vec![1.0] },
+            SpeakerSamples {
+                speaker: 1,
+                seconds: 6.0,
+                samples: vec![1.0],
+            },
+            SpeakerSamples {
+                speaker: 2,
+                seconds: 2.0,
+                samples: vec![1.0],
+            },
         ];
         let clusters = all_speaker_centroids(&extractor, &turns);
         assert_eq!(clusters.len(), 1);
@@ -860,7 +976,9 @@ mod tests {
     fn rejects_blank_or_oversized_names() {
         let store = VoiceProfileStore::open(temp_db()).unwrap();
         assert!(store.create("   ", &[1.0], "h", 10.0).is_err());
-        assert!(store.create(&"x".repeat(MAX_NAME_LEN + 1), &[1.0], "h", 10.0).is_err());
+        assert!(store
+            .create(&"x".repeat(MAX_NAME_LEN + 1), &[1.0], "h", 10.0)
+            .is_err());
     }
 
     fn temp_db() -> PathBuf {

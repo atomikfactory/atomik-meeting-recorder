@@ -15,7 +15,10 @@ use crate::{
     recording::Recording,
     recording_store::RecordingStore,
     summary_store::SummaryStore,
-    transcription::{checksum, output_path, presentation_label, read_checkpoint, recording_directory, validate_transcript},
+    transcription::{
+        checksum, output_path, presentation_label, read_checkpoint, recording_directory,
+        validate_transcript,
+    },
     transcription_store::TranscriptionStore,
     transcription_types::Transcript,
 };
@@ -132,8 +135,15 @@ pub struct AppFlowyService {
     inhibited: bool,
 }
 impl AppFlowyService {
-    pub fn new(root: PathBuf, settings: SettingsReader, credentials: SharedCredentialStore) -> Self {
-        let inhibited = std::env::var("MEETING_RECORDER_DISABLE_APPFLOWY").ok().as_deref() == Some("1");
+    pub fn new(
+        root: PathBuf,
+        settings: SettingsReader,
+        credentials: SharedCredentialStore,
+    ) -> Self {
+        let inhibited = std::env::var("MEETING_RECORDER_DISABLE_APPFLOWY")
+            .ok()
+            .as_deref()
+            == Some("1");
         Self::with_inhibition(root, settings, credentials, inhibited)
     }
     pub(crate) fn with_inhibition(
@@ -154,7 +164,13 @@ impl AppFlowyService {
         let mut worker = None;
         if !inhibited {
             if let Some(store) = store.clone() {
-                let (r, settings_reader, c, e, creds) = (root.clone(), settings.clone(), cancel.clone(), error.clone(), credentials.clone());
+                let (r, settings_reader, c, e, creds) = (
+                    root.clone(),
+                    settings.clone(),
+                    cancel.clone(),
+                    error.clone(),
+                    credentials.clone(),
+                );
                 match thread::Builder::new().name("appflowy-export".into()).spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Err(err) = store.recover() {
@@ -187,10 +203,20 @@ impl AppFlowyService {
                 }
             }
         }
-        Self { store, settings, credentials, cancel, worker: Mutex::new(worker), error, inhibited }
+        Self {
+            store,
+            settings,
+            credentials,
+            cancel,
+            worker: Mutex::new(worker),
+            error,
+            inhibited,
+        }
     }
     fn store(&self) -> Result<&AppFlowyStore, String> {
-        self.store.as_deref().ok_or_else(|| "AppFlowy export storage is unavailable.".into())
+        self.store
+            .as_deref()
+            .ok_or_else(|| "AppFlowy export storage is unavailable.".into())
     }
     fn client(&self, settings: &AppFlowySettings) -> Result<AppFlowyClient, String> {
         AppFlowyClient::new(&settings.base_url, self.credentials.clone())
@@ -201,8 +227,14 @@ impl AppFlowyService {
             error = Some(e);
             AppFlowySettings::default_disabled()
         });
-        let connected = self.client(&settings).and_then(|c| c.is_signed_in()).unwrap_or(false);
-        let email = self.client(&settings).and_then(|c| c.signed_in_email()).unwrap_or(None);
+        let connected = self
+            .client(&settings)
+            .and_then(|c| c.is_signed_in())
+            .unwrap_or(false);
+        let email = self
+            .client(&settings)
+            .and_then(|c| c.signed_in_email())
+            .unwrap_or(None);
         let jobs = match self.store().and_then(|s| s.all_jobs()) {
             Ok(jobs) => jobs
                 .into_iter()
@@ -210,9 +242,27 @@ impl AppFlowyService {
                     let page_url = (j.status == "completed")
                         .then(|| self.store().ok())
                         .flatten()
-                        .and_then(|s| s.get_page(&meeting_key(&j.recording_id, j.export_index)).ok().flatten())
-                        .and_then(|p| p.remote_view_id.map(|id| appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, &id)));
-                    JobSummary { recording_id: j.recording_id, status: j.status, error: j.error, export_index: j.export_index, page_url }
+                        .and_then(|s| {
+                            s.get_page(&meeting_key(&j.recording_id, j.export_index))
+                                .ok()
+                                .flatten()
+                        })
+                        .and_then(|p| {
+                            p.remote_view_id.map(|id| {
+                                appflowy_client::web_page_url(
+                                    &settings.base_url,
+                                    &p.workspace_id,
+                                    &id,
+                                )
+                            })
+                        });
+                    JobSummary {
+                        recording_id: j.recording_id,
+                        status: j.status,
+                        error: j.error,
+                        export_index: j.export_index,
+                        page_url,
+                    }
                 })
                 .collect(),
             Err(e) => {
@@ -220,7 +270,16 @@ impl AppFlowyService {
                 Vec::new()
             }
         };
-        AppFlowyState { enabled: settings.enabled, auto_export: settings.auto_export, connected, email, base_url: settings.base_url, jobs, inhibited: self.inhibited, error }
+        AppFlowyState {
+            enabled: settings.enabled,
+            auto_export: settings.auto_export,
+            connected,
+            email,
+            base_url: settings.base_url,
+            jobs,
+            inhibited: self.inhibited,
+            error,
+        }
     }
     pub fn request_otp(&self, email: &str) -> Result<(), String> {
         let settings = (self.settings)()?;
@@ -236,20 +295,36 @@ impl AppFlowyService {
     }
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, String> {
         let settings = (self.settings)()?;
-        self.client(&settings)?.list_workspaces().map_err(|e| e.to_string())
+        self.client(&settings)?
+            .list_workspaces()
+            .map_err(|e| e.to_string())
     }
     /// Read-only: the workspace's Spaces (and, indented, their top-level
     /// pages) for the Settings "Destination" picker. Never creates or
     /// changes anything -- a single `get_folder` call.
     pub fn list_destinations(&self) -> Result<Vec<Destination>, String> {
         let settings = (self.settings)()?;
-        let workspace_id = settings.workspace_id.clone().ok_or("AppFlowy workspace is not selected.")?;
-        let root = self.client(&settings)?.get_folder(&workspace_id, None).map_err(|e| e.to_string())?;
+        let workspace_id = settings
+            .workspace_id
+            .clone()
+            .ok_or("AppFlowy workspace is not selected.")?;
+        let root = self
+            .client(&settings)?
+            .get_folder(&workspace_id, None)
+            .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for space in root.children.iter().filter(|c| c.is_space) {
-            out.push(Destination { view_id: space.view_id.clone(), name: space.name.clone(), depth: 0 });
+            out.push(Destination {
+                view_id: space.view_id.clone(),
+                name: space.name.clone(),
+                depth: 0,
+            });
             for page in space.children.iter().filter(|c| !c.is_space) {
-                out.push(Destination { view_id: page.view_id.clone(), name: page.name.clone(), depth: 1 });
+                out.push(Destination {
+                    view_id: page.view_id.clone(),
+                    name: page.name.clone(),
+                    depth: 1,
+                });
             }
         }
         Ok(out)
@@ -262,9 +337,18 @@ impl AppFlowyService {
         Ok(pages
             .into_iter()
             .map(|p| {
-                let url = p.remote_view_id.as_ref().map(|id| appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, id));
+                let url = p.remote_view_id.as_ref().map(|id| {
+                    appflowy_client::web_page_url(&settings.base_url, &p.workspace_id, id)
+                });
                 let legacy = p.is_legacy();
-                PageInfo { key: p.key, kind: p.kind, name: p.name, status: p.status, url, legacy }
+                PageInfo {
+                    key: p.key,
+                    kind: p.kind,
+                    name: p.name,
+                    status: p.status,
+                    url,
+                    legacy,
+                }
             })
             .collect())
     }
@@ -298,8 +382,15 @@ impl AppFlowyService {
     }
     pub fn shutdown(&self) -> Result<(), String> {
         self.cancel.store(true, Ordering::Release);
-        if let Some(handle) = self.worker.lock().map_err(|_| "AppFlowy worker lock failed.")?.take() {
-            handle.join().map_err(|_| "AppFlowy export worker could not shut down.")?;
+        if let Some(handle) = self
+            .worker
+            .lock()
+            .map_err(|_| "AppFlowy worker lock failed.")?
+            .take()
+        {
+            handle
+                .join()
+                .map_err(|_| "AppFlowy export worker could not shut down.")?;
         }
         Ok(())
     }
@@ -327,7 +418,11 @@ fn set_error(slot: &Mutex<Option<String>>, value: Option<String>) {
 /// A recording is ready for export once its transcript is complete and (if
 /// enabled) both diarization and summarizing have also finished, so speaker
 /// labels and the summary are final before anything is sent.
-fn is_ready_for_export(root: &Path, settings: &AppFlowySettings, recording: &Recording) -> Result<bool, String> {
+fn is_ready_for_export(
+    root: &Path,
+    settings: &AppFlowySettings,
+    recording: &Recording,
+) -> Result<bool, String> {
     if settings.diarization_enabled && recording.tracks.iter().any(|t| t.direction == "output") {
         let status = DiarizationStore::open(&root.join("diarization.sqlite3"))?
             .get(&recording.recording_id)?
@@ -349,12 +444,12 @@ fn is_ready_for_export(root: &Path, settings: &AppFlowySettings, recording: &Rec
 /// Speaker labels are optional: only a job that can still finish is worth
 /// waiting for. Missing models or a failed job export without labels rather
 /// than holding the meeting back forever.
-fn diarization_settled(status: Option<&str>) -> bool {
+pub(crate) fn diarization_settled(status: Option<&str>) -> bool {
     !matches!(status, None | Some("queued" | "diarizing"))
 }
 /// A summary still pending (queued, running or waiting for Ollama to come
 /// back) delays export; a failed summary exports the transcript alone.
-fn summary_settled(status: Option<&str>) -> bool {
+pub(crate) fn summary_settled(status: Option<&str>) -> bool {
     matches!(status, Some("completed" | "failed"))
 }
 
@@ -368,9 +463,17 @@ fn tick(
     if settings.auto_export {
         let recordings = RecordingStore::open(root)?;
         let transcripts = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
-        for parent in transcripts.all()?.into_iter().filter(|j| j.status == "completed") {
-            let Some(recording) = recordings.get_by_id(&parent.recording_id)? else { continue };
-            if !recording.auto_transcribe || !matches!(recording.status.as_str(), "recorded" | "interrupted") {
+        for parent in transcripts
+            .all()?
+            .into_iter()
+            .filter(|j| j.status == "completed")
+        {
+            let Some(recording) = recordings.get_by_id(&parent.recording_id)? else {
+                continue;
+            };
+            if !recording.auto_transcribe
+                || !matches!(recording.status.as_str(), "recorded" | "interrupted")
+            {
                 continue;
             }
             if store.get_job(&recording.recording_id)?.is_some() {
@@ -402,7 +505,10 @@ fn classify_client_error(error: ClientError) -> ExportError {
     match error {
         ClientError::Transient(m) => (m, true),
         ClientError::Rejected(m) => (m, false),
-        ClientError::Unauthorized => ("AppFlowy session expired; please sign in again.".into(), false),
+        ClientError::Unauthorized => (
+            "AppFlowy session expired; please sign in again.".into(),
+            false,
+        ),
     }
 }
 
@@ -441,18 +547,41 @@ struct PagePlan<'a> {
 /// "Record not found: Collab not found" bug the same way: even a
 /// newly-created, correctly-listed page could in principle have a missing
 /// document collab, so this is verified before the page is ever trusted.
-fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) -> Result<String, ExportError> {
-    let PagePlan { workspace_id, key, kind, parent_remote_id, name, page_data } = plan;
-    let record = store.find_or_plan(key, kind, Some(parent_remote_id), workspace_id, name).map_err(|e| (e, false))?;
+fn resolve_page(
+    client: &AppFlowyClient,
+    store: &AppFlowyStore,
+    plan: PagePlan,
+) -> Result<String, ExportError> {
+    let PagePlan {
+        workspace_id,
+        key,
+        kind,
+        parent_remote_id,
+        name,
+        page_data,
+    } = plan;
+    let record = store
+        .find_or_plan(key, kind, Some(parent_remote_id), workspace_id, name)
+        .map_err(|e| (e, false))?;
     if let Some(remote_id) = record.remote_view_id {
         return Ok(remote_id);
     }
-    let folder: FolderView = client.get_folder(workspace_id, Some(parent_remote_id)).map_err(classify_client_error)?;
+    let folder: FolderView = client
+        .get_folder(workspace_id, Some(parent_remote_id))
+        .map_err(classify_client_error)?;
     if let Some(existing) = folder.child_named(name) {
         let candidate_id = existing.view_id.clone();
-        let legacy = store.is_legacy_view_id(&candidate_id).map_err(|e| (e, false))?;
-        if !legacy && client.page_content_loads(workspace_id, &candidate_id).map_err(classify_client_error)? {
-            store.mark_created(&record.key, &candidate_id).map_err(|e| (e, false))?;
+        let legacy = store
+            .is_legacy_view_id(&candidate_id)
+            .map_err(|e| (e, false))?;
+        if !legacy
+            && client
+                .page_content_loads(workspace_id, &candidate_id)
+                .map_err(classify_client_error)?
+        {
+            store
+                .mark_created(&record.key, &candidate_id)
+                .map_err(|e| (e, false))?;
             return Ok(candidate_id);
         }
         // Either a known-legacy view_id, or a name match whose content 404s
@@ -462,21 +591,34 @@ fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) 
         // broken or legacy page as this meeting/date/root's home.
     }
     let page = client
-        .create_page(workspace_id, parent_remote_id, &record.planned_view_id, name, page_data)
+        .create_page(
+            workspace_id,
+            parent_remote_id,
+            &record.planned_view_id,
+            name,
+            page_data,
+        )
         .map_err(classify_client_error)?;
-    let verify: FolderView = client.get_folder(workspace_id, Some(parent_remote_id)).map_err(classify_client_error)?;
+    let verify: FolderView = client
+        .get_folder(workspace_id, Some(parent_remote_id))
+        .map_err(classify_client_error)?;
     if !verify.children.iter().any(|c| c.view_id == page.view_id) {
         return Err((format!(
             "AppFlowy accepted \"{name}\" but it is not visible under its parent afterward; the export was marked failed rather than reported as completed for a page you would not be able to find."
         ), false));
     }
-    if !client.page_content_loads(workspace_id, &page.view_id).map_err(classify_client_error)? {
+    if !client
+        .page_content_loads(workspace_id, &page.view_id)
+        .map_err(classify_client_error)?
+    {
         return Err((format!(
             "AppFlowy accepted \"{name}\" but its content failed to load afterward (Collab not found for {}); the export was marked failed rather than reported as completed for a page you would not be able to open.",
             page.view_id
         ), false));
     }
-    store.mark_created(&record.key, &page.view_id).map_err(|e| (e, false))?;
+    store
+        .mark_created(&record.key, &page.view_id)
+        .map_err(|e| (e, false))?;
     Ok(page.view_id)
 }
 
@@ -490,14 +632,26 @@ fn resolve_page(client: &AppFlowyClient, store: &AppFlowyStore, plan: PagePlan) 
 /// even though the page really was created. A workspace with no Space at
 /// all fails the job with a clear, actionable message rather than silently
 /// falling back to the invisible workspace root.
-fn resolve_root_parent(client: &AppFlowyClient, settings: &AppFlowySettings, workspace_id: &str) -> Result<String, ExportError> {
+fn resolve_root_parent(
+    client: &AppFlowyClient,
+    settings: &AppFlowySettings,
+    workspace_id: &str,
+) -> Result<String, ExportError> {
     if let Some(parent) = &settings.parent_view_id {
         return Ok(parent.clone());
     }
-    let root: FolderView = client.get_folder(workspace_id, None).map_err(classify_client_error)?;
+    let root: FolderView = client
+        .get_folder(workspace_id, None)
+        .map_err(classify_client_error)?;
     root.pick_space()
         .map(|space| space.view_id.clone())
-        .ok_or_else(|| ("No space found in this AppFlowy workspace; choose a parent in Settings.".to_string(), false))
+        .ok_or_else(|| {
+            (
+                "No space found in this AppFlowy workspace; choose a parent in Settings."
+                    .to_string(),
+                false,
+            )
+        })
 }
 
 fn empty_document() -> serde_json::Value {
@@ -516,7 +670,7 @@ fn meeting_page_name(started_at_ms: u64, title: &str, export_index: u32) -> Stri
         format!("{base} ({export_index})")
     }
 }
-fn local_date_string(started_at_ms: u64) -> String {
+pub(crate) fn local_date_string(started_at_ms: u64) -> String {
     Local
         .timestamp_millis_opt(started_at_ms as i64)
         .single()
@@ -532,10 +686,15 @@ fn export_one(
     credentials: &SharedCredentialStore,
     job: &AppFlowyJob,
 ) -> Result<(), ExportError> {
-    let client = AppFlowyClient::new(&settings.base_url, credentials.clone()).map_err(|e| (e, false))?;
-    let workspace_id = settings.workspace_id.clone().ok_or_else(|| ("AppFlowy workspace is not selected.".to_string(), false))?;
+    let client =
+        AppFlowyClient::new(&settings.base_url, credentials.clone()).map_err(|e| (e, false))?;
+    let workspace_id = settings
+        .workspace_id
+        .clone()
+        .ok_or_else(|| ("AppFlowy workspace is not selected.".to_string(), false))?;
     let root_parent_id = resolve_root_parent(&client, settings, &workspace_id)?;
-    let (recording, meeting) = load_meeting_export_data(root, settings, &job.recording_id).map_err(|e| (e, false))?;
+    let (recording, meeting) =
+        load_meeting_export_data(root, settings, &job.recording_id).map_err(|e| (e, false))?;
 
     let root_page_id = resolve_page(
         &client,
@@ -584,14 +743,36 @@ fn load_meeting_export_data(
     settings: &AppFlowySettings,
     recording_id: &str,
 ) -> Result<(Recording, MeetingExportData), String> {
+    load_meeting_data(
+        root,
+        &settings.extra_library_roots,
+        &settings.local_speaker_name,
+        recording_id,
+    )
+}
+
+/// Loads a recording's finished transcript (checksum- and shape-verified),
+/// speaker labels/names and summary into the data both the AppFlowy and the
+/// atomik-kb exports are built from. Shared so the two integrations can never
+/// disagree about what "this meeting's content" is.
+pub(crate) fn load_meeting_data(
+    root: &Path,
+    extra_library_roots: &[PathBuf],
+    default_local_speaker_name: &str,
+    recording_id: &str,
+) -> Result<(Recording, MeetingExportData), String> {
     let recordings = RecordingStore::open(root)?;
-    let recording = recordings.get_by_id(recording_id)?.ok_or("Recording metadata is unavailable.")?;
+    let recording = recordings
+        .get_by_id(recording_id)?
+        .ok_or("Recording metadata is unavailable.")?;
     let registry = TranscriptionStore::open(&root.join("transcription.sqlite3"))?;
-    let parent = registry.get(recording_id)?.ok_or("Whisper job is missing.")?;
+    let parent = registry
+        .get(recording_id)?
+        .ok_or("Whisper job is missing.")?;
     if parent.status != "completed" {
         return Err("Transcript is not complete.".into());
     }
-    let directory = recording_directory(root, &settings.extra_library_roots, recording_id)?;
+    let directory = recording_directory(root, extra_library_roots, recording_id)?;
     let json_path = output_path(&directory, "transcript.json")?;
     let bytes = read_checkpoint(&json_path)?;
     if Some(checksum(&bytes)) != parent.checksum {
@@ -599,8 +780,16 @@ fn load_meeting_export_data(
     }
     let transcript: Transcript = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     validate_transcript(&transcript, &parent, &recording)?;
-    let local_speaker_name = transcript.local_speaker_name.clone().unwrap_or_else(|| settings.local_speaker_name.clone());
-    let labels = crate::diarization::read_completed_speaker_labels(root, &settings.extra_library_roots, &recording, &transcript);
+    let local_speaker_name = transcript
+        .local_speaker_name
+        .clone()
+        .unwrap_or_else(|| default_local_speaker_name.to_string());
+    let labels = crate::diarization::read_completed_speaker_labels(
+        root,
+        extra_library_roots,
+        &recording,
+        &transcript,
+    );
     let names = crate::speaker_names::names_for(root, recording_id);
     let turns: Vec<SpeakerTurn> = transcript
         .segments
@@ -608,19 +797,42 @@ fn load_meeting_export_data(
         .enumerate()
         .map(|(i, segment)| {
             let remote_speaker = labels.as_ref().and_then(|l| l.get(i).copied().flatten());
-            let speaker_label = presentation_label(&recording, segment, &local_speaker_name, remote_speaker, Some(&names));
-            SpeakerTurn { speaker_label, start_ms: segment.start_ms, end_ms: segment.end_ms, text: segment.text.clone() }
+            let speaker_label = presentation_label(
+                &recording,
+                segment,
+                &local_speaker_name,
+                remote_speaker,
+                Some(&names),
+            );
+            SpeakerTurn {
+                speaker_label,
+                start_ms: segment.start_ms,
+                end_ms: segment.end_ms,
+                text: segment.text.clone(),
+            }
         })
         .collect();
-    let summary = crate::summary::read_completed_summary(root, &settings.extra_library_roots, recording_id).map(|(_, output)| output);
-    let title = recording.meeting_title.clone().unwrap_or_else(|| "Meeting".into());
+    let summary = crate::summary::read_completed_summary(root, extra_library_roots, recording_id)
+        .map(|(_, output)| output);
+    let title = recording
+        .meeting_title
+        .clone()
+        .unwrap_or_else(|| "Meeting".into());
     let started_at_rfc3339 = Local
         .timestamp_millis_opt(recording.started_at as i64)
         .single()
         .unwrap_or_else(Local::now)
         .with_timezone(&chrono::Utc)
         .to_rfc3339();
-    Ok((recording, MeetingExportData { title, started_at_rfc3339, summary, turns }))
+    Ok((
+        recording,
+        MeetingExportData {
+            title,
+            started_at_rfc3339,
+            summary,
+            turns,
+        },
+    ))
 }
 
 #[cfg(test)]

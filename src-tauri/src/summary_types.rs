@@ -89,7 +89,11 @@ pub struct OwnerContext<'a> {
 }
 
 impl<'a> OwnerContext<'a> {
-    pub fn new(local_speaker_name: &'a str, device_names: &[String], transcript_text: &str) -> Self {
+    pub fn new(
+        local_speaker_name: &'a str,
+        device_names: &[String],
+        transcript_text: &str,
+    ) -> Self {
         Self {
             local_speaker_name,
             device_names_lower: device_names.iter().map(|n| n.to_lowercase()).collect(),
@@ -137,7 +141,11 @@ mod tests {
     use super::*;
 
     fn ctx<'a>(local: &'a str, transcript: &str) -> OwnerContext<'a> {
-        OwnerContext::new(local, &["Zoom Audio".into(), "BlackHole 2ch".into()], transcript)
+        OwnerContext::new(
+            local,
+            &["Zoom Audio".into(), "BlackHole 2ch".into()],
+            transcript,
+        )
     }
 
     #[test]
@@ -151,7 +159,11 @@ mod tests {
     fn generic_group_words_are_rejected() {
         let c = ctx("You", "some transcript text");
         for word in ["Participants", "Everyone", "The team", "Unknown"] {
-            assert_eq!(c.normalize(Some(word)), None, "expected {word} to be rejected");
+            assert_eq!(
+                c.normalize(Some(word)),
+                None,
+                "expected {word} to be rejected"
+            );
         }
     }
 
@@ -195,9 +207,21 @@ mod tests {
             title: "t".into(),
             summary: "s".into(),
             action_items: vec![
-                ActionItem { task: "a".into(), owner: Some("Remote".into()), due: None },
-                ActionItem { task: "b".into(), owner: Some("Speaker 1".into()), due: None },
-                ActionItem { task: "c".into(), owner: Some("Priya".into()), due: None },
+                ActionItem {
+                    task: "a".into(),
+                    owner: Some("Remote".into()),
+                    due: None,
+                },
+                ActionItem {
+                    task: "b".into(),
+                    owner: Some("Speaker 1".into()),
+                    due: None,
+                },
+                ActionItem {
+                    task: "c".into(),
+                    owner: Some("Priya".into()),
+                    due: None,
+                },
             ],
             ..Default::default()
         };

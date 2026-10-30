@@ -116,6 +116,29 @@ pub struct Settings {
     /// named space inside it.
     #[serde(default)]
     pub appflowy_parent_view_id: Option<String>,
+    /// Export completed meetings to a local atomik-kb knowledge base over its
+    /// loopback MCP server (see `atomik_kb.rs`/`docs/atomik-kb.md`). Off by
+    /// default -- nothing about a recording leaves this device until the user
+    /// explicitly turns this on and saves a token. The token itself lives only
+    /// in the OS credential store, never here. Missing/legacy payloads default
+    /// to disabled.
+    #[serde(default)]
+    pub atomik_kb_enabled: bool,
+    /// Automatically export every eligible meeting once it is ready. Off by
+    /// default even after `atomik_kb_enabled` is turned on -- an explicit
+    /// second opt-in. A manual per-meeting "Export to Atomik KB" button works
+    /// regardless of this setting. Missing/legacy payloads default to disabled.
+    #[serde(default)]
+    pub atomik_kb_auto_export: bool,
+    /// atomik-kb's MCP port on 127.0.0.1 (its Settings -> MCP; default 47811).
+    /// There is deliberately no host setting: loopback only.
+    #[serde(default = "default_atomik_kb_port")]
+    pub atomik_kb_port: u16,
+    /// Name of the atomik-kb space meetings are exported to, matched
+    /// case-insensitively and exactly. A space is never created and never
+    /// substituted. Missing/legacy payloads default to "My Daily Meeting".
+    #[serde(default = "default_atomik_kb_space_name")]
+    pub atomik_kb_space_name: String,
     /// Global OS-wide shortcut (see `hotkey.rs`) that toggles recording even
     /// while the window is hidden in the tray. Registered from Rust, not the
     /// webview. Missing/legacy payloads default to enabled.
@@ -137,6 +160,12 @@ pub struct Settings {
 }
 fn default_appflowy_base_url() -> String {
     "https://beta.appflowy.cloud".into()
+}
+fn default_atomik_kb_port() -> u16 {
+    crate::atomik_kb_client::DEFAULT_PORT
+}
+fn default_atomik_kb_space_name() -> String {
+    crate::atomik_kb::DEFAULT_SPACE_NAME.into()
 }
 pub fn default_hotkey() -> String {
     "CommandOrControl+Alt+R".into()
@@ -215,6 +244,10 @@ impl Default for Settings {
             appflowy_use_native_block: enabled_by_default(),
             appflowy_workspace_id: None,
             appflowy_parent_view_id: None,
+            atomik_kb_enabled: false,
+            atomik_kb_auto_export: false,
+            atomik_kb_port: default_atomik_kb_port(),
+            atomik_kb_space_name: default_atomik_kb_space_name(),
             hotkey_enabled: enabled_by_default(),
             hotkey: default_hotkey(),
             recognize_known_voices: enabled_by_default(),
@@ -227,6 +260,7 @@ impl Settings {
     /// stray leading/trailing space from a text field does not stick around.
     pub fn normalize(mut self) -> Self {
         self.local_speaker_name = self.local_speaker_name.trim().to_string();
+        self.atomik_kb_space_name = self.atomik_kb_space_name.trim().to_string();
         self
     }
     pub fn validate(&self) -> Result<(), StoreError> {
@@ -280,6 +314,10 @@ impl Settings {
         }
         crate::appflowy_client::validate_base_url(&self.appflowy_base_url)
             .map_err(StoreError::Validation)?;
+        crate::atomik_kb_client::validate_port(self.atomik_kb_port)
+            .map_err(StoreError::Validation)?;
+        crate::atomik_kb_client::validate_space_name(&self.atomik_kb_space_name)
+            .map_err(StoreError::Validation)?;
         crate::hotkey::validate_accelerator(&self.hotkey).map_err(StoreError::Validation)?;
         Ok(())
     }
@@ -288,8 +326,7 @@ impl Settings {
 /// currently offers, so a future addition does not need a store-level change).
 fn is_valid_language(value: &str) -> bool {
     value == "auto"
-        || ((2..=3).contains(&value.len())
-            && value.bytes().all(|b| b.is_ascii_lowercase()))
+        || ((2..=3).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_lowercase()))
 }
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -397,7 +434,10 @@ mod tests {
             compress_audio: false,
             local_speaker_name: "Ben".into(),
             recordings_folder: Some(
-                std::env::temp_dir().join("recordings").display().to_string(),
+                std::env::temp_dir()
+                    .join("recordings")
+                    .display()
+                    .to_string(),
             ),
             legacy_library_roots: vec![std::env::temp_dir()
                 .join("old-recordings")
@@ -409,6 +449,10 @@ mod tests {
             appflowy_use_native_block: false,
             appflowy_workspace_id: Some("workspace-1".into()),
             appflowy_parent_view_id: Some("space-1".into()),
+            atomik_kb_enabled: true,
+            atomik_kb_auto_export: true,
+            atomik_kb_port: 48000,
+            atomik_kb_space_name: "Meetings 2026".into(),
             hotkey_enabled: false,
             hotkey: "Control+Shift+M".into(),
             recognize_known_voices: false,
@@ -605,17 +649,17 @@ mod tests {
             })
             .is_err());
         assert_eq!(store.get().unwrap(), good);
-        let absolute = std::env::temp_dir().join("recordings").display().to_string();
+        let absolute = std::env::temp_dir()
+            .join("recordings")
+            .display()
+            .to_string();
         assert!(store
             .save(Settings {
                 recordings_folder: Some(absolute.clone()),
                 ..good.clone()
             })
             .is_ok());
-        assert_eq!(
-            store.get().unwrap().recordings_folder,
-            Some(absolute)
-        );
+        assert_eq!(store.get().unwrap().recordings_folder, Some(absolute));
     }
     #[test]
     fn too_many_legacy_library_roots_does_not_replace_saved_value() {
@@ -649,6 +693,51 @@ mod tests {
         )
         .unwrap();
         assert!(parsed.recognize_known_voices);
+    }
+    #[test]
+    fn atomik_kb_export_is_off_by_default_with_documented_port_and_space() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"auto_record":true,"start_debounce_seconds":10,"end_grace_seconds":30,"whisper_model":"base"}"#,
+        )
+        .unwrap();
+        assert!(!parsed.atomik_kb_enabled);
+        assert!(!parsed.atomik_kb_auto_export);
+        assert_eq!(parsed.atomik_kb_port, 47811);
+        assert_eq!(parsed.atomik_kb_space_name, "My Daily Meeting");
+        let defaults = Settings::default();
+        assert!(!defaults.atomik_kb_enabled && !defaults.atomik_kb_auto_export);
+        assert!(defaults.validate().is_ok());
+    }
+    #[test]
+    fn invalid_atomik_kb_port_or_space_name_is_rejected_and_names_are_trimmed() {
+        let good = Settings::default();
+        assert!(Settings {
+            atomik_kb_port: 0,
+            ..good.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(Settings {
+            atomik_kb_space_name: "   ".into(),
+            ..good.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(Settings {
+            atomik_kb_space_name: "x".repeat(201),
+            ..good.clone()
+        }
+        .validate()
+        .is_err());
+        assert_eq!(
+            Settings {
+                atomik_kb_space_name: "  Réunions  ".into(),
+                ..good
+            }
+            .normalize()
+            .atomik_kb_space_name,
+            "Réunions"
+        );
     }
     #[test]
     fn legacy_payload_without_hotkey_fields_defaults_to_enabled_default_shortcut() {

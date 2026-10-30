@@ -90,7 +90,10 @@ mod tests {
     #[test]
     fn monitor_id_round_trips_a_sink_name() {
         let id = pulse_monitor_id("alsa_output.pci-0000_00_1f.3.analog-stereo");
-        assert_eq!(id, "pulse:monitor:alsa_output.pci-0000_00_1f.3.analog-stereo");
+        assert_eq!(
+            id,
+            "pulse:monitor:alsa_output.pci-0000_00_1f.3.analog-stereo"
+        );
         assert_eq!(
             parse_pulse_monitor_id(&id),
             Some("alsa_output.pci-0000_00_1f.3.analog-stereo")

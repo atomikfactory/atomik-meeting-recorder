@@ -98,7 +98,10 @@ pub struct PartitionedFilter {
 
 impl PartitionedFilter {
     pub fn new(config: &AecConfig) -> Self {
-        debug_assert!(config.sample_rate > 0, "AecConfig::sample_rate must be positive");
+        debug_assert!(
+            config.sample_rate > 0,
+            "AecConfig::sample_rate must be positive"
+        );
         let n = config.block_len;
         let fft_len = 2 * n;
         let mut planner = RealFftPlanner::<f32>::new();

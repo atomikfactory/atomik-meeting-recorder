@@ -41,7 +41,11 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 fn content_length_of(headers: &[u8]) -> usize {
     String::from_utf8_lossy(headers)
         .lines()
-        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().to_string())
+        })
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
@@ -80,7 +84,10 @@ fn list_models_parses_a_real_http_response() {
     ]);
     let client = OllamaClient::new(&url).unwrap();
     let models = client.list_models().unwrap();
-    assert_eq!(models, vec!["qwen3:8b".to_string(), "qwen2.5:7b-instruct".to_string()]);
+    assert_eq!(
+        models,
+        vec!["qwen3:8b".to_string(), "qwen2.5:7b-instruct".to_string()]
+    );
 }
 
 #[test]
@@ -99,7 +106,13 @@ fn chat_round_trips_a_structured_response_over_the_wire() {
     let url = spawn_fake_ollama(vec![chat_response]);
     let client = OllamaClient::new(&url).unwrap();
     let raw = client
-        .chat("qwen3:8b", "system prompt", "transcript text", summary_schema(), 4096)
+        .chat(
+            "qwen3:8b",
+            "system prompt",
+            "transcript text",
+            summary_schema(),
+            4096,
+        )
         .unwrap();
     let parsed: crate::summary_types::SummaryOutput = serde_json::from_str(&raw).unwrap();
     assert_eq!(parsed.title, "Weekly sync");
@@ -113,7 +126,11 @@ fn model_not_found_returns_a_pull_hint() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept loopback connection");
         read_full_request(&mut stream);
-        respond(&mut stream, "404 Not Found", r#"{"error":"model not found"}"#);
+        respond(
+            &mut stream,
+            "404 Not Found",
+            r#"{"error":"model not found"}"#,
+        );
     });
     let client = OllamaClient::new(&format!("http://{addr}")).unwrap();
     let error = client

@@ -93,28 +93,59 @@ fn flac_and_wav_produce_identical_transcripts_with_a_real_model() {
     fs::create_dir_all(&flac_dir).unwrap();
     let (wav_info, samples) = audio_file::read_wav_pcm16(&wav_path).unwrap();
     let flac_path = flac_dir.join("public.flac");
-    audio_file::encode_flac_new(&flac_path, wav_info.sample_rate, wav_info.channels, &samples).unwrap();
+    audio_file::encode_flac_new(
+        &flac_path,
+        wav_info.sample_rate,
+        wav_info.channels,
+        &samples,
+    )
+    .unwrap();
 
     let cancelled = AtomicBool::new(false);
     let engine = LocalWhisperEngine::new();
     let wav_transcript = engine
         .transcribe(
-            &request(&wav_root, wav_id, &wav_path, PathBuf::from(&model_path), info.key.clone(), info.sha256.clone()),
+            &request(
+                &wav_root,
+                wav_id,
+                &wav_path,
+                PathBuf::from(&model_path),
+                info.key.clone(),
+                info.sha256.clone(),
+            ),
             &cancelled,
             &mut |_| {},
         )
         .expect("WAV fixture must transcribe locally");
     let flac_transcript = engine
         .transcribe(
-            &request(&flac_root, flac_id, &flac_path, PathBuf::from(&model_path), info.key.clone(), info.sha256.clone()),
+            &request(
+                &flac_root,
+                flac_id,
+                &flac_path,
+                PathBuf::from(&model_path),
+                info.key.clone(),
+                info.sha256.clone(),
+            ),
             &cancelled,
             &mut |_| {},
         )
         .expect("FLAC fixture must transcribe locally");
 
-    let wav_text: Vec<&str> = wav_transcript.segments.iter().map(|s| s.text.as_str()).collect();
-    let flac_text: Vec<&str> = flac_transcript.segments.iter().map(|s| s.text.as_str()).collect();
-    assert!(!wav_text.is_empty(), "Public speech fixture must yield text");
+    let wav_text: Vec<&str> = wav_transcript
+        .segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect();
+    let flac_text: Vec<&str> = flac_transcript
+        .segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect();
+    assert!(
+        !wav_text.is_empty(),
+        "Public speech fixture must yield text"
+    );
     assert_eq!(
         wav_text, flac_text,
         "Transcribing a FLAC copy must produce the exact same text as the original WAV"

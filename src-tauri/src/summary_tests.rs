@@ -194,9 +194,7 @@ fn completes_once_writes_markdown_and_preserves_transcript() {
     assert!(md.contains("Release planning"));
     assert!(md.contains("Write release notes"));
     assert_eq!(
-        f.service()
-            .summary_path(&f.recording.recording_id)
-            .unwrap(),
+        f.service().summary_path(&f.recording.recording_id).unwrap(),
         f.path("summary.md")
     );
 }
@@ -295,7 +293,11 @@ fn restart_invalidation_removes_idle_job_and_requires_new_checksum() {
     fs::write(f.path("transcript.json"), &bytes).unwrap();
     assert!(f
         .registry
-        .claim(&f.recording.recording_id, "unused-fake-whisper-model", &new_hash)
+        .claim(
+            &f.recording.recording_id,
+            "unused-fake-whisper-model",
+            &new_hash
+        )
         .unwrap());
     f.registry
         .complete(
@@ -355,7 +357,11 @@ fn queue_is_idempotent_and_never_resets_an_existing_job() {
     let service = f.service();
     service.queue(&f.recording.recording_id).unwrap();
     service.queue(&f.recording.recording_id).unwrap();
-    assert_eq!(f.store.all().unwrap().len(), 1, "must not create a duplicate row");
+    assert_eq!(
+        f.store.all().unwrap().len(),
+        1,
+        "must not create a duplicate row"
+    );
     let e = FakeEngine::default();
     f.tick(&e);
     assert_eq!(f.job().status, "completed");
@@ -368,7 +374,10 @@ fn queue_is_idempotent_and_never_resets_an_existing_job() {
 }
 #[test]
 fn queue_refuses_a_recording_without_a_completed_transcript() {
-    let root = std::env::temp_dir().join(format!("meeting-summary-queue-test-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!(
+        "meeting-summary-queue-test-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir_all(&root).unwrap();
     let registry = TranscriptionStore::open(&root.join("transcription.sqlite3")).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
@@ -390,7 +399,10 @@ fn queue_refuses_a_recording_without_a_completed_transcript() {
 #[test]
 fn queue_refuses_an_unknown_recording() {
     let f = Fixture::new();
-    let error = f.service().queue("00000000-0000-0000-0000-000000000000").unwrap_err();
+    let error = f
+        .service()
+        .queue("00000000-0000-0000-0000-000000000000")
+        .unwrap_err();
     assert!(error.contains("no transcript"), "{error}");
 }
 #[test]

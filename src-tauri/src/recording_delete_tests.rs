@@ -35,7 +35,11 @@ impl FakeTrash {
 }
 impl TrashBackend for FakeTrash {
     fn send_to_trash(&self, path: &Path) -> Result<(), String> {
-        self.sent.lock().unwrap().borrow_mut().push(path.to_path_buf());
+        self.sent
+            .lock()
+            .unwrap()
+            .borrow_mut()
+            .push(path.to_path_buf());
         // A real trash call also removes the folder; simulate that so callers
         // observing the filesystem see the same end state either mode leaves.
         std::fs::remove_dir_all(path).map_err(|e| e.to_string())
@@ -50,6 +54,7 @@ struct Fixture {
     summary: SummaryStore,
     compression: CompressionStore,
     appflowy: AppFlowyStore,
+    atomik_kb: crate::atomik_kb_store::AtomikKbStore,
     speaker_names: crate::speaker_names::SpeakerNameStore,
 }
 impl Fixture {
@@ -62,11 +67,22 @@ impl Fixture {
         let summary = SummaryStore::open(&root.join("summary.sqlite3")).unwrap();
         let compression = CompressionStore::open(&root.join("compression.sqlite3")).unwrap();
         let appflowy = AppFlowyStore::open(&root.join("appflowy.sqlite3")).unwrap();
-        let speaker_names = crate::speaker_names::SpeakerNameStore::open(
-            crate::speaker_names::store_path(&root),
-        )
-        .unwrap();
-        Self { root, recordings, transcription, diarization, summary, compression, appflowy, speaker_names }
+        let atomik_kb =
+            crate::atomik_kb_store::AtomikKbStore::open(&root.join("atomik_kb.sqlite3")).unwrap();
+        let speaker_names =
+            crate::speaker_names::SpeakerNameStore::open(crate::speaker_names::store_path(&root))
+                .unwrap();
+        Self {
+            root,
+            recordings,
+            transcription,
+            diarization,
+            summary,
+            compression,
+            appflowy,
+            atomik_kb,
+            speaker_names,
+        }
     }
     fn stores(&self) -> DeleteStores<'_> {
         DeleteStores {
@@ -76,6 +92,7 @@ impl Fixture {
             summary: &self.summary,
             compression: &self.compression,
             appflowy: &self.appflowy,
+            atomik_kb: &self.atomik_kb,
             speaker_names: &self.speaker_names,
         }
     }
@@ -156,7 +173,10 @@ fn permanent_mode_never_calls_the_trash_backend() {
         &trash,
     );
     assert!(summary.results[0].deleted);
-    assert!(trash.sent_paths().is_empty(), "permanent mode must not use the recycle bin");
+    assert!(
+        trash.sent_paths().is_empty(),
+        "permanent mode must not use the recycle bin"
+    );
     assert!(!dir.exists());
     let _ = std::fs::remove_dir_all(&fx.root);
 }
@@ -176,7 +196,11 @@ fn refuses_a_recording_that_is_currently_being_captured() {
         &trash,
     );
     assert!(!summary.results[0].deleted);
-    assert!(summary.results[0].skipped_reason.as_deref().unwrap().contains("currently"));
+    assert!(summary.results[0]
+        .skipped_reason
+        .as_deref()
+        .unwrap()
+        .contains("currently"));
     assert!(dir.exists());
     assert!(trash.sent_paths().is_empty());
     let _ = std::fs::remove_dir_all(&fx.root);
@@ -184,13 +208,22 @@ fn refuses_a_recording_that_is_currently_being_captured() {
 
 #[test]
 fn refuses_recordings_with_an_actively_running_job() {
-    for job in ["transcribing", "diarizing", "summarizing", "compressing", "exporting"] {
+    for job in [
+        "transcribing",
+        "diarizing",
+        "summarizing",
+        "compressing",
+        "exporting",
+    ] {
         let fx = Fixture::new(&format!("job-{job}"));
         let (id, dir) = fx.new_recording();
         match job {
             "transcribing" => {
                 fx.transcription.enqueue(&id, "base", &hash64()).unwrap();
-                assert!(fx.transcription.claim(&id, "/models/base.bin", &hash64()).unwrap());
+                assert!(fx
+                    .transcription
+                    .claim(&id, "/models/base.bin", &hash64())
+                    .unwrap());
             }
             "diarizing" => {
                 fx.diarization.enqueue(&id, &hash64()).unwrap();
@@ -227,7 +260,10 @@ fn refuses_recordings_with_an_actively_running_job() {
             &trash,
         );
         assert!(!summary.results[0].deleted, "job={job}");
-        assert!(dir.exists(), "job={job}: folder must survive a refused delete");
+        assert!(
+            dir.exists(),
+            "job={job}: folder must survive a refused delete"
+        );
         assert!(trash.sent_paths().is_empty(), "job={job}");
         let _ = std::fs::remove_dir_all(&fx.root);
     }
@@ -307,7 +343,10 @@ fn a_symlinked_recording_folder_is_never_touched() {
     );
     assert!(!summary.results[0].deleted);
     assert!(trash.sent_paths().is_empty());
-    assert!(real_elsewhere.exists(), "the real folder behind the symlink must survive");
+    assert!(
+        real_elsewhere.exists(),
+        "the real folder behind the symlink must survive"
+    );
     let _ = std::fs::remove_file(&dir).or_else(|_| std::fs::remove_dir(&dir));
     let _ = std::fs::remove_dir_all(&fx.root);
     let _ = std::fs::remove_dir_all(&real_elsewhere);
@@ -333,10 +372,59 @@ fn the_appflowy_pages_journal_is_never_touched_only_the_job_row() {
     );
     assert!(summary.results[0].deleted);
     assert!(!dir.exists());
-    assert!(fx.appflowy.get_job(&id).unwrap().is_none(), "job row must be removed");
+    assert!(
+        fx.appflowy.get_job(&id).unwrap().is_none(),
+        "job row must be removed"
+    );
     assert!(
         fx.appflowy.get_page("meeting:test:1").unwrap().is_some(),
         "the pages journal (already-exported pages) must never be touched by a local delete"
+    );
+    let _ = std::fs::remove_dir_all(&fx.root);
+}
+
+#[test]
+fn the_atomik_kb_journal_is_never_touched_only_the_job_row_and_an_active_export_blocks_deletion() {
+    let fx = Fixture::new("atomik-kb-journal");
+    let (id, dir) = fx.new_recording();
+    fx.atomik_kb.enqueue(&id).unwrap();
+    fx.atomik_kb
+        .find_or_plan("meeting:test:1", "meeting", None, "space", "Standup")
+        .unwrap();
+    assert!(fx.atomik_kb.claim(&id).unwrap());
+    let trash = FakeTrash::default();
+    let blocked = delete_recordings_from_disk(
+        std::slice::from_ref(&id),
+        DeleteMode::RecycleBin,
+        &fx.root,
+        &[],
+        &fx.stores(),
+        None,
+        &trash,
+    );
+    assert!(
+        !blocked.results[0].deleted,
+        "an in-flight atomik-kb export blocks deletion"
+    );
+    assert!(dir.exists());
+    fx.atomik_kb.complete(&id).unwrap();
+    let summary = delete_recordings_from_disk(
+        std::slice::from_ref(&id),
+        DeleteMode::RecycleBin,
+        &fx.root,
+        &[],
+        &fx.stores(),
+        None,
+        &trash,
+    );
+    assert!(summary.results[0].deleted, "{:?}", summary.results[0]);
+    assert!(
+        fx.atomik_kb.get_job(&id).unwrap().is_none(),
+        "job row must be removed"
+    );
+    assert!(
+        fx.atomik_kb.get_page("meeting:test:1").unwrap().is_some(),
+        "the pages journal must never be touched by a local delete"
     );
     let _ = std::fs::remove_dir_all(&fx.root);
 }
@@ -378,8 +466,14 @@ fn unknown_recording_ids_are_reported_as_skipped_and_do_not_error_out_the_batch(
 
 #[test]
 fn parses_delete_mode() {
-    assert_eq!(DeleteMode::parse("recycle_bin").unwrap(), DeleteMode::RecycleBin);
+    assert_eq!(
+        DeleteMode::parse("recycle_bin").unwrap(),
+        DeleteMode::RecycleBin
+    );
     assert_eq!(DeleteMode::parse("").unwrap(), DeleteMode::RecycleBin);
-    assert_eq!(DeleteMode::parse("permanent").unwrap(), DeleteMode::Permanent);
+    assert_eq!(
+        DeleteMode::parse("permanent").unwrap(),
+        DeleteMode::Permanent
+    );
     assert!(DeleteMode::parse("delete-forever").is_err());
 }
