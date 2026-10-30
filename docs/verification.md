@@ -98,7 +98,7 @@ This check also exposed a real defect: an earlier implementation treated WASAPI 
 ## Known limits
 
 - Not verified: physical device unplug and replug, actual OS sleep/wake, forced process kill during hardware capture, long-duration soak runs, and native macOS or Linux execution. macOS has a microphone usage description and the Linux build keeps its ALSA dependencies, but that does not establish working native capture on those platforms.
-- No CI is configured in this repository; cross-platform builds and tests must be run locally.
+- CI (`.github/workflows/ci.yml`) builds and tests on Linux, macOS, and Windows for every push to `main` and every pull request; it does not exercise real audio hardware, so the manual checks above still apply.
 - Unsupported macOS and Linux output capture is explicitly disabled; their input devices can still be selected.
 - Real-call acceptance of detection, tray interaction through the actual OS menus, OS folder opening, and native accessibility checks require the manual runs in [manual acceptance checks](manual-checks.md).
 - Cross-device drift correction, RF64 or chunk rollover for recordings past the WAV size cap, and live AppFlowy Cloud behavior (as opposed to a fake server) are not covered.
