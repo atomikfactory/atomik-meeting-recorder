@@ -37,6 +37,11 @@ pub struct CpalAudioDeviceInventory;
 
 impl AudioDeviceInventory for CpalAudioDeviceInventory {
     fn snapshot(&self) -> AudioInventorySnapshot {
+        #[cfg(target_os = "linux")]
+        let pulse_error = match pulse_snapshot() {
+            Ok(snapshot) => return snapshot,
+            Err(error) => error,
+        };
         let host = cpal::default_host();
         let backend = format!("{:?}", host.id());
         let mut snapshot = AudioInventorySnapshot {
@@ -45,39 +50,60 @@ impl AudioDeviceInventory for CpalAudioDeviceInventory {
         };
         collect(&host, &mut snapshot);
         #[cfg(target_os = "linux")]
-        collect_pulse_monitors(&mut snapshot);
+        snapshot.errors.push(format!(
+            "Could not list PulseAudio/PipeWire devices, so raw ALSA devices are listed instead and system output cannot be recorded: {pulse_error}"
+        ));
         snapshot
     }
 }
 
-/// System-output ("what the speakers play") sources on Linux: each sink's
-/// monitor is listed as a selectable output device, alongside (not replacing)
-/// CPAL's ALSA input inventory above. A Pulse enumeration failure (no
-/// pipewire-pulse/pulseaudio running) is surfaced as an inventory error, not
-/// a hard failure of the whole snapshot -- ALSA inputs remain usable.
+/// The Linux inventory, from the PulseAudio/PipeWire server: its input
+/// sources (microphones, interfaces, webcams; see
+/// `system_output::pertinent_inputs`) and each sink's monitor ("what the
+/// speakers play"). This is the list the desktop's own sound settings show,
+/// and capturing through the server shares a device with the meeting app
+/// instead of claiming it exclusively, as opening an ALSA `hw:` device would.
+///
+/// An error when no server answers (neither pipewire-pulse nor pulseaudio
+/// running): the caller then falls back to CPAL's ALSA inventory and shows
+/// the reason as an inventory error.
 #[cfg(target_os = "linux")]
-fn collect_pulse_monitors(snapshot: &mut AudioInventorySnapshot) {
-    match crate::linux_pulse::enumerate_sinks() {
-        Ok(sinks) => {
-            for sink in sinks {
-                snapshot.devices.push(AudioDevice {
-                    id: Some(system_output::pulse_monitor_id(&sink.sink_name)),
-                    name: format!("{} (monitor)", sink.description),
-                    direction: AudioDeviceDirection::Output,
-                    is_default: sink.is_default,
-                    default_format: Some(format!(
-                        "{} channels · {} Hz",
-                        sink.channels, sink.sample_rate
-                    )),
-                    selectable: true,
-                    unavailable_reason: None,
-                });
-            }
-        }
-        Err(error) => snapshot
-            .errors
-            .push(format!("Could not list PulseAudio/PipeWire sinks: {error}")),
+fn pulse_snapshot() -> Result<AudioInventorySnapshot, String> {
+    let inventory = crate::linux_pulse::enumerate()?;
+    let mut devices = Vec::new();
+    for source in system_output::pertinent_inputs(inventory.sources) {
+        devices.push(AudioDevice {
+            id: Some(system_output::pulse_source_id(&source.name)),
+            name: source.description,
+            direction: AudioDeviceDirection::Input,
+            is_default: source.is_default,
+            default_format: Some(format!(
+                "{} channels · {} Hz",
+                source.channels, source.sample_rate
+            )),
+            selectable: true,
+            unavailable_reason: None,
+        });
     }
+    for sink in inventory.sinks {
+        devices.push(AudioDevice {
+            id: Some(system_output::pulse_monitor_id(&sink.sink_name)),
+            name: format!("{} (monitor)", sink.description),
+            direction: AudioDeviceDirection::Output,
+            is_default: sink.is_default,
+            default_format: Some(format!(
+                "{} channels · {} Hz",
+                sink.channels, sink.sample_rate
+            )),
+            selectable: true,
+            unavailable_reason: None,
+        });
+    }
+    Ok(AudioInventorySnapshot {
+        backend: "PulseAudio/PipeWire".into(),
+        devices,
+        errors: Vec::new(),
+    })
 }
 
 fn collect(host: &cpal::Host, snapshot: &mut AudioInventorySnapshot) {
@@ -109,11 +135,20 @@ fn collect(host: &cpal::Host, snapshot: &mut AudioInventorySnapshot) {
                 continue;
             }
         };
+        // On Linux this is only the fallback when no PulseAudio/PipeWire
+        // server answers; an ALSA output is never a loopback source, so only
+        // inputs are listed there.
         let directions = [
             (AudioDeviceDirection::Input, description.supports_input()),
-            (AudioDeviceDirection::Output, description.supports_output()),
+            (
+                AudioDeviceDirection::Output,
+                description.supports_output() && !cfg!(target_os = "linux"),
+            ),
         ];
         if !directions.iter().any(|(_, supported)| *supported) {
+            if cfg!(target_os = "linux") && description.supports_output() {
+                continue;
+            }
             snapshot
                 .errors
                 .push("Audio backend reported a device with no source direction.".into());
@@ -170,13 +205,6 @@ fn collect(host: &cpal::Host, snapshot: &mut AudioInventorySnapshot) {
                     AudioDeviceDirection::Output if cfg!(target_os = "windows") => {
                         (id.is_some() && base_reason.is_none(), base_reason)
                     }
-                    AudioDeviceDirection::Output if cfg!(target_os = "linux") => (
-                        false,
-                        Some(
-                            "This ALSA output endpoint is not itself a loopback source. Select this device's \"(monitor)\" entry, listed separately via PulseAudio/PipeWire, to record system output."
-                                .into(),
-                        ),
-                    ),
                     AudioDeviceDirection::Output => (
                         false,
                         Some(
