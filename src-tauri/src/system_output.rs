@@ -31,6 +31,58 @@ pub fn parse_pulse_monitor_id(id: &str) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
+/// Stable id scheme for a PulseAudio/PipeWire input source (a microphone,
+/// interface or webcam), e.g. `pulse:source:alsa_input.usb-046d_C922_Pro_Stream_Webcam-02.analog-stereo`.
+/// Same shape as the monitor id above: the sound server's own stable source
+/// name behind a fixed prefix.
+const PULSE_SOURCE_PREFIX: &str = "pulse:source:";
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn pulse_source_id(source_name: &str) -> String {
+    format!("{PULSE_SOURCE_PREFIX}{source_name}")
+}
+
+/// Recovers the source name from an id produced by `pulse_source_id`, or
+/// `None` if `id` is not one (a monitor id, a CPAL device id).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_pulse_source_id(id: &str) -> Option<&str> {
+    id.strip_prefix(PULSE_SOURCE_PREFIX)
+        .filter(|name| !name.is_empty())
+}
+
+/// One PulseAudio/PipeWire source as the server reports it, before deciding
+/// whether it is worth listing as an input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct PulseSource {
+    pub name: String,
+    pub description: String,
+    /// The source is a sink's monitor ("what the speakers play"); those are
+    /// listed separately as system-output sources, not as inputs.
+    pub is_monitor: bool,
+    /// The server knows the active port has nothing plugged in (an empty
+    /// line-in or headset jack). `false` when it does not know.
+    pub unplugged: bool,
+    pub is_default: bool,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+/// The sources worth offering as inputs: what the desktop's own sound
+/// settings list. Monitors are left out (they are system-output sources) and
+/// so are jacks with nothing plugged in. Unlike CPAL's ALSA inventory, which
+/// lists every PCM plugin of every card (`hw:`, `plughw:`, `front:`,
+/// `dsnoop:`, `surround*`...), the sound server already shows one source per
+/// device profile, and opening it shares the device with other applications
+/// instead of claiming the hardware exclusively.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn pertinent_inputs(sources: Vec<PulseSource>) -> Vec<PulseSource> {
+    sources
+        .into_iter()
+        .filter(|source| !source.is_monitor && !source.unplugged && source.channels > 0)
+        .collect()
+}
+
 /// PulseAudio/ALSA expose a handful of routing pseudo-devices ("default",
 /// "pulse", "sysdefault", "pipewire", and their `sysdefault:CARD=...`/
 /// `front:CARD=...` siblings are real, but the bare aliases below just
@@ -105,6 +157,46 @@ mod tests {
         assert_eq!(parse_pulse_monitor_id("hw:0,0:output"), None);
         assert_eq!(parse_pulse_monitor_id("pulse:monitor:"), None);
         assert_eq!(parse_pulse_monitor_id(""), None);
+    }
+
+    #[test]
+    fn source_id_round_trips_and_is_distinct_from_a_monitor_id() {
+        let name = "alsa_input.usb-046d_C922_Pro_Stream_Webcam-02.analog-stereo";
+        let id = pulse_source_id(name);
+        assert_eq!(id, format!("pulse:source:{name}"));
+        assert_eq!(parse_pulse_source_id(&id), Some(name));
+        assert_eq!(parse_pulse_monitor_id(&id), None);
+        assert_eq!(parse_pulse_source_id(&pulse_monitor_id(name)), None);
+        assert_eq!(parse_pulse_source_id("pulse:source:"), None);
+        assert_eq!(parse_pulse_source_id("hw:CARD=Webcam,DEV=0:input"), None);
+    }
+
+    fn source(name: &str, is_monitor: bool, unplugged: bool) -> PulseSource {
+        PulseSource {
+            name: name.into(),
+            description: name.into(),
+            is_monitor,
+            unplugged,
+            is_default: false,
+            sample_rate: 48_000,
+            channels: 2,
+        }
+    }
+
+    #[test]
+    fn pertinent_inputs_drop_monitors_and_unplugged_jacks_and_keep_order() {
+        let kept = pertinent_inputs(vec![
+            source("webcam", false, false),
+            source("speakers.monitor", true, false),
+            source("line-in", false, true),
+            source("interface", false, false),
+            PulseSource {
+                channels: 0,
+                ..source("broken", false, false)
+            },
+        ]);
+        let names: Vec<_> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["webcam", "interface"]);
     }
 
     #[test]

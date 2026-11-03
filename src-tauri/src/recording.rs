@@ -713,14 +713,27 @@ struct NativeDevice {
 }
 impl AudioCapture for NativeCapture {
     fn resolve(&self, source: &AudioSourceSelection) -> Result<Box<dyn CaptureDevice>, String> {
-        // A Linux system-output source is a PulseAudio/PipeWire monitor, not a
-        // CPAL device at all: its id never carries the CPAL `:input`/`:output`
-        // suffix stripped below. Recognize and dispatch it before that parse.
+        // On Linux, sources listed through PulseAudio/PipeWire (a sink's
+        // monitor for system output, a microphone/interface/webcam for input)
+        // are not CPAL devices at all: their ids never carry the CPAL
+        // `:input`/`:output` suffix stripped below. Recognize and dispatch
+        // them before that parse.
         #[cfg(target_os = "linux")]
-        if matches!(source.direction, AudioSourceDirection::Output) {
-            if let Some(sink_name) = crate::system_output::parse_pulse_monitor_id(&source.id) {
-                return crate::linux_pulse::PulseMonitorDevice::resolve(sink_name)
-                    .map(|device| Box::new(device) as Box<dyn CaptureDevice>);
+        {
+            use crate::linux_pulse::PulseSourceDevice;
+            use crate::system_output::{parse_pulse_monitor_id, parse_pulse_source_id};
+            let pulse = match source.direction {
+                AudioSourceDirection::Output => {
+                    parse_pulse_monitor_id(&source.id).map(PulseSourceDevice::resolve_monitor)
+                }
+                AudioSourceDirection::Input => {
+                    parse_pulse_source_id(&source.id).map(PulseSourceDevice::resolve_input)
+                }
+            };
+            if let Some(device) = pulse {
+                return device
+                    .map(|device| Box::new(device) as Box<dyn CaptureDevice>)
+                    .map_err(|e| format!("{}: {e}", source.name));
             }
         }
         let suffix = match source.direction {
