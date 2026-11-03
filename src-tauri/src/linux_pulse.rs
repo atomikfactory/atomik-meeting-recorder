@@ -45,6 +45,12 @@ const FRAGMENT_MS: u32 = 20;
 /// connection but never replies would otherwise hang this call, and with it
 /// the UI's device-refresh path, indefinitely.
 const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long Stop waits for a capture thread to notice it. A thread reading
+/// from a source that delivers audio notices within one fragment
+/// (`FRAGMENT_MS`); one blocked on a source that has stopped delivering
+/// (a stalled device) never does, and is let go of after this (see
+/// `PulseCaptureStream::drop`).
+const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct PulseSinkInfo {
@@ -342,7 +348,8 @@ impl CaptureDevice for PulseSourceDevice {
             source_name: self.source_name.clone(),
             format: self.format,
             stream_label: self.stream_label,
-            sink: Mutex::new(Some(sink)),
+            sink: Arc::new(Mutex::new(Some(sink))),
+            started: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
         }))
@@ -353,19 +360,20 @@ struct PulseCaptureStream {
     source_name: String,
     format: CaptureFormat,
     stream_label: &'static str,
-    sink: Mutex<Option<CaptureSink>>,
+    /// Shared with the capture thread, which takes the lock for each
+    /// fragment. Stop takes the sink out, which ends the track (its sender
+    /// is what keeps the WAV writer open) even when the thread is stuck.
+    sink: Arc<Mutex<Option<CaptureSink>>>,
+    started: AtomicBool,
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl CaptureStream for PulseCaptureStream {
     fn play(&self) -> Result<(), String> {
-        let sink = self
-            .sink
-            .lock()
-            .map_err(|_| "PulseAudio capture sink lock is unavailable".to_string())?
-            .take()
-            .ok_or_else(|| "PulseAudio capture stream was already started".to_string())?;
+        if self.started.swap(true, Ordering::Relaxed) {
+            return Err("PulseAudio capture stream was already started".into());
+        }
         let spec = Spec {
             format: PulseFormat::F32le,
             channels: self.format.channels as u8,
@@ -401,6 +409,7 @@ impl CaptureStream for PulseCaptureStream {
                 self.source_name
             )
         })?;
+        let sink = self.sink.clone();
         let stop = self.stop.clone();
         let format = self.format;
         let source_name = self.source_name.clone();
@@ -430,11 +439,34 @@ impl Drop for PulseCaptureStream {
     fn drop(&mut self) {
         // Stop is cooperative: the blocking `read()` below returns at the
         // next fragment boundary (<= FRAGMENT_MS) and the loop then exits.
+        // A source that has stopped delivering audio never returns from
+        // `read()`, so Stop waits at most `STOP_GRACE`, then ends the track
+        // without the thread: taking the sink out drops its sender, which
+        // lets the WAV writer finish and the recording be saved. The thread
+        // is left blocked; it exits on its own if the source ever delivers
+        // again, since it then finds no sink.
         self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.thread.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
+        let handle = self.thread.lock().ok().and_then(|mut guard| guard.take());
+        let finished = match handle {
+            None => true,
+            Some(handle) => {
+                let deadline = Instant::now() + STOP_GRACE;
+                while !handle.is_finished() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let finished = handle.is_finished();
+                if finished {
+                    let _ = handle.join();
+                }
+                finished
             }
+        };
+        let sink = self.sink.lock().ok().and_then(|mut guard| guard.take());
+        if let (false, Some(sink)) = (finished, sink) {
+            let _ = sink.errors.try_send(format!(
+                "{}: the sound server stopped delivering audio from this source; the track ends where it stopped",
+                sink.source_name
+            ));
         }
     }
 }
@@ -460,7 +492,7 @@ impl Drop for PulseCaptureStream {
 /// itself disappears or the source never opens.
 fn capture_loop(
     simple: Simple,
-    sink: CaptureSink,
+    sink: Arc<Mutex<Option<CaptureSink>>>,
     stop: Arc<AtomicBool>,
     format: CaptureFormat,
     fragment_bytes: usize,
@@ -469,7 +501,11 @@ fn capture_loop(
     let mut buf = vec![0u8; fragment_bytes.max(4)];
     let mut timeline = crate::recording::FrameTimeline::default();
     while !stop.load(Ordering::Relaxed) {
-        match simple.read(&mut buf) {
+        let read = simple.read(&mut buf);
+        let Ok(guard) = sink.lock() else { break };
+        // Stop took the sink out: the track has ended.
+        let Some(sink) = guard.as_ref() else { break };
+        match read {
             Ok(()) => {
                 let now_ms = sink.started.elapsed().as_millis() as u64;
                 sink.last_buffer_ms.store(now_ms, Ordering::Relaxed);
