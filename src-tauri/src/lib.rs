@@ -1182,6 +1182,57 @@ fn remember_voice(
         .strip_prefix("Speaker ")
         .and_then(|n| n.parse().ok())
         .ok_or("Only a detected remote speaker's voice can be remembered.")?;
+    let (recording, registry, checkpoint) = load_speaker_checkpoint(root, extra, recording_id)?;
+    let (model_path, model_hash) = diarization::registered_model(root, &registry, "embedding")?
+        .ok_or("Choose a local speaker embedding model in Settings first.")?;
+    let extractor = voice_profiles::SherpaEmbeddingExtractor::create(
+        std::path::Path::new(&model_path),
+        &model_hash,
+    )?;
+    let model_hash = voice_profiles::EmbeddingExtractor::model_hash(&extractor);
+    let turn_samples =
+        voice_profiles::load_speaker_samples(&recording, root, extra, &checkpoint.output.turns)?;
+    let (embedding, seconds) =
+        voice_profiles::speaker_centroid(&extractor, &turn_samples, speaker)?;
+    let profiles = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(root))?;
+    let existing = profiles
+        .list()?
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name.trim()));
+    let profile_id = match existing {
+        Some(profile) => {
+            profiles
+                .update_running_mean(&profile.id, &embedding, &model_hash, seconds)?
+                .id
+        }
+        None => profiles.create(name, &embedding, &model_hash, seconds)?.id,
+    };
+    // Keep a short audible sample too; a failure here must not undo the
+    // profile that was just saved.
+    let _ = voice_profiles::store_speaker_clip(
+        &profiles,
+        &profile_id,
+        &turn_samples,
+        speaker,
+        recording.meeting_title.as_deref(),
+    );
+    Ok(())
+}
+
+/// Loads a recording plus its completed speaker-identification checkpoint
+/// (after verifying the transcript checkpoint checksum).
+fn load_speaker_checkpoint(
+    root: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    recording_id: &str,
+) -> Result<
+    (
+        recording::Recording,
+        TranscriptionStore,
+        diarization::SpeakerCheckpoint,
+    ),
+    String,
+> {
     let recordings = RecordingStore::open(root)?;
     let recording = recordings
         .get_by_id(recording_id)?
@@ -1203,31 +1254,42 @@ fn remember_voice(
         serde_json::from_slice(&bytes).map_err(app_error)?;
     let checkpoint = diarization::read_completed_checkpoint(root, extra, &recording, &transcript)
         .ok_or("Speaker identification has not completed for this recording yet.")?;
-    let (model_path, model_hash) = diarization::registered_model(root, &registry, "embedding")?
-        .ok_or("Choose a local speaker embedding model in Settings first.")?;
-    let extractor = voice_profiles::SherpaEmbeddingExtractor::create(
-        std::path::Path::new(&model_path),
-        &model_hash,
-    )?;
-    let model_hash = voice_profiles::EmbeddingExtractor::model_hash(&extractor);
-    let turn_samples =
-        voice_profiles::load_speaker_samples(&recording, root, extra, &checkpoint.output.turns)?;
-    let (embedding, seconds) =
-        voice_profiles::speaker_centroid(&extractor, &turn_samples, speaker)?;
-    let profiles = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(root))?;
-    let existing = profiles
-        .list()?
-        .into_iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name.trim()));
-    match existing {
-        Some(profile) => {
-            profiles.update_running_mean(&profile.id, &embedding, &model_hash, seconds)?;
-        }
-        None => {
-            profiles.create(name, &embedding, &model_hash, seconds)?;
-        }
-    }
-    Ok(())
+    Ok((recording, registry, checkpoint))
+}
+
+/// Up to ~8 seconds of the best turn(s) for one "Speaker N" label in one
+/// recording, as base64 WAV, so the UI can play "who is Speaker 2".
+#[tauri::command]
+async fn get_speaker_clip(
+    recording_id: String,
+    label: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let extra = extra_library_roots(&app);
+        let speaker: u32 = label
+            .strip_prefix("Speaker ")
+            .and_then(|n| n.parse().ok())
+            .ok_or("Only a detected remote speaker has a playable clip.")?;
+        let (recording, _registry, checkpoint) =
+            load_speaker_checkpoint(&root, &extra, &recording_id)?;
+        let turn_samples = voice_profiles::load_speaker_samples(
+            &recording,
+            &root,
+            &extra,
+            &checkpoint.output.turns,
+        )
+        .map_err(|e| format!("The meeting audio is no longer available ({e})."))?;
+        let (clip, _) =
+            voice_profiles::pick_clip(&turn_samples, speaker, voice_profiles::PREVIEW_CLIP_SECONDS)
+                .ok_or("No clear speech from this speaker to play.")?;
+        Ok(voice_profiles::base64_encode(
+            &voice_profiles::encode_wav_16k_mono(&clip),
+        ))
+    })
+    .await
+    .map_err(app_error)?
 }
 
 /// Removes a per-recording name, reverting that label to its default
@@ -1301,23 +1363,107 @@ struct VoiceProfileInfo {
     name: String,
     sample_seconds: f64,
     updated_at: i64,
+    sample_count: u32,
 }
-impl From<voice_profiles::VoiceProfile> for VoiceProfileInfo {
-    fn from(p: voice_profiles::VoiceProfile) -> Self {
+impl VoiceProfileInfo {
+    fn new(p: voice_profiles::VoiceProfile, sample_count: u32) -> Self {
         Self {
             id: p.id,
             name: p.name,
             sample_seconds: p.sample_seconds,
             updated_at: p.updated_at,
+            sample_count,
         }
     }
+}
+#[derive(Serialize)]
+struct VoiceSampleInfo {
+    id: String,
+    seconds: f64,
+    created_at: i64,
+    source_title: Option<String>,
 }
 #[tauri::command]
 async fn list_voice_profiles(app: tauri::AppHandle) -> Result<Vec<VoiceProfileInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = recordings_dir(&app)?;
         let store = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
-        Ok(store.list()?.into_iter().map(Into::into).collect())
+        let counts = store.sample_counts()?;
+        Ok(store
+            .list()?
+            .into_iter()
+            .map(|p| {
+                let n = counts.get(&p.id).copied().unwrap_or(0);
+                VoiceProfileInfo::new(p, n)
+            })
+            .collect())
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn list_voice_profile_samples(
+    profile_id: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<VoiceSampleInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let store = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
+        Ok(store
+            .list_samples(&profile_id)?
+            .into_iter()
+            .map(|s| VoiceSampleInfo {
+                id: s.id,
+                seconds: s.seconds,
+                created_at: s.created_at,
+                source_title: s.source_title,
+            })
+            .collect())
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Base64 of one stored sample's 16 kHz mono PCM16 WAV bytes.
+#[tauri::command]
+async fn get_voice_sample_audio(
+    sample_id: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        let store = voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?;
+        Ok(voice_profiles::base64_encode(
+            &store.sample_wav(&sample_id)?,
+        ))
+    })
+    .await
+    .map_err(app_error)?
+}
+#[tauri::command]
+async fn delete_voice_profile_sample(
+    sample_id: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?
+            .delete_sample(&sample_id)
+    })
+    .await
+    .map_err(app_error)?
+}
+/// Folds `source_id` into `target_id` (keeps the target's name).
+#[tauri::command]
+async fn merge_voice_profiles(
+    source_id: String,
+    target_id: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recordings_dir(&app)?;
+        voice_profiles::VoiceProfileStore::open(voice_profiles::store_path(&root))?
+            .merge(&source_id, &target_id)
+            .map(|_| ())
     })
     .await
     .map_err(app_error)?
@@ -2389,7 +2535,7 @@ pub fn run() {
         let gate = app.state::<ExitGate>();
         request_exit(&app, service, gate.inner());
     }
-}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_atomik_kb_state, atomik_kb_save_token, atomik_kb_clear_token, atomik_kb_test_connection, atomik_kb_export_now, atomik_kb_export_again, atomik_kb_retry, atomik_kb_list_pages, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status, list_speaker_labels, set_speaker_name, delete_speaker_name, speaker_names_changed_since_summary, list_voice_profiles, rename_voice_profile, delete_voice_profile, forget_all_voice_profiles, reidentify_speakers]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
+}).invoke_handler(tauri::generate_handler![get_settings, save_settings, get_audio_devices, save_audio_selection, get_app_state, get_recording_state, get_detection_state, get_transcription_state, import_whisper_model, retry_transcription, transcribe_recording, restart_transcription, rename_recording, delete_recording, delete_recordings_from_disk, get_diarization_state, import_diarization_model, retry_diarization, open_transcript, get_summary_state, list_summary_models, test_ollama_connection, retry_summary, regenerate_summary, queue_summary, open_summary, get_appflowy_state, appflowy_request_otp, appflowy_verify_otp, appflowy_sign_out, appflowy_list_workspaces, appflowy_export_now, appflowy_export_again, appflowy_retry, appflowy_list_destinations, appflowy_list_pages, open_appflowy_url, get_atomik_kb_state, atomik_kb_save_token, atomik_kb_clear_token, atomik_kb_test_connection, atomik_kb_export_now, atomik_kb_export_again, atomik_kb_retry, atomik_kb_list_pages, get_compression_state, retry_compression, audio_storage_summary, confirm_detected_recording, dismiss_detected_recording, start_recording, stop_recording, open_recordings_folder, open_recording_folder, choose_recordings_folder, set_recordings_folder, reset_recordings_folder, move_recordings_to_configured_folder, quit_application, search_transcripts, get_browser_extension_status, connect_browser_extension, disconnect_browser_extension, open_browser_extension_folder, get_hotkey_status, list_speaker_labels, set_speaker_name, delete_speaker_name, speaker_names_changed_since_summary, list_voice_profiles, list_voice_profile_samples, get_voice_sample_audio, delete_voice_profile_sample, merge_voice_profiles, get_speaker_clip, rename_voice_profile, delete_voice_profile, forget_all_voice_profiles, reidentify_speakers]).build(tauri::generate_context!()).expect("failed to build Atomik Meeting Recorder");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let gate = handle.state::<ExitGate>();

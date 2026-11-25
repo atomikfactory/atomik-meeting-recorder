@@ -282,6 +282,18 @@ fn run(
     state: SharedState,
     title_provider: TitleProvider,
 ) {
+    /// Clears the process-wide recording flag when the engine thread exits for
+    /// any reason (including a panic), so background workers can never be left
+    /// paused by a dead engine.
+    struct ClearRecordingFlag;
+    impl Drop for ClearRecordingFlag {
+        fn drop(&mut self) {
+            crate::transcription::set_recording_in_progress(false);
+        }
+    }
+    // Startup/recovery always begins with workers allowed to run.
+    crate::transcription::set_recording_in_progress(false);
+    let _clear_flag = ClearRecordingFlag;
     let store = RecordingStore::open(&dir).and_then(|mut store| {
         store.set_extra_roots(known_library_roots());
         store.recover()?;
@@ -527,6 +539,10 @@ impl Engine {
         Ok(())
     }
     fn publish_active(&self, active: &Active, status: &str) {
+        // Authoritative "recording in progress" signal: set before any stream
+        // is built so background workers stop claiming jobs. Cleared only in
+        // `publish_finished` (every terminal path funnels through it).
+        crate::transcription::set_recording_in_progress(true);
         if let Ok(mut s) = self.state.lock() {
             s.status = status.into();
             s.active = Some(active.rec.clone());
@@ -626,6 +642,7 @@ impl Engine {
         result
     }
     fn publish_finished(&self, record: Recording, persistence_error: Option<String>) {
+        crate::transcription::set_recording_in_progress(false);
         if let Ok(mut s) = self.state.lock() {
             s.active = None;
             s.error = persistence_error.clone().or_else(|| record.error.clone());

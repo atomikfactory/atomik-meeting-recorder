@@ -13,7 +13,12 @@ test.beforeEach(async({page})=>{await page.addInitScript(()=>{
     profiles:[] as any[],
     rememberShouldFail:false,
     reidentifyOutcomes:[] as any[],
+    samples:{} as Record<string,any[]>,
+    mergeError:null as string|null,
+    clipError:null as string|null,
   };
+  (window as any).Audio=class{src:string;onended:any=null;onerror:any=null;constructor(src:string){this.src=src;f.audios.push(this)}play(){return Promise.resolve()}pause(){f.paused.push(this.src)}};
+  f.audios=[] as any[];f.paused=[] as string[];
   Object.assign(window,{__sn:f,__TAURI_INTERNALS__:{transformCallback:()=>1,invoke:async(c:string,a:any)=>{
     f.calls.push([c,a]);
     if(c==="plugin:event|listen")return 1;
@@ -48,6 +53,11 @@ test.beforeEach(async({page})=>{await page.addInitScript(()=>{
     if(c==="list_voice_profiles")return f.profiles;
     if(c==="rename_voice_profile"){const p=f.profiles.find((x:any)=>x.id===a.id);if(p)p.name=a.name;return null}
     if(c==="delete_voice_profile"){f.profiles=f.profiles.filter((x:any)=>x.id!==a.id);return null}
+    if(c==="list_voice_profile_samples")return f.samples[a.profileId]??[];
+    if(c==="get_voice_sample_audio")return "UklGRg==";
+    if(c==="delete_voice_profile_sample"){for(const k of Object.keys(f.samples))f.samples[k]=f.samples[k].filter((x:any)=>x.id!==a.sampleId);return null}
+    if(c==="merge_voice_profiles"){if(f.mergeError)throw f.mergeError;f.profiles=f.profiles.filter((x:any)=>x.id!==a.sourceId);return null}
+    if(c==="get_speaker_clip"){if(f.clipError)throw f.clipError;return "UklGRg=="}
     if(c==="forget_all_voice_profiles"){f.profiles=[];return null}
     throw Error(c)
   }}})
@@ -68,10 +78,22 @@ test("typing a name survives several poll cycles",async({page})=>{
   await expect(input).toHaveValue("Alice");
 });
 
+test("a background re-render keeps focus and caret in the name field while typing",async({page})=>{
+  await page.getByRole("button",{name:"Speakers"}).click();
+  const input=page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]');
+  await input.click();
+  await page.keyboard.type("Al");
+  await page.evaluate(()=>{const old=(window as any).__TAURI_INTERNALS__.invoke;(window as any).__TAURI_INTERNALS__.invoke=async(c:string,a:any)=>c==="get_diarization_state"?{enabled:true,inhibited:false,models:[],jobs:[{recording_id:"a",status:"diarizing",progress:42,error:null,speaker_count:null}],error:null}:old(c,a)});
+  await expect(page.locator('#recent-recordings')).toContainText("Identifying speakers 42%",{timeout:6000});
+  await page.keyboard.type("ice");
+  await expect(input).toHaveValue("Alice");
+  await expect(input).toBeFocused();
+});
+
 test("save calls set_speaker_name with recording id, label, name and remember",async({page})=>{
   await page.getByRole("button",{name:"Speakers"}).click();
   await page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]').fill("Alice");
-  await page.locator('[data-speaker-save="a"][data-speaker-label="Speaker 1"]').click();
+  await page.locator('[data-speaker-save-all="a"]').click();
   await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="set_speaker_name"))).toEqual(["set_speaker_name",{recordingId:"a",label:"Speaker 1",name:"Alice",remember:true}]);
 });
 
@@ -79,7 +101,7 @@ test("unchecking remember saves remember:false",async({page})=>{
   await page.getByRole("button",{name:"Speakers"}).click();
   await page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]').fill("Alice");
   await page.locator('[data-speaker-remember="a"][data-speaker-label="Speaker 1"]').uncheck();
-  await page.locator('[data-speaker-save="a"][data-speaker-label="Speaker 1"]').click();
+  await page.locator('[data-speaker-save-all="a"]').click();
   await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="set_speaker_name")?.[1].remember)).toBe(false);
 });
 
@@ -87,7 +109,7 @@ test("a backend refusal to remember a voice is shown verbatim",async({page})=>{
   await page.evaluate(()=>{(window as any).__sn.rememberShouldFail=true});
   await page.getByRole("button",{name:"Speakers"}).click();
   await page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]').fill("Alice");
-  await page.locator('[data-speaker-save="a"][data-speaker-label="Speaker 1"]').click();
+  await page.locator('[data-speaker-save-all="a"]').click();
   await expect(page.locator('[data-speaker-panel-error="a"]')).toContainText("Not enough speech to remember this voice");
   // The name itself still saved despite the remember failure.
   await expect(page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]')).toHaveValue("Alice");
@@ -98,7 +120,7 @@ test("an auto-identified name shows an auto marker and can be corrected",async({
   await page.getByRole("button",{name:"Speakers"}).click();
   await expect(page.locator('[data-speaker-row="Speaker 1"] [data-speaker-auto-badge]')).toBeVisible();
   await page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]').fill("Bob");
-  await page.locator('[data-speaker-save="a"][data-speaker-label="Speaker 1"]').click();
+  await page.locator('[data-speaker-save-all="a"]').click();
   await expect(page.locator('[data-speaker-row="Speaker 1"] [data-speaker-auto-badge]')).toHaveCount(0);
   await expect(page.locator('[data-speaker-name-input][data-speaker-label="Speaker 1"]')).toHaveValue("Bob");
 });
@@ -134,7 +156,7 @@ test("a speaker name is rendered as escaped text, never executed",async({page})=
 });
 
 test("Settings lists voice profiles and a rename draft survives polling",async({page})=>{
-  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,updated_at:1700000000}]});
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}]});
   await page.getByRole("button",{name:"Settings"}).click();
   const nameInput=page.locator('[data-voice-profile-name="p1"]');
   await expect(nameInput).toHaveValue("Alice");
@@ -146,21 +168,21 @@ test("Settings lists voice profiles and a rename draft survives polling",async({
 });
 
 test("deleting a voice profile requires confirmation",async({page})=>{
-  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,updated_at:1700000000}];window.confirm=()=>false});
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}];window.confirm=()=>false});
   await page.getByRole("button",{name:"Settings"}).click();
   await page.locator('[data-voice-profile-delete="p1"]').click();
   expect(await page.evaluate(()=>(window as any).__sn.calls.some((x:any)=>x[0]==="delete_voice_profile"))).toBeFalsy();
 });
 
 test("confirming delete removes the voice profile",async({page})=>{
-  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,updated_at:1700000000}];window.confirm=()=>true});
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}];window.confirm=()=>true});
   await page.getByRole("button",{name:"Settings"}).click();
   await page.locator('[data-voice-profile-delete="p1"]').click();
   await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.some((x:any)=>x[0]==="delete_voice_profile"))).toBeTruthy();
 });
 
 test("forget all voices requires confirmation then calls the command",async({page})=>{
-  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,updated_at:1700000000}];window.confirm=()=>true});
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}];window.confirm=()=>true});
   await page.getByRole("button",{name:"Settings"}).click();
   await page.locator("#forget-all-voices").click();
   await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.some((x:any)=>x[0]==="forget_all_voice_profiles"))).toBeTruthy();
@@ -171,4 +193,91 @@ test("toggling recognize known voices saves the setting",async({page})=>{
   await page.locator('[name="recognize_known_voices"]').uncheck();
   await page.getByRole("button",{name:"Save preferences"}).click();
   expect(await page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="save_settings")[1].settings.recognize_known_voices)).toBe(false);
+});
+
+test("several remote speakers are named in one Save names click",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.labels.a=[{label:"You",name:null,auto_identified:false},{label:"Speaker 1",name:null,auto_identified:false},{label:"Speaker 2",name:null,auto_identified:false},{label:"Speaker 3",name:"Carol",auto_identified:true}]});
+  await page.getByRole("button",{name:"Speakers"}).click();
+  await page.getByLabel("Name for Speaker 1").fill("Alice");
+  await page.getByLabel("Name for Speaker 2").fill("Bob");
+  await page.locator('[data-speaker-remember="a"][data-speaker-label="Speaker 2"]').uncheck();
+  await page.getByRole("button",{name:"Save names"}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.filter((x:any)=>x[0]==="set_speaker_name").map((x:any)=>x[1]))).toEqual([
+    {recordingId:"a",label:"Speaker 1",name:"Alice",remember:true},
+    {recordingId:"a",label:"Speaker 2",name:"Bob",remember:false},
+  ]);
+  await expect(page.getByLabel("Name for Speaker 3")).toHaveValue("Carol");
+});
+
+test("name inputs offer saved profile names for autocomplete",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}]});
+  await page.getByRole("button",{name:"Speakers"}).click();
+  await expect(page.locator('#speaker-name-options option[value="Alice"]')).toHaveCount(1);
+  await expect(page.getByLabel("Name for Speaker 1")).toHaveAttribute("list","speaker-name-options");
+});
+
+test("play fetches the speaker clip, plays it and stops other clips",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.labels.a=[{label:"You",name:null,auto_identified:false},{label:"Speaker 1",name:null,auto_identified:false},{label:"Speaker 2",name:null,auto_identified:false}]});
+  await page.getByRole("button",{name:"Speakers"}).click();
+  await page.getByRole("button",{name:"Play Speaker 1"}).click();
+  await expect(page.getByRole("button",{name:"Stop Speaker 1"})).toBeVisible();
+  expect(await page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="get_speaker_clip"))).toEqual(["get_speaker_clip",{recordingId:"a",label:"Speaker 1"}]);
+  expect(await page.evaluate(()=>(window as any).__sn.audios[0].src)).toBe("data:audio/wav;base64,UklGRg==");
+  await page.getByRole("button",{name:"Play Speaker 2"}).click();
+  await expect(page.getByRole("button",{name:"Stop Speaker 2"})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Play Speaker 1"})).toBeVisible();
+  expect(await page.evaluate(()=>(window as any).__sn.paused.length)).toBe(1);
+});
+
+test("a missing speaker clip shows a message instead of failing",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.clipError="audio was removed"});
+  await page.getByRole("button",{name:"Speakers"}).click();
+  await page.getByRole("button",{name:"Play Speaker 1"}).click();
+  await expect(page.locator('[data-speaker-clip-error="Speaker 1"]')).toContainText("Audio unavailable");
+});
+
+test("expanding a profile lists its clips and a clip can be deleted",async({page})=>{
+  await page.evaluate(()=>{const f=(window as any).__sn;f.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000}];f.samples.p1=[{id:"s1",seconds:20,created_at:1700000000,source_title:"Sprint <b>review</b>"},{id:"s2",seconds:22,created_at:1700100000,source_title:null}];window.confirm=()=>true});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await expect(page.locator('[data-voice-profile-summary="p1"]')).toContainText("2 clips");
+  await page.getByRole("button",{name:"Show clips for Alice"}).click();
+  await expect(page.locator('[data-voice-sample="s1"]')).toContainText("Sprint <b>review</b>");
+  await expect(page.locator('[data-voice-sample="s2"]')).toContainText("Unknown meeting");
+  await page.getByRole("button",{name:"Play clip from Unknown meeting"}).click();
+  expect(await page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="get_voice_sample_audio"))).toEqual(["get_voice_sample_audio",{sampleId:"s2"}]);
+  await page.getByRole("button",{name:/Delete clip from Sprint/}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="delete_voice_profile_sample"))).toEqual(["delete_voice_profile_sample",{sampleId:"s1"}]);
+  await expect(page.locator('[data-voice-sample="s1"]')).toHaveCount(0);
+  await expect(page.locator('[data-voice-sample="s2"]')).toBeVisible();
+});
+
+test("an expanded profile with no clips shows an empty state",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:0,sample_count:0,updated_at:1700000000}]});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.getByRole("button",{name:"Show clips for Alice"}).click();
+  await expect(page.locator('[data-voice-profile-no-samples="p1"]')).toBeVisible();
+});
+
+test("merging a profile into another confirms and calls merge_voice_profiles",async({page})=>{
+  await page.evaluate(()=>{(window as any).__sn.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000},{id:"p2",name:"Alicia",sample_seconds:30,sample_count:1,updated_at:1700000000}];window.confirm=()=>true});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.getByRole("button",{name:"Show clips for Alice",exact:true}).click();
+  await page.locator('[data-voice-profile-merge-target="p1"]').selectOption("p2");
+  await page.locator('[data-voice-profile-merge="p1"]').click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).__sn.calls.find((x:any)=>x[0]==="merge_voice_profiles"))).toEqual(["merge_voice_profiles",{sourceId:"p1",targetId:"p2"}]);
+  await expect(page.locator('[data-voice-profile="p1"]')).toHaveCount(0);
+  await expect(page.locator('[data-voice-profile="p2"]')).toBeVisible();
+});
+
+test("a declined merge confirmation does nothing and a backend merge error is shown",async({page})=>{
+  await page.evaluate(()=>{const f=(window as any).__sn;f.profiles=[{id:"p1",name:"Alice",sample_seconds:42,sample_count:2,updated_at:1700000000},{id:"p2",name:"Alicia",sample_seconds:30,sample_count:1,updated_at:1700000000}];f.mergeError="Profiles were built with different models.";window.confirm=()=>false});
+  await page.getByRole("button",{name:"Settings"}).click();
+  await page.getByRole("button",{name:"Show clips for Alice",exact:true}).click();
+  await page.locator('[data-voice-profile-merge-target="p1"]').selectOption("p2");
+  await page.locator('[data-voice-profile-merge="p1"]').click();
+  expect(await page.evaluate(()=>(window as any).__sn.calls.some((x:any)=>x[0]==="merge_voice_profiles"))).toBeFalsy();
+  await page.evaluate(()=>{window.confirm=()=>true});
+  await page.locator('[data-voice-profile-merge="p1"]').click();
+  await expect(page.locator('[data-voice-profile-merge-error="p1"]')).toContainText("different models");
+  await expect(page.locator('[data-voice-profile="p1"]')).toBeVisible();
 });

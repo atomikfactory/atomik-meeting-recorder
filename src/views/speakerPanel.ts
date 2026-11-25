@@ -12,6 +12,12 @@ import type { Recording, ReidentifyOutcome, SpeakerLabelInfo } from "../types";
 import { escapeAttr, escapeHtml } from "../util/escape";
 import { updateRecordingUI } from "./library";
 import { refreshSummaryState as refreshSummaryStateAndUI } from "../settings/summary";
+import { refreshVoiceProfiles } from "../settings/voiceProfiles";
+import { onClipPlaybackChange, playClip, playingClipKey, stopClip } from "../util/clipPlayer";
+
+const NAME_OPTIONS_ID = "speaker-name-options";
+
+onClipPlaybackChange(() => updateRecordingUI());
 
 const REMOTE_LABEL_RE = /^Speaker \d+$/;
 
@@ -36,13 +42,34 @@ function speakerRowHtml(recordingId: string, label: SpeakerLabelInfo): string {
   const draft = store.speakerNameDrafts.get(recordingId)?.get(label.label) ?? label.name ?? "";
   const remember = store.speakerRememberDrafts.get(recordingId)?.get(label.label) ?? true;
   const canRemember = REMOTE_LABEL_RE.test(label.label);
+  const key = busyKey(recordingId, label.label);
+  const playing = playingClipKey() === key;
+  const loading = store.speakerClipLoading.has(key);
+  const clipError = store.speakerClipError.get(key);
+  const attrs = `data-speaker-label="${escapeAttr(label.label)}"`;
   return `<li class="speaker-row" data-speaker-row="${escapeAttr(label.label)}">
     <b>${escapeHtml(label.label)}</b>${label.auto_identified ? `<span class="auto-badge" data-speaker-auto-badge title="Automatically identified from a remembered voice">auto</span>` : ""}
-    <input type="text" maxlength="60" placeholder="Name this speaker" data-speaker-name-input="${escapeAttr(recordingId)}" data-speaker-label="${escapeAttr(label.label)}" value="${escapeAttr(draft)}" ${busy ? "disabled" : ""}/>
-    ${canRemember ? `<label class="toggle small"><input type="checkbox" data-speaker-remember="${escapeAttr(recordingId)}" data-speaker-label="${escapeAttr(label.label)}" ${remember ? "checked" : ""} ${busy ? "disabled" : ""}/><span>Remember this voice for future meetings<small>A voice fingerprint is stored only on this device.</small></span></label>` : ""}
-    <button type="button" class="secondary" data-speaker-save="${escapeAttr(recordingId)}" data-speaker-label="${escapeAttr(label.label)}" ${busy ? "disabled" : ""}>Save</button>
-    ${label.name ? `<button type="button" class="secondary" data-speaker-clear="${escapeAttr(recordingId)}" data-speaker-label="${escapeAttr(label.label)}" ${busy ? "disabled" : ""}>Clear name</button>` : ""}
+    <button type="button" class="secondary" data-speaker-play="${escapeAttr(recordingId)}" ${attrs} aria-label="${playing ? "Stop" : "Play"} ${escapeAttr(label.label)}" aria-pressed="${playing}" ${loading ? "disabled" : ""}>${loading ? "Loading…" : playing ? "Stop" : "Play"}</button>
+    <input type="text" maxlength="60" list="${NAME_OPTIONS_ID}" aria-label="Name for ${escapeAttr(label.label)}" placeholder="Name this speaker" data-speaker-name-input="${escapeAttr(recordingId)}" ${attrs} value="${escapeAttr(draft)}" ${busy ? "disabled" : ""}/>
+    ${canRemember ? `<label class="toggle small"><input type="checkbox" data-speaker-remember="${escapeAttr(recordingId)}" ${attrs} ${remember ? "checked" : ""} ${busy ? "disabled" : ""}/><span>Remember voice<small>A voice fingerprint is stored only on this device.</small></span></label>` : ""}
+    ${label.name ? `<button type="button" class="secondary" data-speaker-clear="${escapeAttr(recordingId)}" ${attrs} ${busy ? "disabled" : ""}>Clear name</button>` : ""}
+    ${clipError ? `<small role="alert" class="speaker-error" data-speaker-clip-error="${escapeAttr(label.label)}">${escapeHtml(clipError)}</small>` : ""}
   </li>`;
+}
+
+/// Rows whose name draft is non-empty and differs from the saved name (or
+/// that are auto-identified and the user typed over the suggestion) -- what
+/// the single "Save names" action will write.
+function changedLabels(recordingId: string): string[] {
+  const labels = store.speakerLabels.get(recordingId) ?? [];
+  const drafts = store.speakerNameDrafts.get(recordingId);
+  return labels
+    .filter((l) => l.label !== "You")
+    .filter((l) => {
+      const draft = (drafts?.get(l.label) ?? l.name ?? "").trim();
+      return draft !== "" && draft !== (l.name ?? "");
+    })
+    .map((l) => l.label);
 }
 
 export function speakerPanelHtml(recording: Recording): string {
@@ -56,7 +83,9 @@ export function speakerPanelHtml(recording: Recording): string {
   return `<details class="speakers-panel" data-speakers-panel="${escapeAttr(id)}" ${open ? "open" : ""}>
     <summary role="button" aria-expanded="${open}">Speakers</summary>
     ${!open ? "" : !labels ? `<p>Loading speakers…</p>` : `
+    <datalist id="${NAME_OPTIONS_ID}">${store.voiceProfiles.map((p) => `<option value="${escapeAttr(p.name)}"></option>`).join("")}</datalist>
     <ul>${labels.map((label) => speakerRowHtml(id, label)).join("")}</ul>
+    <div><button type="button" data-speaker-save-all="${escapeAttr(id)}" ${store.speakerSaveBusy.has(id) ? "disabled" : ""}>Save names</button></div>
     ${error ? `<p role="alert" class="speaker-error" data-speaker-panel-error="${escapeAttr(id)}">${escapeHtml(error)}</p>` : ""}
     ${hint ? `<p class="speaker-hint"><span>Speaker names changed — Regenerate summary to use them</span><button type="button" class="secondary" data-speaker-regenerate-summary="${escapeAttr(id)}">Regenerate</button></p>` : ""}
     <div><button type="button" class="secondary" data-reidentify-speakers="${escapeAttr(id)}" ${reidentifyBusy ? "disabled" : ""}>Re-identify speakers</button></div>
@@ -85,6 +114,7 @@ async function loadSpeakerLabels(recordingId: string) {
     store.speakerNameDrafts.set(recordingId, draftMap);
     store.speakerLabels.set(recordingId, labels);
     await refreshRegenerateHint(recordingId);
+    if (!store.voiceProfilesLoaded) await refreshVoiceProfiles();
   } catch (error) {
     store.speakerPanelError.set(recordingId, `Could not load speakers: ${String(error)}`);
   } finally {
@@ -102,26 +132,57 @@ async function refreshRegenerateHint(recordingId: string) {
   }
 }
 
-async function saveSpeakerName(recordingId: string, label: string) {
+/// Saves every changed row in one go. Each row is its own backend call; a
+/// refusal on one (e.g. "not enough speech to remember this voice") is
+/// collected and shown, but never stops the remaining rows from saving.
+async function saveSpeakerNames(recordingId: string) {
+  if (store.speakerSaveBusy.has(recordingId)) return;
+  const labels = changedLabels(recordingId);
+  if (!labels.length) return;
+  store.speakerSaveBusy.add(recordingId);
+  for (const label of labels) store.speakerPanelBusy.add(busyKey(recordingId, label));
+  store.speakerPanelError.delete(recordingId);
+  updateRecordingUI();
+  const errors: string[] = [];
+  try {
+    for (const label of labels) {
+      const name = (store.speakerNameDrafts.get(recordingId)?.get(label) ?? "").trim();
+      const remember = REMOTE_LABEL_RE.test(label) && (store.speakerRememberDrafts.get(recordingId)?.get(label) ?? true);
+      try {
+        await invoke("set_speaker_name", { recordingId, label, name, remember });
+      } catch (error) {
+        // The name itself may already be saved even though "remember" failed
+        // -- see lib.rs's set_speaker_name. Show the refusal verbatim.
+        errors.push(labels.length > 1 ? `${label}: ${String(error)}` : String(error));
+      }
+    }
+  } finally {
+    if (errors.length) store.speakerPanelError.set(recordingId, errors.join(" "));
+    for (const label of labels) store.speakerPanelBusy.delete(busyKey(recordingId, label));
+    store.speakerSaveBusy.delete(recordingId);
+    await loadSpeakerLabels(recordingId);
+  }
+}
+
+async function toggleSpeakerClip(recordingId: string, label: string) {
   const key = busyKey(recordingId, label);
-  if (store.speakerPanelBusy.has(key)) return;
-  const name = (store.speakerNameDrafts.get(recordingId)?.get(label) ?? "").trim();
-  if (!name) return;
-  const remember = store.speakerRememberDrafts.get(recordingId)?.get(label) ?? true;
-  store.speakerPanelBusy.add(key);
+  if (playingClipKey() === key) {
+    stopClip();
+    return;
+  }
+  if (store.speakerClipLoading.has(key)) return;
+  stopClip();
+  store.speakerClipError.delete(key);
+  store.speakerClipLoading.add(key);
   updateRecordingUI();
   try {
-    await invoke("set_speaker_name", { recordingId, label, name, remember });
-    store.speakerPanelError.delete(recordingId);
+    const wav = await invoke<string>("get_speaker_clip", { recordingId, label });
+    await playClip(key, wav);
   } catch (error) {
-    // The name itself may already be saved even though "remember" failed
-    // (e.g. not enough speech) -- see lib.rs's set_speaker_name. Show the
-    // backend's refusal verbatim; the reload below still picks up whatever
-    // did persist.
-    store.speakerPanelError.set(recordingId, String(error));
+    store.speakerClipError.set(key, `Audio unavailable for this speaker: ${String(error)}`);
   } finally {
-    store.speakerPanelBusy.delete(key);
-    await loadSpeakerLabels(recordingId);
+    store.speakerClipLoading.delete(key);
+    updateRecordingUI();
   }
 }
 
@@ -198,8 +259,11 @@ export function wireSpeakerPanels() {
       store.speakerRememberDrafts.get(id)!.set(label, input.checked);
     };
   });
-  document.querySelectorAll<HTMLButtonElement>("[data-speaker-save]").forEach((button) => {
-    button.onclick = () => saveSpeakerName(button.dataset.speakerSave!, button.dataset.speakerLabel!);
+  document.querySelectorAll<HTMLButtonElement>("[data-speaker-save-all]").forEach((button) => {
+    button.onclick = () => saveSpeakerNames(button.dataset.speakerSaveAll!);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-speaker-play]").forEach((button) => {
+    button.onclick = () => toggleSpeakerClip(button.dataset.speakerPlay!, button.dataset.speakerLabel!);
   });
   document.querySelectorAll<HTMLButtonElement>("[data-speaker-clear]").forEach((button) => {
     button.onclick = () => clearSpeakerName(button.dataset.speakerClear!, button.dataset.speakerLabel!);

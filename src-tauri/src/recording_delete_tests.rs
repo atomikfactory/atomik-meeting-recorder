@@ -477,3 +477,33 @@ fn parses_delete_mode() {
     );
     assert!(DeleteMode::parse("delete-forever").is_err());
 }
+
+#[test]
+fn deleting_a_recording_never_deletes_voice_profiles_or_their_samples() {
+    let fx = Fixture::new("keeps-voices");
+    let (id, dir) = fx.new_recording();
+    let profiles =
+        crate::voice_profiles::VoiceProfileStore::open(crate::voice_profiles::store_path(&fx.root))
+            .unwrap();
+    let alice = profiles.create("Alice", &[1.0, 0.0], "h", 12.0).unwrap();
+    let sample = profiles
+        .add_sample(&alice.id, b"wav", 4.0, Some("Standup"))
+        .unwrap();
+    let summary = delete_recordings_from_disk(
+        std::slice::from_ref(&id),
+        DeleteMode::Permanent,
+        &fx.root,
+        &[],
+        &fx.stores(),
+        None,
+        &FakeTrash::default(),
+    );
+    assert!(summary.results[0].deleted, "{:?}", summary.results[0]);
+    assert!(!dir.exists());
+    let reopened =
+        crate::voice_profiles::VoiceProfileStore::open(crate::voice_profiles::store_path(&fx.root))
+            .unwrap();
+    assert_eq!(reopened.list().unwrap().len(), 1);
+    assert_eq!(reopened.sample_wav(&sample).unwrap(), b"wav");
+    let _ = std::fs::remove_dir_all(&fx.root);
+}

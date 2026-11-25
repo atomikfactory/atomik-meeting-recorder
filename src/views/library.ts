@@ -250,8 +250,20 @@ export function updateRecordingUI() {
     const focused = document.activeElement as HTMLElement | null;
     const action = focused?.dataset.openTranscript ? "data-open-transcript" : focused?.dataset.retryTranscript ? "data-retry-transcript" : focused?.dataset.openFolder ? "data-open-folder" : focused?.dataset.transcribe ? "data-transcribe" : null;
     const focusedRecording = focused?.dataset.openTranscript ?? focused?.dataset.retryTranscript;
+    // A speaker-name field the user is typing in must keep focus and caret
+    // across a background re-render (its text lives in store.speakerNameDrafts).
+    const speakerField = focused instanceof HTMLInputElement && meetings.contains(focused) && focused.dataset.speakerNameInput && focused.dataset.speakerLabel
+      ? { id: focused.dataset.speakerNameInput, label: focused.dataset.speakerLabel, start: focused.selectionStart, end: focused.selectionEnd }
+      : null;
     meetings.innerHTML = nextRecent;
     store.renderedRecentRecordings = nextRecent;
+    if (speakerField) {
+      const field = Array.from(meetings.querySelectorAll<HTMLInputElement>("[data-speaker-name-input]")).find(input => input.dataset.speakerNameInput === speakerField.id && input.dataset.speakerLabel === speakerField.label);
+      if (field && !field.disabled) {
+        field.focus();
+        if (speakerField.start !== null && speakerField.end !== null) try { field.setSelectionRange(speakerField.start, speakerField.end); } catch { /* not a text input */ }
+      }
+    }
     if (action && focusedRecording) Array.from(meetings.querySelectorAll<HTMLButtonElement>(`[${action}]`)).find(button => button.getAttribute(action) === focusedRecording)?.focus();
   }
   document.querySelectorAll<HTMLButtonElement>("[data-open-transcript]").forEach(button => button.onclick = () =>

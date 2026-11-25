@@ -37,6 +37,14 @@ pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.6;
 /// least this much cosine similarity, so two similar-sounding voices are not
 /// silently confused.
 pub const DEFAULT_MATCH_MARGIN: f32 = 0.08;
+/// Longest audio clip stored for one remember-this-voice action.
+pub const SAMPLE_CLIP_SECONDS: f64 = 20.0;
+/// Longest clip returned for "who is Speaker N" playback.
+pub const PREVIEW_CLIP_SECONDS: f64 = 8.0;
+/// Per-profile caps on stored sample clips; the oldest are dropped first.
+pub const MAX_SAMPLES_PER_PROFILE: usize = 5;
+pub const MAX_SAMPLE_SECONDS_PER_PROFILE: f64 = 60.0;
+const CLIP_SAMPLE_RATE: u32 = 16_000;
 
 /// Real embedding extractor wrapping sherpa-onnx's standalone
 /// `SpeakerEmbeddingExtractor` -- the same model file diarization uses (see
@@ -109,6 +117,17 @@ pub struct VoiceProfile {
     pub updated_at: i64,
 }
 
+/// Metadata for one stored audio clip of a profile's voice (the WAV bytes
+/// are fetched separately via `VoiceProfileStore::sample_wav`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceSample {
+    pub id: String,
+    pub profile_id: String,
+    pub seconds: f64,
+    pub source_title: Option<String>,
+    pub created_at: i64,
+}
+
 pub struct VoiceProfileStore {
     conn: Connection,
 }
@@ -168,9 +187,21 @@ impl VoiceProfileStore {
                 sample_seconds REAL NOT NULL,\
                 created_at INTEGER NOT NULL,\
                 updated_at INTEGER NOT NULL\
-             );",
+             );\
+             CREATE TABLE IF NOT EXISTS voice_profile_samples(\
+                id TEXT PRIMARY KEY,\
+                profile_id TEXT NOT NULL REFERENCES voice_profiles(id) ON DELETE CASCADE,\
+                wav BLOB NOT NULL,\
+                seconds REAL NOT NULL,\
+                source_title TEXT,\
+                created_at INTEGER NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS voice_profile_samples_profile ON voice_profile_samples(profile_id);",
         )
         .map_err(|e| e.to_string())?;
+        // Per-connection setting; required for ON DELETE CASCADE.
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(|e| e.to_string())?;
         Ok(Self { conn })
     }
 
@@ -301,6 +332,167 @@ impl VoiceProfileStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         Ok(rows)
+    }
+
+    /// Stores a clip for a profile, then drops the oldest clips until the
+    /// per-profile caps hold (always keeping at least the newest clip).
+    pub fn add_sample(
+        &self,
+        profile_id: &str,
+        wav: &[u8],
+        seconds: f64,
+        source_title: Option<&str>,
+    ) -> Result<String, String> {
+        if wav.is_empty() || !seconds.is_finite() || seconds <= 0.0 {
+            return Err("Invalid voice sample.".into());
+        }
+        self.get(profile_id)?.ok_or("Unknown voice profile.")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO voice_profile_samples(id,profile_id,wav,seconds,source_title,created_at) \
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![id, profile_id, wav, seconds, source_title, now()],
+            )
+            .map_err(|e| e.to_string())?;
+        self.enforce_sample_caps(profile_id)?;
+        Ok(id)
+    }
+
+    fn enforce_sample_caps(&self, profile_id: &str) -> Result<(), String> {
+        loop {
+            let (count, total): (i64, f64) = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(seconds),0) FROM voice_profile_samples WHERE profile_id=?1",
+                    params![profile_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            if count <= 1
+                || (count as usize <= MAX_SAMPLES_PER_PROFILE
+                    && total <= MAX_SAMPLE_SECONDS_PER_PROFILE)
+            {
+                return Ok(());
+            }
+            self.conn
+                .execute(
+                    "DELETE FROM voice_profile_samples WHERE rowid=(\
+                     SELECT rowid FROM voice_profile_samples WHERE profile_id=?1 \
+                     ORDER BY created_at ASC, rowid ASC LIMIT 1)",
+                    params![profile_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    pub fn list_samples(&self, profile_id: &str) -> Result<Vec<VoiceSample>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id,profile_id,seconds,source_title,created_at FROM voice_profile_samples \
+                 WHERE profile_id=?1 ORDER BY created_at DESC, rowid DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![profile_id], |r| {
+                Ok(VoiceSample {
+                    id: r.get(0)?,
+                    profile_id: r.get(1)?,
+                    seconds: r.get(2)?,
+                    source_title: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    pub fn sample_counts(&self) -> Result<std::collections::HashMap<String, u32>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT profile_id, COUNT(*) FROM voice_profile_samples GROUP BY profile_id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    pub fn sample_wav(&self, sample_id: &str) -> Result<Vec<u8>, String> {
+        self.conn
+            .query_row(
+                "SELECT wav FROM voice_profile_samples WHERE id=?1",
+                params![sample_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Unknown voice sample.".to_string())
+    }
+
+    pub fn delete_sample(&self, sample_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM voice_profile_samples WHERE id=?1",
+                params![sample_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Folds `source` into `target`: weighted running mean of the embeddings
+    /// by `sample_seconds`, samples moved (caps re-applied), source deleted,
+    /// target's name kept. Profiles from different embedding models are
+    /// never merged.
+    pub fn merge(&self, source_id: &str, target_id: &str) -> Result<VoiceProfile, String> {
+        if source_id == target_id {
+            return Err("Choose two different voice profiles to merge.".into());
+        }
+        let source = self.get(source_id)?.ok_or("Unknown voice profile.")?;
+        let target = self.get(target_id)?.ok_or("Unknown voice profile.")?;
+        if source.model_hash != target.model_hash {
+            return Err(
+                "These voice profiles were built with different embedding models and cannot be merged."
+                    .into(),
+            );
+        }
+        let merged = weighted_running_mean(
+            &target.embedding,
+            target.sample_seconds,
+            &source.embedding,
+            source.sample_seconds,
+        );
+        let total = target.sample_seconds + source.sample_seconds;
+        let t = now();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE voice_profile_samples SET profile_id=?2 WHERE profile_id=?1",
+            params![source_id, target_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM voice_profiles WHERE id=?1", params![source_id])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE voice_profiles SET embedding=?2, sample_seconds=?3, updated_at=?4 WHERE id=?1",
+            params![target_id, encode(&merged), total, t],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        self.enforce_sample_caps(target_id)?;
+        Ok(VoiceProfile {
+            embedding: merged,
+            sample_seconds: total,
+            updated_at: t,
+            ..target
+        })
     }
 
     fn row(r: &rusqlite::Row) -> rusqlite::Result<VoiceProfile> {
@@ -601,6 +793,116 @@ pub fn load_speaker_samples(
         });
     }
     Ok(out)
+}
+
+/// Encodes 16 kHz mono f32 samples as a PCM16 WAV file in memory.
+pub fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&CLIP_SAMPLE_RATE.to_le_bytes());
+    out.extend_from_slice(&(CLIP_SAMPLE_RATE * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Standard base64 (with padding), for handing WAV bytes to the webview.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Concatenates one speaker's longest clean turns (each >= `MIN_TURN_SECONDS`)
+/// up to `max_seconds`. A turn that would overshoot is trimmed to the
+/// remaining time when at least `MIN_TURN_SECONDS` of room is left. `None`
+/// when the speaker has no usable turn.
+pub fn pick_clip(
+    turns: &[SpeakerSamples],
+    speaker: u32,
+    max_seconds: f64,
+) -> Option<(Vec<f32>, f64)> {
+    let mut usable: Vec<&SpeakerSamples> = turns
+        .iter()
+        .filter(|t| t.speaker == speaker && t.seconds >= MIN_TURN_SECONDS && !t.samples.is_empty())
+        .collect();
+    usable.sort_by(|a, b| {
+        b.seconds
+            .partial_cmp(&a.seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_samples = (max_seconds * f64::from(CLIP_SAMPLE_RATE)) as usize;
+    let min_samples = (MIN_TURN_SECONDS * f64::from(CLIP_SAMPLE_RATE)) as usize;
+    let mut clip: Vec<f32> = Vec::new();
+    for turn in usable {
+        let room = max_samples.saturating_sub(clip.len());
+        if turn.samples.len() <= room {
+            clip.extend_from_slice(&turn.samples);
+        } else if clip.is_empty() || room >= min_samples {
+            clip.extend_from_slice(&turn.samples[..room]);
+        }
+        if clip.len() >= max_samples {
+            break;
+        }
+    }
+    if clip.is_empty() {
+        return None;
+    }
+    let seconds = clip.len() as f64 / f64::from(CLIP_SAMPLE_RATE);
+    Some((clip, seconds))
+}
+
+/// Stores a ~20s clip of `speaker` on `profile_id`. Silently does nothing
+/// when the speaker has no usable speech.
+pub fn store_speaker_clip(
+    store: &VoiceProfileStore,
+    profile_id: &str,
+    turns: &[SpeakerSamples],
+    speaker: u32,
+    source_title: Option<&str>,
+) -> Result<(), String> {
+    let Some((clip, seconds)) = pick_clip(turns, speaker, SAMPLE_CLIP_SECONDS) else {
+        return Ok(());
+    };
+    store.add_sample(
+        profile_id,
+        &encode_wav_16k_mono(&clip),
+        seconds,
+        source_title,
+    )?;
+    Ok(())
 }
 
 /// Shared by the automatic post-diarization recognition pass
@@ -979,6 +1281,213 @@ mod tests {
         assert!(store
             .create(&"x".repeat(MAX_NAME_LEN + 1), &[1.0], "h", 10.0)
             .is_err());
+    }
+
+    fn tone(seconds: f64, v: f32) -> SpeakerSamples {
+        SpeakerSamples {
+            speaker: 1,
+            seconds,
+            samples: vec![v; (seconds * 16_000.0) as usize],
+        }
+    }
+
+    #[test]
+    fn samples_table_is_created_on_a_pre_existing_db_without_it() {
+        let path = temp_db();
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE voice_profiles(id TEXT PRIMARY KEY,name TEXT NOT NULL,embedding BLOB NOT NULL,\
+                 model_hash TEXT NOT NULL,sample_seconds REAL NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        }
+        let store = VoiceProfileStore::open(&path).unwrap();
+        let p = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        store.add_sample(&p.id, b"wav", 3.0, None).unwrap();
+        drop(store);
+        let again = VoiceProfileStore::open(&path).unwrap();
+        assert_eq!(again.list_samples(&p.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_profile_cascades_to_its_samples_and_delete_all_clears_them() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let a = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        let b = profile(&store, "Bob", vec![1.0], "h", 10.0);
+        let sa = store.add_sample(&a.id, b"wav", 3.0, Some("M")).unwrap();
+        store.add_sample(&b.id, b"wav", 3.0, None).unwrap();
+        store.delete(&a.id).unwrap();
+        assert!(store.sample_wav(&sa).is_err());
+        assert_eq!(store.list_samples(&b.id).unwrap().len(), 1);
+        store.delete_all().unwrap();
+        assert!(store.sample_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn samples_are_capped_at_five_dropping_the_oldest() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let p = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        let ids: Vec<String> = (0..7)
+            .map(|i| {
+                store
+                    .add_sample(&p.id, b"wav", 2.0, Some(&format!("m{i}")))
+                    .unwrap()
+            })
+            .collect();
+        let listed = store.list_samples(&p.id).unwrap();
+        assert_eq!(listed.len(), MAX_SAMPLES_PER_PROFILE);
+        assert!(listed.iter().all(|s| s.id != ids[0] && s.id != ids[1]));
+        assert!(listed.iter().any(|s| s.id == ids[6]));
+    }
+
+    #[test]
+    fn samples_are_capped_at_sixty_seconds_but_the_newest_is_kept() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let p = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        let first = store.add_sample(&p.id, b"wav", 20.0, None).unwrap();
+        store.add_sample(&p.id, b"wav", 20.0, None).unwrap();
+        store.add_sample(&p.id, b"wav", 20.0, None).unwrap();
+        let last = store.add_sample(&p.id, b"wav", 20.0, None).unwrap();
+        let listed = store.list_samples(&p.id).unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.iter().all(|s| s.id != first));
+        assert!(listed.iter().any(|s| s.id == last));
+        assert!(listed.iter().map(|s| s.seconds).sum::<f64>() <= MAX_SAMPLE_SECONDS_PER_PROFILE);
+    }
+
+    #[test]
+    fn delete_sample_removes_only_that_clip() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let p = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        let a = store.add_sample(&p.id, b"one", 2.0, None).unwrap();
+        let b = store.add_sample(&p.id, b"two", 2.0, None).unwrap();
+        store.delete_sample(&a).unwrap();
+        assert_eq!(store.sample_wav(&b).unwrap(), b"two");
+        assert_eq!(store.sample_counts().unwrap()[&p.id], 1);
+    }
+
+    #[test]
+    fn merge_weights_embeddings_moves_samples_and_keeps_target_name() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let target = profile(&store, "Alice", vec![1.0, 0.0], "h", 90.0);
+        let source = profile(&store, "Alice (2)", vec![0.0, 1.0], "h", 10.0);
+        store.add_sample(&target.id, b"t", 4.0, None).unwrap();
+        store.add_sample(&source.id, b"s", 4.0, None).unwrap();
+        let merged = store.merge(&source.id, &target.id).unwrap();
+        assert_eq!(merged.name, "Alice");
+        assert!((merged.sample_seconds - 100.0).abs() < 1e-9);
+        assert!(merged.embedding[0] > merged.embedding[1]);
+        assert!(store.get(&source.id).unwrap().is_none());
+        assert_eq!(store.list_samples(&target.id).unwrap().len(), 2);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_rejects_different_models_and_self_merge() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let a = profile(&store, "A", vec![1.0], "h1", 10.0);
+        let b = profile(&store, "B", vec![1.0], "h2", 10.0);
+        let err = store.merge(&a.id, &b.id).unwrap_err();
+        assert!(err.contains("different embedding models"));
+        assert!(store.merge(&a.id, &a.id).is_err());
+        assert_eq!(store.list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_reapplies_the_sample_cap() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let t = profile(&store, "T", vec![1.0], "h", 10.0);
+        let s = profile(&store, "S", vec![1.0], "h", 10.0);
+        for _ in 0..4 {
+            store.add_sample(&t.id, b"t", 2.0, None).unwrap();
+            store.add_sample(&s.id, b"s", 2.0, None).unwrap();
+        }
+        store.merge(&s.id, &t.id).unwrap();
+        assert_eq!(
+            store.list_samples(&t.id).unwrap().len(),
+            MAX_SAMPLES_PER_PROFILE
+        );
+    }
+
+    #[test]
+    fn pick_clip_prefers_longest_turns_and_caps_length() {
+        let turns = vec![
+            tone(2.0, 0.1),
+            tone(12.0, 0.2),
+            tone(9.0, 0.3),
+            tone(0.5, 0.9),
+        ];
+        let (clip, seconds) = pick_clip(&turns, 1, 20.0).unwrap();
+        assert!((seconds - 20.0).abs() < 0.01);
+        assert_eq!(clip[0], 0.2); // longest first
+        assert!(!clip.contains(&0.9)); // too-short turn skipped
+        assert!(pick_clip(&turns, 2, 20.0).is_none());
+        let (_, short) = pick_clip(&turns, 1, 8.0).unwrap();
+        assert!((short - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn store_speaker_clip_writes_a_valid_wav_and_skips_when_no_speech() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let p = profile(&store, "Alice", vec![1.0], "h", 10.0);
+        store_speaker_clip(&store, &p.id, &[tone(0.4, 0.5)], 1, Some("Standup")).unwrap();
+        assert!(store.list_samples(&p.id).unwrap().is_empty());
+        store_speaker_clip(&store, &p.id, &[tone(6.0, 0.5)], 1, Some("Standup")).unwrap();
+        let listed = store.list_samples(&p.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source_title.as_deref(), Some("Standup"));
+        let wav = store.sample_wav(&listed[0].id).unwrap();
+        let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        assert_eq!(reader.len(), 96_000);
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn three_clusters_two_profiles_match_two_and_leave_one_unnamed() {
+        let store = VoiceProfileStore::open(temp_db()).unwrap();
+        let alice = profile(&store, "Alice", vec![1.0, 0.0, 0.0], "h", 20.0);
+        let bob = profile(&store, "Bob", vec![0.0, 1.0, 0.0], "h", 20.0);
+        let clusters = vec![
+            ClusterCentroid {
+                speaker: 1,
+                embedding: vec![0.0, 0.98, 0.1],
+            },
+            ClusterCentroid {
+                speaker: 2,
+                embedding: vec![0.0, 0.0, 1.0],
+            },
+            ClusterCentroid {
+                speaker: 3,
+                embedding: vec![0.97, 0.05, 0.0],
+            },
+        ];
+        let m = match_clusters(
+            &clusters,
+            &[alice.clone(), bob.clone()],
+            DEFAULT_MATCH_THRESHOLD,
+            DEFAULT_MATCH_MARGIN,
+        );
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            (m[0].speaker, m[0].profile_id.as_str()),
+            (1, bob.id.as_str())
+        );
+        assert_eq!(
+            (m[1].speaker, m[1].profile_id.as_str()),
+            (3, alice.id.as_str())
+        );
     }
 
     fn temp_db() -> PathBuf {
