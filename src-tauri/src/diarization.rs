@@ -8,7 +8,8 @@ use crate::{
     speaker_alignment::align_speakers,
     transcription::{
         atomic_new, checksum, markdown_document_labeled, output_path, processing_guard,
-        read_checkpoint, recording_directory, reject_symlink, validate_transcript,
+        read_checkpoint, recording_directory, recording_in_progress, reject_symlink,
+        validate_transcript,
     },
     transcription_engine::hash_model,
     transcription_store::TranscriptionStore,
@@ -137,7 +138,7 @@ impl DiarizationService {
                         };
                         while !c.load(Ordering::Acquire) {
                             let result = s().and_then(|settings| {
-                                if settings.enabled {
+                                if settings.enabled && !recording_in_progress() {
                                     let _guard = processing_guard().lock().map_err(|_| "Processing guard failed.".to_string())?;
                                     tick(&r, &settings.extra_library_roots, &d, &t, &recordings, engine.as_ref(), &c, settings.recognize_known_voices, &real_embedding_extractor)
                                 } else { Ok(()) }

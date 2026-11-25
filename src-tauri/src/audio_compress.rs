@@ -32,9 +32,13 @@
 //! a WAV unless a verified `.flac` is (or becomes) the one the metadata
 //! names.
 use crate::{
-    audio_compress_store::CompressionStore, audio_file, diarization_store::DiarizationStore,
-    recording::Recording, recording_paths::resolved_recording_directory,
-    recording_store::RecordingStore, transcription::processing_guard,
+    audio_compress_store::CompressionStore,
+    audio_file,
+    diarization_store::DiarizationStore,
+    recording::Recording,
+    recording_paths::resolved_recording_directory,
+    recording_store::RecordingStore,
+    transcription::{processing_guard, recording_in_progress},
     transcription_store::TranscriptionStore,
 };
 use serde::Serialize;
@@ -137,7 +141,7 @@ impl CompressionService {
                         }
                         while !c.load(Ordering::Acquire) {
                             let result = settings_reader().and_then(|settings| {
-                                if settings.enabled {
+                                if settings.enabled && !recording_in_progress() {
                                     let _guard = processing_guard()
                                         .lock()
                                         .map_err(|_| "Processing guard failed.".to_string())?;

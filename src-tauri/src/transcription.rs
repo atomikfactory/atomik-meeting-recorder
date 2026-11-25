@@ -65,6 +65,33 @@ static PROCESSING_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 pub(crate) fn processing_guard() -> &'static Mutex<()> {
     PROCESSING_GUARD.get_or_init(|| Mutex::new(()))
 }
+static RECORDING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// True while a live recording owns the machine. The recording engine is the
+/// only writer (see `recording::Engine::publish_active` / `publish_finished`).
+///
+/// Background workers (speaker diarization, Whisper, summaries, audio
+/// compression) check this at the top of each tick and skip it, so they never
+/// START new work while capture is running: the recorder treats any dropped
+/// sample as fatal, and CPU/disk-heavy jobs can starve the capture and writer
+/// threads. Jobs already in flight when a recording begins are NOT interrupted
+/// (a sherpa-onnx or Whisper call cannot be cancelled mid-run); only claiming
+/// new jobs is gated. Workers resume on their own once the flag clears.
+/// User-initiated commands (retry, regenerate) still enqueue; the worker
+/// simply waits.
+pub(crate) fn recording_in_progress() -> bool {
+    RECORDING_IN_PROGRESS.load(Ordering::Acquire)
+}
+pub(crate) fn set_recording_in_progress(active: bool) {
+    RECORDING_IN_PROGRESS.store(active, Ordering::Release);
+}
+/// Tests that flip or depend on the process-wide recording flag hold this to
+/// avoid interfering with each other when run in parallel.
+#[cfg(test)]
+pub(crate) fn recording_flag_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 pub(crate) fn try_processing_guard() -> Result<MutexGuard<'static, ()>, String> {
     processing_guard()
         .try_lock()
@@ -675,19 +702,24 @@ fn run_worker(
         }
     };
     while !cancel.load(Ordering::Acquire) {
-        let result = processing_guard()
-            .lock()
-            .map_err(|_| "Processing guard failed.".to_string())
-            .and_then(|_guard| {
-                tick(
-                    &root,
-                    &store,
-                    &recordings,
-                    &settings,
-                    engine.as_ref(),
-                    &cancel,
-                )
-            });
+        // Do not start new work while a recording is capturing audio.
+        let result = if recording_in_progress() {
+            Ok(())
+        } else {
+            processing_guard()
+                .lock()
+                .map_err(|_| "Processing guard failed.".to_string())
+                .and_then(|_guard| {
+                    tick(
+                        &root,
+                        &store,
+                        &recordings,
+                        &settings,
+                        engine.as_ref(),
+                        &cancel,
+                    )
+                })
+        };
         set_error(&error, result.err());
         for _ in 0..10 {
             if cancel.load(Ordering::Acquire) {

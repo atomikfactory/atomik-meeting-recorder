@@ -11,7 +11,7 @@ use crate::{
     summary_types::SummaryOutput,
     transcription::{
         atomic_new, checksum, output_path, processing_guard, read_checkpoint, recording_directory,
-        validate_transcript,
+        recording_in_progress, validate_transcript,
     },
     transcription_store::TranscriptionStore,
     transcription_types::Transcript,
@@ -133,7 +133,7 @@ impl SummaryService {
                         };
                         while !c.load(Ordering::Acquire) {
                             let result = settings_reader().and_then(|settings| {
-                                if settings.enabled {
+                                if settings.enabled && !recording_in_progress() {
                                     let _guard = processing_guard().lock().map_err(|_| "Processing guard failed.".to_string())?;
                                     tick(&r, &s, &t, &recordings, worker_engine.as_ref(), &settings, &c)
                                 } else { Ok(()) }

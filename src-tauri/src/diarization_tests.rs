@@ -404,6 +404,41 @@ fn model_import_is_local_pinned_and_rejects_replacement_corruption() {
     assert_eq!(fs::read(copy).unwrap(), vec![4u8; 4096]);
 }
 #[test]
+fn worker_does_not_claim_jobs_while_recording_and_resumes_after() {
+    let _flag = crate::transcription::recording_flag_test_lock();
+    let f = Fixture::new();
+    f.models();
+    let engine = Arc::new(FakeEngine::default());
+    crate::transcription::set_recording_in_progress(true);
+    let service = DiarizationService::with_inhibition(
+        f.root.clone(),
+        Arc::new(|| {
+            Ok(crate::diarization::DiarizationSettings {
+                enabled: true,
+                recognize_known_voices: false,
+                extra_library_roots: Vec::new(),
+            })
+        }),
+        engine.clone(),
+        false,
+    );
+    // Several worker intervals pass; the queued job must stay untouched.
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
+    assert!(f.store.get(&f.recording.recording_id).unwrap().is_none());
+    crate::transcription::set_recording_in_progress(false);
+    let mut processed = false;
+    for _ in 0..100 {
+        if engine.calls.load(Ordering::SeqCst) == 1 {
+            processed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    service.shutdown().unwrap();
+    assert!(processed, "worker must resume once recording ends");
+}
+#[test]
 fn inhibited_service_makes_no_claims() {
     let f = Fixture::new();
     f.models();

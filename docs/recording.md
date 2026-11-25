@@ -137,6 +137,12 @@ Delete from disk refuses (and reports as skipped, never as a batch-wide error) a
 
 **What is never touched:** Delete from disk never calls AppFlowy over the network, and never removes a row from the AppFlowy pages journal (the create-only ledger of pages this app has already exported). A meeting page already exported to AppFlowy stays exactly where it is in AppFlowy; only this app's own local bookkeeping for that export job is removed.
 
+## Background work pauses during recording
+
+The recorder treats any dropped sample as fatal, and speaker diarization (sherpa-onnx), Whisper, summaries and audio compression are CPU- and disk-heavy enough to starve the capture and writer threads. A process-wide flag, `transcription::recording_in_progress()`, is therefore set by the recording engine as soon as a recording begins (before any stream is built) and cleared on every terminal path (`publish_finished`: stop, stream fault, start failure, retry-save), when the engine thread exits, and at engine startup.
+
+While it is set, the transcription, speaker, summary and compression workers skip their ticks and keep sleeping their normal interval; they resume automatically when the recording ends. Only starting new jobs is gated: a job already running when recording starts is not interrupted, because a sherpa-onnx or Whisper call cannot be cancelled mid-run. User actions such as retry or regenerate still enqueue; the worker simply waits. The AppFlowy and Atomik KB export workers are network-only and light, so they are not gated.
+
 ## Primary references
 
 - [CPAL 0.18.2 device/stream API](https://docs.rs/cpal/0.18.2/cpal/traits/trait.DeviceTrait.html)

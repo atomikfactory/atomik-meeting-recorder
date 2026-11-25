@@ -33,6 +33,7 @@ import type {
   SummaryState,
   TranscriptionState,
   VoiceProfileInfo,
+  VoiceProfileSample,
 } from "./types";
 
 export type ManagementTask = { kind: "rename" | "delete" | "restart"; id: string; title: string };
@@ -185,6 +186,9 @@ export const store = {
   speakerRegenerateHint: new Set<string>(),
   speakerReidentifyBusy: new Set<string>(),
   renderedSpeakerPanel: new Map<string, string>(),
+  speakerClipError: new Map<string, string>(),
+  speakerClipLoading: new Set<string>(),
+  speakerSaveBusy: new Set<string>(),
 
   // Settings → "Voice profiles" section.
   voiceProfiles: [] as VoiceProfileInfo[],
@@ -193,6 +197,11 @@ export const store = {
   voiceProfileRenameDrafts: new Map<string, string>(),
   voiceProfilesBusy: new Set<string>(),
   voiceProfilesForgetBusy: false,
+  voiceProfileExpanded: new Set<string>(),
+  voiceProfileSamples: new Map<string, VoiceProfileSample[]>(),
+  voiceProfileSampleErrors: new Map<string, string>(),
+  voiceProfileMergeDrafts: new Map<string, string>(),
+  voiceProfileMergeErrors: new Map<string, string>(),
 
   appState: {
     status: "idle",

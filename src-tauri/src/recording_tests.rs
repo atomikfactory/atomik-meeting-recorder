@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn levels_are_source_mapped_independent_and_cleared_on_stop() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("levels");
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
@@ -35,6 +36,7 @@ fn levels_are_source_mapped_independent_and_cleared_on_stop() {
 
 #[test]
 fn recoverable_xrun_continues_but_saved_audio_is_marked_with_gaps() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("xrun");
     let store = RecordingStore::open(&dir).unwrap();
     let state = Arc::new(Mutex::new(RecordingState::default()));
@@ -337,6 +339,7 @@ fn frame_timeline_rejects_unbounded_silence_and_overflow() {
         .offset(None, 48_000, 8, 0, &adjustments)
         .is_err());
 }
+use crate::transcription::{recording_flag_test_lock, recording_in_progress};
 use std::{
     collections::HashMap,
     sync::{
@@ -543,12 +546,16 @@ fn fault_backend(channels: u16, drop_samples: u64, malformed: bool) -> Box<dyn A
 
 #[test]
 fn fake_two_source_start_stop_records_all_tracks() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("two");
     let service = RecordingService::with_backend(dir.clone(), move || {
         backend(vec![("a", false, false, false), ("b", false, false, false)])
     });
+    assert!(!recording_in_progress());
     service.start(vec![source("a"), source("b")]).unwrap();
+    assert!(recording_in_progress());
     service.stop().unwrap();
+    assert!(!recording_in_progress());
     let state = wait_for(&service, |s| s.status == "idle" && !s.recent.is_empty());
     assert_eq!(state.recent[0].tracks.len(), 2);
     assert!(state.recent[0].tracks.iter().all(|t| t.frames_written > 0));
@@ -558,6 +565,7 @@ fn fake_two_source_start_stop_records_all_tracks() {
 
 #[test]
 fn fake_stream_fault_finalizes_without_active_recording() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("fault");
     let service = RecordingService::with_backend(dir.clone(), move || {
         backend(vec![("a", false, false, true)])
@@ -565,17 +573,23 @@ fn fake_stream_fault_finalizes_without_active_recording() {
     service.start(vec![source("a")]).unwrap();
     let state = wait_for(&service, |s| s.active.is_none() && !s.recent.is_empty());
     assert_eq!(state.recent[0].status, "failed");
+    assert!(!recording_in_progress(), "stream fault must clear the flag");
     service.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn duplicate_start_keeps_one_recording_and_empty_sources_create_none() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("duplicate");
     let service = RecordingService::with_backend(dir.clone(), move || {
         backend(vec![("a", false, false, false)])
     });
     assert!(service.start(vec![]).is_err());
+    assert!(
+        !recording_in_progress(),
+        "rejected start must not set the flag"
+    );
     assert!(service.state().recent.is_empty());
     service.start(vec![source("a")]).unwrap();
     assert!(service.start(vec![source("a")]).is_err());
@@ -588,12 +602,17 @@ fn duplicate_start_keeps_one_recording_and_empty_sources_create_none() {
 
 #[test]
 fn partial_second_build_failure_drops_first_stream_and_persists_failure() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("partial");
     let drops = Arc::new(AtomicU64::new(0));
     let expected = drops.clone();
     let service = RecordingService::with_backend(dir.clone(), move || backend_with_drop(expected));
     assert!(service.start(vec![source("a"), source("b")]).is_err());
     wait_for(&service, |s| s.active.is_none());
+    assert!(
+        !recording_in_progress(),
+        "start failure must clear the flag"
+    );
     assert!(drops.load(Ordering::SeqCst) >= 1);
     assert!(RecordingStore::open(&dir)
         .unwrap()
@@ -607,12 +626,18 @@ fn partial_second_build_failure_drops_first_stream_and_persists_failure() {
 
 #[test]
 fn graceful_shutdown_drains_and_history_survives_restart() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("restart");
     let service = RecordingService::with_backend(dir.clone(), move || {
         backend(vec![("a", false, false, false)])
     });
     service.start(vec![source("a")]).unwrap();
+    assert!(recording_in_progress());
     service.shutdown().unwrap();
+    assert!(
+        !recording_in_progress(),
+        "shutdown finalizes and clears the flag"
+    );
     let after = RecordingStore::open(&dir).unwrap().recent().unwrap();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].status, "recorded");
@@ -627,6 +652,7 @@ fn graceful_shutdown_drains_and_history_survives_restart() {
 
 #[test]
 fn dropped_samples_fault_finalizes_failed_with_exact_count() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("drops");
     let service = RecordingService::with_backend(dir.clone(), move || fault_backend(1, 4, false));
     service.start(vec![source("a")]).unwrap();
@@ -639,6 +665,7 @@ fn dropped_samples_fault_finalizes_failed_with_exact_count() {
 
 #[test]
 fn malformed_packet_writer_failure_never_records_success() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("malformed");
     let service = RecordingService::with_backend(dir.clone(), move || fault_backend(2, 0, true));
     service.start(vec![source("a")]).unwrap();
@@ -651,6 +678,7 @@ fn malformed_packet_writer_failure_never_records_success() {
 
 #[test]
 fn invalid_database_startup_keeps_bytes_and_allows_shutdown() {
+    let _flag = recording_flag_test_lock();
     let dir = temp_dir("invalid-db");
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("recordings.sqlite3");

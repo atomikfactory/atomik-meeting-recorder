@@ -100,7 +100,8 @@ export type SearchHit = { kind: string; seq: number; start_ms: number | null; en
 export type SearchMeeting = { recording_id: string; title: string; started_at: number; hits: SearchHit[] };
 export type SearchResults = { meetings: SearchMeeting[]; took_ms: number };
 export type SpeakerLabelInfo = { label: string; name: string | null; auto_identified: boolean };
-export type VoiceProfileInfo = { id: string; name: string; sample_seconds: number; updated_at: number };
+export type VoiceProfileInfo = { id: string; name: string; sample_seconds: number; sample_count: number; updated_at: number };
+export type VoiceProfileSample = { id: string; seconds: number; created_at: number; source_title: string | null };
 export type ReidentifyOutcome = { speaker: number; name: string; score: number };
 export type DetectionState = {
   supported: boolean;
